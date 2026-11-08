@@ -33,7 +33,8 @@
 // .spec.ts. Intentionally not under e2e/smoke/ — the smoke job hits the
 // prod docker stack with real Clerk middleware where /settings/* is
 // gated.
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
+import en from '../messages/en.json';
 
 const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
@@ -47,71 +48,88 @@ const API_BASE_URL =
 const HYDRATION_NESTING_PATTERN =
     /(?:cannot be a descendant of <[^>]+>|cannot contain a nested)/i;
 
+// Integrations: the hermetic stack cannot create a tracker connection
+// (POST /integrations performs a live connection test against Jira /
+// Backlog / GitHub, and the SSRF guard rejects local hosts), so the
+// integrations test serves the connection LIST from a page.route stub.
+// The contract under test is purely the frontend's DOM nesting, which
+// is rendered from that list exactly as from a real response.
+const STUB_CONNECTION = {
+    id: '11111111-2222-3333-4444-555555555555',
+    tenant_id: '00000000-0000-0000-0000-000000000001',
+    tracker_type: 'jira',
+    name: 'F207 Stub Jira',
+    base_url: 'https://f207-stub.atlassian.net',
+    auth_type: 'api_token',
+    auth_email: 'f207@example.com',
+    is_active: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+};
+
+function collectNestingErrors(page: Page): string[] {
+    const nestingErrors: string[] = [];
+    page.on('console', (msg) => {
+        if (msg.type() !== 'error') return;
+        const text = msg.text();
+        if (HYDRATION_NESTING_PATTERN.test(text)) {
+            nestingErrors.push(text);
+        }
+    });
+    page.on('pageerror', (err) => {
+        if (HYDRATION_NESTING_PATTERN.test(err.message)) {
+            nestingErrors.push(err.message);
+        }
+    });
+    return nestingErrors;
+}
+
+/** The Badge must be a <span> whose parent is the CardDescription <p>. */
+async function expectSpanBadgeInsideP(badge: Locator) {
+    await expect(badge).toBeVisible({ timeout: 15000 });
+    const shape = await badge.evaluate((el) => ({
+        tag: el.tagName.toUpperCase(),
+        parentTag: el.parentElement?.tagName.toUpperCase() ?? null,
+    }));
+    expect(shape.tag, 'Badge primitive must render as SPAN (F207)').toBe('SPAN');
+    // Pins that this really is the CardDescription violation site.
+    expect(shape.parentTag, 'Badge must sit inside CardDescription <p>').toBe('P');
+}
+
 test.describe('Badge primitive HTML nesting contract (F207)', () => {
     let seededKeyId: string | null = null;
+    const seededKeyName = `F207 Hydration Seed ${Date.now()}`;
 
     test.beforeAll(async ({ request }) => {
-        // Seed at least one tenant-level API key so the /settings/apikeys
-        // page actually renders a CardDescription with a Badge child —
-        // the empty-state branch shows a different layout that doesn't
-        // exercise the violation site.
+        // Seed a tenant-level API key so the /settings/apikeys page
+        // renders a CardDescription with a permission Badge child.
         const resp = await request.post(`${API_BASE_URL}/api/v1/apikeys`, {
-            data: {
-                name: `F207 Hydration Seed ${Date.now()}`,
-                permissions: 'read',
-            },
+            data: { name: seededKeyName, permissions: 'read' },
         });
-        if (resp.ok()) {
-            const body = await resp.json();
-            seededKeyId = body?.id ?? null;
-        }
+        expect(resp.status(), `seed API key: ${await resp.text()}`).toBe(201);
+        const body = await resp.json();
+        expect(typeof body?.id).toBe('string');
+        seededKeyId = body.id;
     });
 
     test.afterAll(async ({ request }) => {
         if (seededKeyId) {
-            await request
-                .delete(`${API_BASE_URL}/api/v1/apikeys/${seededKeyId}`)
-                .catch(() => {});
+            await request.delete(`${API_BASE_URL}/api/v1/apikeys/${seededKeyId}`);
         }
     });
 
     test('apikeys: Badge in CardDescription mounts as <span>, no <p>-nesting console error', async ({
         page,
     }) => {
-        const nestingErrors: string[] = [];
-        page.on('console', (msg) => {
-            if (msg.type() !== 'error') return;
-            const text = msg.text();
-            if (HYDRATION_NESTING_PATTERN.test(text)) {
-                nestingErrors.push(text);
-            }
-        });
-        page.on('pageerror', (err) => {
-            if (HYDRATION_NESTING_PATTERN.test(err.message)) {
-                nestingErrors.push(err.message);
-            }
-        });
+        const nestingErrors = collectNestingErrors(page);
 
         await page.goto('/en/settings/apikeys');
         await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(1500);
 
-        // If the seed succeeded the list renders at least one row whose
-        // CardDescription contains a permission Badge. If the seed
-        // failed (CI shutdown race etc.) the rest of the contract still
-        // holds — the badge primitive change is enforced structurally
-        // by the tagName check, and there must still be zero p-nesting
-        // errors regardless of branch.
-        const badges = page.locator('[class*="inline-flex"][class*="rounded-full"]');
-        const badgeCount = await badges.count();
-        if (badgeCount > 0) {
-            const tagNames = await badges.evaluateAll((els) =>
-                els.map((el) => el.tagName.toUpperCase()),
-            );
-            for (const tag of tagNames) {
-                expect(tag, 'Badge primitive must render as SPAN (F207)').toBe('SPAN');
-            }
-        }
+        const card = page.locator('div.rounded-lg', { hasText: seededKeyName }).filter({
+            has: page.getByText(en.Settings.APIKeys.permissionRead, { exact: true }),
+        }).last();
+        await expectSpanBadgeInsideP(card.getByText(en.Settings.APIKeys.permissionRead, { exact: true }));
 
         expect(
             nestingErrors,
@@ -122,37 +140,19 @@ test.describe('Badge primitive HTML nesting contract (F207)', () => {
     test('integrations: Badge in CardDescription mounts as <span>, no <p>-nesting console error', async ({
         page,
     }) => {
-        const nestingErrors: string[] = [];
-        page.on('console', (msg) => {
-            if (msg.type() !== 'error') return;
-            const text = msg.text();
-            if (HYDRATION_NESTING_PATTERN.test(text)) {
-                nestingErrors.push(text);
-            }
+        await page.route('**/api/v1/integrations', async (route) => {
+            if (route.request().method() !== 'GET') return route.fallback();
+            await route.fulfill({ json: { connections: [STUB_CONNECTION] } });
         });
-        page.on('pageerror', (err) => {
-            if (HYDRATION_NESTING_PATTERN.test(err.message)) {
-                nestingErrors.push(err.message);
-            }
-        });
+        const nestingErrors = collectNestingErrors(page);
 
         await page.goto('/en/settings/integrations');
         await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(1500);
 
-        // The integrations list may legitimately be empty in CI (no
-        // tracker connected). The badge tagName check is conditional;
-        // the no-hydration-error check is unconditional.
-        const badges = page.locator('[class*="inline-flex"][class*="rounded-full"]');
-        const badgeCount = await badges.count();
-        if (badgeCount > 0) {
-            const tagNames = await badges.evaluateAll((els) =>
-                els.map((el) => el.tagName.toUpperCase()),
-            );
-            for (const tag of tagNames) {
-                expect(tag, 'Badge primitive must render as SPAN (F207)').toBe('SPAN');
-            }
-        }
+        const card = page.locator('div.rounded-lg', { hasText: STUB_CONNECTION.name }).filter({
+            has: page.getByText(STUB_CONNECTION.base_url),
+        }).last();
+        await expectSpanBadgeInsideP(card.getByText('Jira', { exact: true }));
 
         expect(
             nestingErrors,

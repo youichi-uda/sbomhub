@@ -1,127 +1,77 @@
 import { test, expect } from '@playwright/test';
 
-// M12-1 #82: root-cause audited. The SSO page (settings/sso/page.tsx)
-// is a fully static client component — `useState(false)` for the
-// enterprise flag, no API calls, no Clerk SDK initialisation in
-// self-hosted mode (NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY empty →
-// AuthProvider short-circuits per apps/web/src/components/providers/
-// auth-provider.tsx L18). The h1 "シングルサインオン (SSO)" matches
-// the `level: 1 + name: /SSO|シングルサインオン|認証|Authentication/i`
-// filter; the sidebar h1 "SBOMHub" is excluded by the name regex.
-// Static provider list contains SAML so the OR-disjunction smoke
-// assertions pass. We switch the load-state guard from `networkidle`
-// to `domcontentloaded` as a defensive measure — the M11-2 60s hang
-// was attributed to `networkidle` blocking on the dashboard layout's
-// SubscriptionGuard billing fetch, and `domcontentloaded` fires
-// reliably before React hydration so the explicit toBeVisible timeout
-// remains the meaningful gate.
+const API_BASE_URL =
+    process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
+
+// SSO settings page (src/app/[locale]/(dashboard)/settings/sso/page.tsx).
+//
+// The page is a static, Japanese-only information page: no API calls, no
+// configuration form, no LDAP/OIDC tabs. SSO itself is configured in the
+// Clerk dashboard. The strings below are copied from the page.
+//
+// Removed (asserted nothing that exists): the former "LDAP configuration
+// fields" / "OIDC configuration fields" tests (the page has no tabs or
+// inputs), and the "SSO link in settings navigation" / "return to settings"
+// tests (/settings has no index page and nothing links to /settings/sso;
+// the page has no back link).
+//
+// M12-1 #82: `domcontentloaded` instead of `networkidle` (the dashboard
+// layout's billing fetch kept `networkidle` from settling); the explicit
+// web-first timeouts are the gate.
+const TITLE = 'シングルサインオン (SSO)';
+
 test.describe('SSO Settings', () => {
-    // M12-1 #82: same defensive `domcontentloaded` swap below.
     test('should navigate to SSO settings page', async ({ page }) => {
         await page.goto('/en/settings/sso');
         await page.waitForLoadState('domcontentloaded');
 
-        const heading = page.getByRole('heading', {
-            name: /SSO|シングルサインオン|認証|Authentication/i,
-            level: 1,
-        });
-        await expect(heading).toBeVisible({ timeout: 15000 });
+        await expect(page.getByRole('heading', { level: 1, name: TITLE })).toBeVisible({ timeout: 15000 });
+        await expect(page.getByText('企業のアイデンティティプロバイダーと連携して、セキュアな認証を実現')).toBeVisible();
     });
 
     test('should display SSO provider options', async ({ page }) => {
         await page.goto('/en/settings/sso');
-        await page.waitForLoadState('domcontentloaded');
-        await page.waitForTimeout(2000);
+        await expect(page.getByText('対応アイデンティティプロバイダー')).toBeVisible({ timeout: 15000 });
 
-        // Should show LDAP and/or OIDC options
-        const ldapOption = page.getByText(/LDAP/i);
-        const oidcOption = page.getByText(/OIDC|OpenID|OAuth/i);
-        const samlOption = page.getByText(/SAML/i);
-
-        const hasLdap = await ldapOption.isVisible().catch(() => false);
-        const hasOidc = await oidcOption.isVisible().catch(() => false);
-        const hasSaml = await samlOption.isVisible().catch(() => false);
-
-        // At least one SSO option should be visible, or enterprise message
-        expect(hasLdap || hasOidc || hasSaml || await page.locator('body').textContent()).toBeTruthy();
-    });
-
-    test('should show enterprise plan requirement if not on enterprise', async ({ page }) => {
-        await page.goto('/en/settings/sso');
-        await page.waitForLoadState('domcontentloaded');
-        await page.waitForTimeout(2000);
-
-        // May show enterprise plan requirement
-        const enterpriseMessage = page.getByText(/Enterprise|エンタープライズ|plan|プラン/i);
-        const configForm = page.locator('form');
-
-        const hasEnterpriseMessage = await enterpriseMessage.isVisible().catch(() => false);
-        const hasConfigForm = await configForm.isVisible().catch(() => false);
-
-        // Either enterprise message or config form should be visible
-        await expect(page.locator('body')).toBeVisible();
-    });
-
-    test('should display LDAP configuration fields', async ({ page }) => {
-        await page.goto('/en/settings/sso');
-        await page.waitForLoadState('domcontentloaded');
-        await page.waitForTimeout(2000);
-
-        // Look for LDAP tab or section
-        const ldapTab = page.locator('button, [role="tab"]').filter({ hasText: /LDAP/i });
-        if (await ldapTab.isVisible()) {
-            await ldapTab.click();
-            await page.waitForTimeout(500);
-
-            // Should show LDAP configuration fields
-            const hostInput = page.locator('input[name*="host"], input[placeholder*="host"]');
-            const portInput = page.locator('input[name*="port"], input[placeholder*="port"]');
-
-            const hasHost = await hostInput.isVisible().catch(() => false);
-            const hasPort = await portInput.isVisible().catch(() => false);
-
-            // Fields may or may not be visible depending on enterprise status
-            await expect(page.locator('body')).toBeVisible();
+        for (const provider of ['Microsoft Entra ID (Azure AD)', 'Okta', 'Google Workspace', 'SAML 2.0']) {
+            await expect(page.getByRole('heading', { level: 4, name: provider, exact: true })).toBeVisible();
         }
     });
 
-    test('should display OIDC configuration fields', async ({ page }) => {
+    test('should show the current authentication state', async ({ page }) => {
         await page.goto('/en/settings/sso');
-        await page.waitForLoadState('domcontentloaded');
-        await page.waitForTimeout(2000);
+        await expect(page.getByText('認証設定', { exact: true })).toBeVisible({ timeout: 15000 });
 
-        // Look for OIDC tab or section
-        const oidcTab = page.locator('button, [role="tab"]').filter({ hasText: /OIDC|OpenID/i });
-        if (await oidcTab.isVisible()) {
-            await oidcTab.click();
-            await page.waitForTimeout(500);
+        const standard = page.locator('div.rounded-lg.border', { has: page.getByRole('heading', { name: '標準認証' }) });
+        await expect(standard.getByText('有効', { exact: true })).toBeVisible();
+        const enterprise = page.locator('div.rounded-lg.border', { has: page.getByRole('heading', { name: 'Enterprise SSO', exact: true }) });
+        await expect(enterprise.getByText('未設定', { exact: true })).toBeVisible();
+    });
 
-            // Should show OIDC configuration fields
-            const issuerInput = page.locator('input[name*="issuer"], input[placeholder*="issuer"]');
-            const clientIdInput = page.locator('input[name*="client_id"], input[placeholder*="client"]');
+    test('should not show the enterprise plan requirement to an enterprise tenant', async ({ page, request }) => {
+        test.fixme(true, 'BUG: settings/sso/page.tsx hard-codes isEnterprise=false, so the "Enterprise プランが必要です" alert shows for the enterprise tenant; its upgrade link (/settings/billing) is also a 404 (billing lives at /billing)');
 
-            const hasIssuer = await issuerInput.isVisible().catch(() => false);
-            const hasClientId = await clientIdInput.isVisible().catch(() => false);
+        const sub = await request.get(`${API_BASE_URL}/api/v1/subscription`);
+        expect(sub.status()).toBe(200);
+        expect((await sub.json()).plan).toBe('enterprise');
 
-            // Fields may or may not be visible depending on enterprise status
-            await expect(page.locator('body')).toBeVisible();
-        }
+        await page.goto('/en/settings/sso');
+        await expect(page.getByRole('heading', { level: 1, name: TITLE })).toBeVisible({ timeout: 15000 });
+        await expect(page.getByText('Enterprise プランが必要です', { exact: true })).toHaveCount(0);
     });
 
     test('should handle Clerk Enterprise SSO info', async ({ page }) => {
         await page.goto('/en/settings/sso');
-        await page.waitForLoadState('domcontentloaded');
-        await page.waitForTimeout(2000);
+        await expect(page.getByText('SSO 設定手順')).toBeVisible({ timeout: 15000 });
 
-        // Should show Clerk-related SSO information
-        const clerkInfo = page.getByText(/Clerk|managed|マネージド/i);
-        const enterpriseInfo = page.getByText(/Enterprise|エンタープライズ/i);
+        await expect(page.getByRole('heading', { name: 'Clerk ダッシュボードで SSO を設定' })).toBeVisible();
+        const dashboard = page.getByRole('link', { name: 'Clerk ダッシュボードを開く' });
+        await expect(dashboard).toHaveAttribute('href', 'https://dashboard.clerk.com');
+        await expect(dashboard).toHaveAttribute('target', '_blank');
 
-        const hasClerkInfo = await clerkInfo.isVisible().catch(() => false);
-        const hasEnterpriseInfo = await enterpriseInfo.isVisible().catch(() => false);
-
-        // Page should load successfully
-        await expect(page.locator('body')).toBeVisible();
+        const docs = page.getByRole('link', { name: /Clerk Enterprise SSO ガイド/ });
+        await expect(docs).toHaveAttribute('href', 'https://clerk.com/docs/authentication/enterprise-connections');
+        await expect(page.getByRole('link', { name: /SAML 設定ガイド/ })).toHaveAttribute('href', 'https://clerk.com/docs/authentication/saml');
     });
 });
 
@@ -130,51 +80,8 @@ test.describe('SSO Settings in Japanese', () => {
         await page.goto('/ja/settings/sso');
         await page.waitForLoadState('domcontentloaded');
 
-        // Should show Japanese content
-        const japaneseLabels = ['SSO', '認証', 'シングルサインオン', 'LDAP', 'OIDC'];
-        let foundLabel = false;
-
-        for (const label of japaneseLabels) {
-            const element = page.getByText(label);
-            if (await element.isVisible().catch(() => false)) {
-                foundLabel = true;
-                break;
-            }
-        }
-
-        // Page should load
-        await expect(page.locator('body')).toBeVisible();
-    });
-});
-
-test.describe('SSO Navigation', () => {
-    test('should have SSO link in settings navigation', async ({ page }) => {
-        await page.goto('/en/settings');
-        await page.waitForLoadState('domcontentloaded');
-        await page.waitForTimeout(2000);
-
-        // Look for SSO link in navigation
-        const ssoLink = page.locator('a, button').filter({ hasText: /SSO|認証|Authentication/i });
-
-        if (await ssoLink.isVisible()) {
-            await ssoLink.click();
-            await page.waitForLoadState('domcontentloaded');
-
-            // Should navigate to SSO settings
-            expect(page.url()).toContain('sso');
-        }
-    });
-
-    test('should return to settings from SSO page', async ({ page }) => {
-        await page.goto('/en/settings/sso');
-        await page.waitForLoadState('domcontentloaded');
-        await page.waitForTimeout(2000);
-
-        // Look for back button or settings link
-        const backLink = page.locator('a, button').filter({ hasText: /Back|戻る|Settings|設定/i });
-
-        if (await backLink.first().isVisible()) {
-            await expect(page.locator('body')).toBeVisible();
-        }
+        await expect(page.getByRole('heading', { level: 1, name: TITLE })).toBeVisible({ timeout: 15000 });
+        await expect(page.getByText('対応アイデンティティプロバイダー')).toBeVisible();
+        await expect(page.getByRole('button', { name: 'サポートに問い合わせ' })).toBeVisible();
     });
 });

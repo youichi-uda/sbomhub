@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { createProject, deleteProject, uniqueName } from './fixtures/vuln-project';
 
 // M31 F406 (#141) — Evidence Pack format toggle (Markdown / Zip).
 //
@@ -23,39 +24,32 @@ import { test, expect, type Page } from '@playwright/test';
 // intercept holds regardless of the NEXT_PUBLIC_API_URL the web build
 // points at.
 
-const API_BASE_URL =
-  process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
-
-// Helper to check if the page was redirected to sign-in (SaaS/auth mode).
-async function isRedirectedToSignIn(page: Page): Promise<boolean> {
-  const url = page.url();
-  return url.includes('/sign-in') || url.includes('/login');
+// The CI stack runs in self-hosted anonymous mode: a redirect to sign-in
+// is a failure, not a reason to stop asserting.
+async function expectNotRedirectedToSignIn(page: Page): Promise<void> {
+  await expect(page).not.toHaveURL(/\/(sign-in|login)/);
 }
 
 test.describe('Evidence Pack format toggle (M31 F406)', () => {
-  let projectId: string;
+  let projectId = '';
 
   test.beforeAll(async ({ request }) => {
-    const projectResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-      data: {
-        name: `Evidence Pack Test Project ${Date.now()}`,
-        description: 'Project for Evidence Pack format toggle E2E tests',
-      },
-    });
-    const project = await projectResponse.json();
+    const project = await createProject(
+      request,
+      uniqueName('Evidence Pack Test Project'),
+      'Project for Evidence Pack format toggle E2E tests',
+    );
     projectId = project.id;
   });
 
   test.afterAll(async ({ request }) => {
-    if (projectId) {
-      await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
-    }
+    await deleteProject(request, projectId);
   });
 
   test('renders the format toggle with Markdown + Zip options', async ({ page }) => {
     await page.goto(`/en/projects/${projectId}`);
     await page.waitForLoadState('networkidle');
-    if (await isRedirectedToSignIn(page)) return;
+    await expectNotRedirectedToSignIn(page);
 
     const select = page.getByTestId('evidence-pack-format');
     await expect(select).toBeVisible({ timeout: 10000 });
@@ -105,7 +99,7 @@ test.describe('Evidence Pack format toggle (M31 F406)', () => {
 
     await page.goto(`/en/projects/${projectId}`);
     await page.waitForLoadState('networkidle');
-    if (await isRedirectedToSignIn(page)) return;
+    await expectNotRedirectedToSignIn(page);
 
     const select = page.getByTestId('evidence-pack-format');
     await expect(select).toBeVisible({ timeout: 10000 });
@@ -149,7 +143,7 @@ test.describe('Evidence Pack format toggle (M31 F406)', () => {
 
     await page.goto(`/en/projects/${projectId}`);
     await page.waitForLoadState('networkidle');
-    if (await isRedirectedToSignIn(page)) return;
+    await expectNotRedirectedToSignIn(page);
 
     const select = page.getByTestId('evidence-pack-format');
     await expect(select).toBeVisible({ timeout: 10000 });
@@ -182,7 +176,7 @@ test.describe('Evidence Pack format toggle (M31 F406)', () => {
 
     await page.goto(`/en/projects/${projectId}`);
     await page.waitForLoadState('networkidle');
-    if (await isRedirectedToSignIn(page)) return;
+    await expectNotRedirectedToSignIn(page);
 
     const select = page.getByTestId('evidence-pack-format');
     await expect(select).toBeVisible({ timeout: 10000 });

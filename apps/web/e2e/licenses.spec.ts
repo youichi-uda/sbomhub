@@ -1,8 +1,7 @@
 import { test, expect } from '@playwright/test';
 import en from '../messages/en.json';
 
-const API_BASE_URL =
-    process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
+import { API_BASE_URL, createProject, uniqueName, uploadSbom } from './fixtures/vuln-project';
 
 // M12-1 #82: root-cause audited (F164-style page-side hydration audit).
 // The per-project Licenses tab DOES exist on /projects/:id — see
@@ -19,16 +18,11 @@ const API_BASE_URL =
 // header trigger so `nth(1)` is the form submit).
 test.describe('License Policy Management', () => {
     let projectId: string;
+    let sbomId: string;
 
     test.beforeAll(async ({ request }) => {
         // Create a test project
-        const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-            data: {
-                name: `License Test Project ${Date.now()}`,
-                description: 'Project for license policy E2E tests',
-            },
-        });
-        const project = await response.json();
+        const project = await createProject(request, uniqueName('License Test Project'), 'Project for license policy E2E tests');
         projectId = project.id;
 
         // Upload SBOM with licensed components
@@ -58,10 +52,7 @@ test.describe('License Policy Management', () => {
             ],
         };
 
-        await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/sbom`, {
-            data: JSON.stringify(sbom),
-            headers: { 'Content-Type': 'application/json' },
-        });
+        sbomId = await uploadSbom(request, projectId, sbom);
     });
 
     test.afterAll(async ({ request }) => {
@@ -162,22 +153,44 @@ test.describe('License Policy Management', () => {
         await expect(page.getByText('GNU GPL v3.0')).toBeVisible();
     });
 
-    test('should check license violations', async ({ page }) => {
-        await page.goto(`/en/projects/${projectId}`);
-        await page.waitForLoadState('networkidle');
+    test('should check license violations', async ({ page, request }) => {
+        // Deny Apache-2.0: the SBOM's apache-component now violates it.
+        const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/licenses`, {
+            data: {
+                license_id: 'Apache-2.0',
+                license_name: 'Apache License 2.0',
+                policy_type: 'denied',
+                reason: 'E2E: Apache-2.0 denied for the violation check',
+            },
+        });
+        expect(createResponse.ok(), `policy create returned ${createResponse.status()}`).toBe(true);
+        const policy = await createResponse.json();
 
-        await page.getByRole('button', { name: /Licenses?|License|ライセンス/i }).click();
-        await page.waitForTimeout(500);
+        try {
+            // The server reports the violation...
+            const violationsRes = await request.get(
+                `${API_BASE_URL}/api/v1/projects/${projectId}/licenses/violations?sbom_id=${sbomId}`,
+            );
+            expect(violationsRes.status()).toBe(200);
+            const violations = ((await violationsRes.json()) ?? []) as Array<{ component_name: string; policy_type: string }>;
+            expect(violations).toContainEqual(expect.objectContaining({ component_name: 'apache-component', policy_type: 'denied' }));
 
-        // Look for violations section or check button
-        const checkButton = page.getByRole('button', { name: /Check Violations|違反チェック/i });
-        if (await checkButton.isVisible()) {
-            await checkButton.click();
-            await page.waitForTimeout(1000);
+            // ...and the Licenses tab lists it, with the same count.
+            await page.goto(`/en/projects/${projectId}`);
+            await page.getByRole('button', { name: /Licenses?|License|ライセンス/i }).click();
+            await expect(page.getByRole('heading', { name: `${en.ProjectDetail.licenseViolations} (${violations.length})` }))
+                .toBeVisible({ timeout: 10000 });
+            const row = page.locator('div.border-red-200', { hasText: 'apache-component' });
+            await expect(row).toHaveCount(1);
+            await expect(row).toContainText('3.0.0');
+            await expect(row).toContainText('Apache-2.0');
+            await expect(row).toContainText('denied');
+            await expect(row).toContainText('E2E: Apache-2.0 denied for the violation check');
+            // mit-component is allowed / unconstrained: no violation row.
+            await expect(page.locator('div.border-red-200', { hasText: 'mit-component' })).toHaveCount(0);
+        } finally {
+            await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}/licenses/${policy.id}`);
         }
-
-        // Violations may or may not be shown depending on policies
-        await expect(page.locator('body')).toBeVisible();
     });
 
     test('should delete license policy', async ({ page, request }) => {

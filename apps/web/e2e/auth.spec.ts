@@ -1,4 +1,8 @@
 import { test, expect } from '@playwright/test';
+import ja from '../messages/ja.json';
+
+const jaNav = ja.Navigation;
+const jaProjects = ja.Projects;
 
 test.describe('Authentication Flow', () => {
     test('should allow access to public pages without auth', async ({ page }) => {
@@ -114,19 +118,18 @@ test.describe('Authentication Flow', () => {
     });
 
     test('should maintain language preference across pages', async ({ page }) => {
-        // Start in Japanese
-        await page.goto('/ja');
+        // Start in Japanese on a dashboard page (the sidebar is there).
+        await page.goto('/ja/dashboard');
         await page.waitForLoadState('networkidle');
 
-        // Navigate to another page
-        const projectsLink = page.getByRole('link', { name: /Projects|プロジェクト/i }).first();
-        if (await projectsLink.isVisible()) {
-            await projectsLink.click();
-            await page.waitForLoadState('networkidle');
+        // Sidebar links are locale-less (href="/projects"); the locale
+        // must be carried over to the next page.
+        const projectsLink = page.getByRole('link', { name: jaNav.projects, exact: true });
+        await expect(projectsLink).toBeVisible({ timeout: 10000 });
+        await projectsLink.click();
 
-            // URL should still have /ja
-            await expect(page).toHaveURL(/\/ja/);
-        }
+        await expect(page).toHaveURL(/\/ja\/projects$/);
+        await expect(page.getByRole('heading', { level: 1, name: jaProjects.title })).toBeVisible();
     });
 
     test('should access public SBOM link without auth', async ({ page }) => {

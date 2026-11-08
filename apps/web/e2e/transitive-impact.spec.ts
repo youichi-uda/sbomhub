@@ -19,9 +19,10 @@ import { test, expect, type Page } from '@playwright/test';
 //   - the F400 contradictory-state banners never co-occur
 
 // Helper to check if the page was redirected to sign-in (SaaS/auth mode).
-async function isRedirectedToSignIn(page: Page): Promise<boolean> {
-  const url = page.url();
-  return url.includes('/sign-in') || url.includes('/login');
+// The CI stack runs in self-hosted anonymous mode: a redirect to sign-in
+// is a failure, not a reason to stop asserting.
+async function expectNotRedirectedToSignIn(page: Page): Promise<void> {
+  await expect(page).not.toHaveURL(/\/(sign-in|login)/);
 }
 
 const CVE = 'CVE-2021-44228';
@@ -94,14 +95,13 @@ async function mockSearch(page: Page, paths: unknown, impact: unknown = IMPACT) 
   );
 }
 
-async function runSearch(page: Page): Promise<boolean> {
+async function runSearch(page: Page): Promise<void> {
   await page.goto('/en/search');
   await page.waitForLoadState('networkidle');
-  if (await isRedirectedToSignIn(page)) return false;
+  await expectNotRedirectedToSignIn(page);
   await page.getByPlaceholder(CVE).fill(CVE);
   await page.getByRole('button', { name: 'Search' }).first().click();
   await expect(page.getByTestId('transitive-impact')).toBeVisible({ timeout: 10000 });
-  return true;
 }
 
 test.describe('Cross-project transitive blast-radius (M30 F403)', () => {
@@ -169,7 +169,7 @@ test.describe('Cross-project transitive blast-radius (M30 F403)', () => {
       });
     });
 
-    if (!(await runSearch(page))) return;
+    await runSearch(page);
 
     // Lazy: the paths endpoint is NOT hit until the toggle is clicked.
     expect(outstanding).toBe(0);
@@ -236,7 +236,7 @@ test.describe('Cross-project transitive blast-radius (M30 F403)', () => {
       ],
     };
     await mockSearch(page, paths);
-    if (!(await runSearch(page))) return;
+    await runSearch(page);
     await page.getByTestId('transitive-impact-toggle').click();
 
     const degraded = page.getByTestId('transitive-impact-degraded');
@@ -288,7 +288,7 @@ test.describe('Cross-project transitive blast-radius (M30 F403)', () => {
       ],
     };
     await mockSearch(page, paths);
-    if (!(await runSearch(page))) return;
+    await runSearch(page);
     await page.getByTestId('transitive-impact-toggle').click();
 
     const notInGraph = page.getByTestId('transitive-impact-not-in-graph');
@@ -345,7 +345,7 @@ test.describe('Cross-project transitive blast-radius (M30 F403)', () => {
       ],
     };
     await mockSearch(page, paths);
-    if (!(await runSearch(page))) return;
+    await runSearch(page);
     await page.getByTestId('transitive-impact-toggle').click();
 
     // Truncated WITH paths → "showing N", plus the chain still renders.
@@ -377,7 +377,7 @@ test.describe('Cross-project transitive blast-radius (M30 F403)', () => {
     // Impact also reports 0 so the two surfaces agree (not a fabricated state).
     const impactZero = { ...IMPACT, affected_project_count: 0, affected_projects: [] };
     await mockSearch(page, paths, impactZero);
-    if (!(await runSearch(page))) return;
+    await runSearch(page);
     await page.getByTestId('transitive-impact-toggle').click();
 
     await expect(page.getByTestId('transitive-impact-empty')).toBeVisible();

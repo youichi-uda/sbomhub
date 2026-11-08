@@ -1,7 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-const API_BASE_URL =
-    process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
+import { API_BASE_URL, createProject, deleteProject } from './fixtures/vuln-project';
 
 test.describe('Error Handling', () => {
     test('should display 404 page for non-existent project', async ({ page }) => {
@@ -76,13 +75,11 @@ test.describe('Error Handling', () => {
     test('should handle project deletion of already deleted project', async ({ page, request }) => {
         // Create and immediately delete a project
         const projectName = `Deleted Project ${Date.now()}`;
-        const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-            data: { name: projectName, description: 'Will be deleted' },
-        });
-        const project = await createResponse.json();
+        const project = await createProject(request, projectName, 'Will be deleted');
 
         // Delete via API
-        await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
+        const deleted = await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
+        expect(deleted.ok(), `DELETE returned ${deleted.status()}`).toBe(true);
 
         // Try to access the deleted project
         await page.goto(`/en/projects/${project.id}`);
@@ -96,10 +93,7 @@ test.describe('Error Handling', () => {
     test('should show validation error for invalid SBOM upload', async ({ page, request }) => {
         // Create a project
         const projectName = `Invalid SBOM Test ${Date.now()}`;
-        const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-            data: { name: projectName, description: 'For invalid SBOM test' },
-        });
-        const project = await createResponse.json();
+        const project = await createProject(request, projectName, 'For invalid SBOM test');
 
         // Try to upload invalid SBOM
         const invalidSbom = {
@@ -131,10 +125,7 @@ test.describe('Error Handling', () => {
 
     test('should handle empty SBOM components gracefully', async ({ page, request }) => {
         const projectName = `Empty SBOM Test ${Date.now()}`;
-        const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-            data: { name: projectName, description: 'For empty SBOM test' },
-        });
-        const project = await createResponse.json();
+        const project = await createProject(request, projectName, 'For empty SBOM test');
 
         // Upload SBOM with no components
         const emptySbom = {
@@ -144,10 +135,11 @@ test.describe('Error Handling', () => {
             components: [],
         };
 
-        await request.post(`${API_BASE_URL}/api/v1/projects/${project.id}/sbom`, {
+        const upload = await request.post(`${API_BASE_URL}/api/v1/projects/${project.id}/sbom`, {
             data: JSON.stringify(emptySbom),
             headers: { 'Content-Type': 'application/json' },
         });
+        expect(upload.ok(), `empty SBOM upload returned ${upload.status()}`).toBe(true);
 
         // Navigate to project
         await page.goto(`/en/projects/${project.id}`);
@@ -170,29 +162,12 @@ test.describe('Error Handling', () => {
         await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
     });
 
-    // M11-2 #77 (deferred to M12): in dev:test / self-hosted-auth
-    // mode the seed tenant is always authorized, so this assertion
-    // ("login prompt OR settings page") falls through both branches.
-    // Implementing an anonymous-request shim under the empty Clerk
-    // publishable-key flow needs a Next.js middleware or route-
-    // group split (anonymous → /sign-in mount, authed → dashboard).
-    // That's a multi-file refactor and crosses the M11-2 file scope —
-    // re-skipped with the clearer M12 hand-off.
-    test.skip('should display error for unauthorized access', async ({ page }) => {
-        // Try to access settings without proper authorization
-        await page.goto('/en/settings');
-        await page.waitForTimeout(1000);
-
-        // Should show login prompt or unauthorized error
-        const loginPrompt = page.getByText(/sign in|login|ログイン|unauthorized|認証/i);
-        const settingsPage = page.getByRole('heading', { name: /Settings|設定/i });
-
-        const needsLogin = await loginPrompt.isVisible().catch(() => false);
-        const hasAccess = await settingsPage.isVisible().catch(() => false);
-
-        // Either shows login prompt or settings page (if already authorized)
-        expect(needsLogin || hasAccess).toBeTruthy();
-    });
+    // (Removed: "should display error for unauthorized access". It was a
+    // reasonless declaration-form skip since M11-2. The CI stack runs in
+    // self-hosted anonymous mode where every request is the seeded admin,
+    // so there is no unauthorized state to reach, and the page it visited,
+    // /en/settings, does not exist (404). Auth redirects are covered by
+    // auth.spec.ts.)
 
     test('should handle API error responses gracefully', async ({ page }) => {
         // Intercept API and return error response
@@ -218,41 +193,44 @@ test.describe('Error Handling', () => {
         expect(hasError || hasContent).toBeTruthy();
     });
 
-    // M11-2 #77 (deferred to M12 — product decision): the API
-    // currently allows duplicate project names within a tenant. The
-    // product question is whether two projects called "My App" in
-    // the same tenant should be (a) merged client-side via dedup
-    // hint, (b) rejected with a 409, or (c) silently coexist with
-    // distinct UUIDs (current behaviour). Each option has a
-    // different migration / UX cost. Re-skipped here so M11 doesn't
-    // ship a half-thought constraint that would force a rollback.
-    test.skip('should prevent duplicate project creation', async ({ page, request }) => {
-        // Create a project
+    // Duplicate project names: the API deliberately allows them within a
+    // tenant (M11-2 #77 left the dedup / 409 question as a product
+    // decision). This pins the current behaviour — two projects, distinct
+    // ids, both listed — so a change to it is a visible, deliberate one.
+    test('should allow duplicate project names as distinct projects', async ({ page, request }) => {
         const projectName = `Duplicate Test ${Date.now()}`;
-        await request.post(`${API_BASE_URL}/api/v1/projects`, {
-            data: { name: projectName, description: 'Original' },
-        });
+        const original = await createProject(request, projectName, 'Original');
+        try {
+            await page.goto('/en/projects');
+            await page.getByRole('button', { name: /New Project/i }).first().click();
+            await expect(page.getByPlaceholder('My Project')).toBeVisible({ timeout: 5000 });
+            await page.getByPlaceholder('My Project').fill(projectName);
+            await page.getByPlaceholder('Project description').fill('Duplicate attempt');
 
-        // Try to create another project with the same name via UI
-        await page.goto('/en/projects');
-        await page.getByRole('button', { name: /New Project/i }).click();
-        await expect(page.getByPlaceholder('My Project')).toBeVisible({ timeout: 5000 });
+            const created = page.waitForResponse(
+                (r) => r.request().method() === 'POST' && r.url().endsWith('/api/v1/projects'),
+            );
+            await page.locator('.fixed button:has-text("Create")').click();
+            const response = await created;
+            expect(response.status()).toBe(201);
+            const duplicateId = (await response.json()).id as string;
+            expect(duplicateId).not.toBe(original.id);
 
-        await page.getByPlaceholder('My Project').fill(projectName);
-        await page.getByPlaceholder('Project description').fill('Duplicate attempt');
-        await page.locator('.fixed button:has-text("Create")').click();
-
-        await page.waitForTimeout(2000);
-
-        // Either error is shown or project is created with modified name
-        const errorMessage = page.getByText(/already exists|duplicate|重複|既に存在/i);
-        const projectCreated = page.getByText(projectName);
-
-        const hasError = await errorMessage.isVisible().catch(() => false);
-        const hasProject = await projectCreated.isVisible().catch(() => false);
-
-        // Either shows error or the project(s) exist
-        expect(hasError || hasProject).toBeTruthy();
+            // Both are listed, in the UI and in the API.
+            await expect(page.getByRole('link', { name: projectName, exact: true })).toHaveCount(2, { timeout: 10000 });
+            const list = await request.get(`${API_BASE_URL}/api/v1/projects`);
+            expect(list.status()).toBe(200);
+            const ids = ((await list.json()) as Array<{ id: string; name: string }>)
+                .filter((p) => p.name === projectName)
+                .map((p) => p.id)
+                .sort();
+            expect(ids).toEqual([original.id, duplicateId].sort());
+        } finally {
+            const list = await request.get(`${API_BASE_URL}/api/v1/projects`);
+            for (const p of ((await list.json()) ?? []) as Array<{ id: string; name: string }>) {
+                if (p.name === projectName) await deleteProject(request, p.id);
+            }
+        }
     });
 
     test('should handle session expiration gracefully', async ({ page }) => {
@@ -282,10 +260,7 @@ test.describe('Error Handling', () => {
 
     test('should handle large file upload error', async ({ page, request }) => {
         const projectName = `Large File Test ${Date.now()}`;
-        const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-            data: { name: projectName, description: 'For large file test' },
-        });
-        const project = await createResponse.json();
+        const project = await createProject(request, projectName, 'For large file test');
 
         // Create a very large SBOM (simulated with many components)
         const components = [];

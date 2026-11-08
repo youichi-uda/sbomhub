@@ -1,144 +1,82 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+import en from '../messages/en.json';
+import { API_BASE_URL, createProject, deleteProject, uniqueName, uploadSbom } from './fixtures/vuln-project';
 
-const API_BASE_URL =
-    process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
+// Records every native dialog (alert/confirm/prompt) the page opens: an
+// injected handler that ran would show up here.
+function recordDialogs(page: Page): string[] {
+    const seen: string[] = [];
+    page.on('dialog', async (dialog) => {
+        seen.push(`${dialog.type()}: ${dialog.message()}`);
+        await dialog.dismiss();
+    });
+    return seen;
+}
 
 test.describe('Security Tests', () => {
-    let projectId: string;
+    let projectId = '';
 
     test.beforeAll(async ({ request }) => {
-        // Create a test project
-        const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-            data: {
-                name: `Security Test Project ${Date.now()}`,
-                description: 'Project for security E2E tests',
-            },
-        });
-        const project = await response.json();
+        const project = await createProject(request, uniqueName('Security Test Project'), 'Project for security E2E tests');
         projectId = project.id;
     });
 
     test.afterAll(async ({ request }) => {
-        if (projectId) {
-            await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
-        }
+        await deleteProject(request, projectId);
     });
 
     test.describe('XSS Prevention', () => {
         test('should sanitize script tags in project name', async ({ page, request }) => {
             const xssPayload = `<script>alert('XSS')</script>Test${Date.now()}`;
+            const project = await createProject(request, xssPayload, 'XSS test project');
+            try {
+                const dialogs = recordDialogs(page);
 
-            // Create project with XSS payload via API
-            const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-                data: {
-                    name: xssPayload,
-                    description: 'XSS test project',
-                },
-            });
+                // Listed as literal text...
+                await page.goto('/en/projects');
+                await expect(page.getByRole('link', { name: xssPayload, exact: true })).toBeVisible({ timeout: 15000 });
 
-            const project = await response.json();
-            const testProjectId = project.id;
-
-            // Navigate to projects list
-            await page.goto('/en/projects');
-            await page.waitForTimeout(1000);
-
-            // The script should not execute - page should still be functional
-            await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible();
-
-            // Check for console errors related to XSS
-            const consoleErrors: string[] = [];
-            page.on('console', msg => {
-                if (msg.type() === 'error') {
-                    consoleErrors.push(msg.text());
-                }
-            });
-
-            // Navigate to project detail
-            await page.goto(`/en/projects/${testProjectId}`);
-            await page.waitForTimeout(1000);
-
-            // Page should still be functional
-            await expect(page.getByText('Back to Projects')).toBeVisible();
-
-            // Script content should be visible as text, not executed
-            const scriptText = page.getByText(/script.*alert/i);
-            const isEscaped = await scriptText.isVisible().catch(() => false);
-
-            // Either the script text is visible (escaped) or the name was sanitized
-            expect(isEscaped || await page.locator('main').isVisible()).toBeTruthy();
-
-            // No XSS-related errors should have occurred
-            const hasXSSError = consoleErrors.some(err => err.includes('XSS') || err.includes('unsafe'));
-            expect(hasXSSError).toBeFalsy();
-
-            // Cleanup
-            await request.delete(`${API_BASE_URL}/api/v1/projects/${testProjectId}`);
+                // ...and shown as the literal page title on the detail page.
+                await page.goto(`/en/projects/${project.id}`);
+                await expect(page.getByRole('heading', { level: 1, name: xssPayload, exact: true })).toBeVisible({ timeout: 15000 });
+                await expect(page.locator('main script')).toHaveCount(0);
+                expect(dialogs).toEqual([]);
+            } finally {
+                await deleteProject(request, project.id);
+            }
         });
 
         test('should sanitize img tag with onerror in project name', async ({ page, request }) => {
             const xssPayload = `<img src=x onerror=alert('XSS')>Project${Date.now()}`;
+            const project = await createProject(request, xssPayload, 'Image XSS test');
+            try {
+                const dialogs = recordDialogs(page);
+                await page.goto(`/en/projects/${project.id}`);
 
-            const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-                data: {
-                    name: xssPayload,
-                    description: 'Image XSS test',
-                },
-            });
-
-            const project = await response.json();
-            const testProjectId = project.id;
-
-            // Listen for any JavaScript alerts (which would indicate XSS)
-            let alertTriggered = false;
-            page.on('dialog', async dialog => {
-                alertTriggered = true;
-                await dialog.dismiss();
-            });
-
-            await page.goto(`/en/projects/${testProjectId}`);
-            await page.waitForTimeout(2000);
-
-            // No alert should have been triggered
-            expect(alertTriggered).toBeFalsy();
-
-            // Cleanup
-            await request.delete(`${API_BASE_URL}/api/v1/projects/${testProjectId}`);
+                await expect(page.getByRole('heading', { level: 1, name: xssPayload, exact: true })).toBeVisible({ timeout: 15000 });
+                await expect(page.locator('main img[src="x"]')).toHaveCount(0);
+                expect(dialogs).toEqual([]);
+            } finally {
+                await deleteProject(request, project.id);
+            }
         });
 
         test('should sanitize event handlers in project description', async ({ page, request }) => {
             const xssPayload = `<div onmouseover="alert('XSS')">Hover me</div>`;
+            const project = await createProject(request, uniqueName('Event Handler Test'), xssPayload);
+            try {
+                const dialogs = recordDialogs(page);
+                await page.goto(`/en/projects/${project.id}`);
 
-            const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-                data: {
-                    name: `Event Handler Test ${Date.now()}`,
-                    description: xssPayload,
-                },
-            });
-
-            const project = await response.json();
-            const testProjectId = project.id;
-
-            let alertTriggered = false;
-            page.on('dialog', async dialog => {
-                alertTriggered = true;
-                await dialog.dismiss();
-            });
-
-            await page.goto(`/en/projects/${testProjectId}`);
-            await page.waitForTimeout(1000);
-
-            // Try to trigger the event handler
-            const hoverElement = page.getByText('Hover me');
-            if (await hoverElement.isVisible()) {
-                await hoverElement.hover();
-                await page.waitForTimeout(500);
+                // The description is literal text; hovering it runs nothing.
+                const description = page.getByText(xssPayload, { exact: true });
+                await expect(description).toBeVisible({ timeout: 15000 });
+                await description.hover();
+                await expect(page.locator('main [onmouseover]')).toHaveCount(0);
+                expect(dialogs).toEqual([]);
+            } finally {
+                await deleteProject(request, project.id);
             }
-
-            expect(alertTriggered).toBeFalsy();
-
-            // Cleanup
-            await request.delete(`${API_BASE_URL}/api/v1/projects/${testProjectId}`);
         });
 
         test('should handle javascript: protocol in links', async ({ page }) => {
@@ -154,46 +92,23 @@ test.describe('Security Tests', () => {
         test('should escape HTML entities in component names', async ({ page, request }) => {
             const htmlPayload = `<b>Bold</b><i>Italic</i><a href="http://evil.com">Link</a>`;
 
-            // Upload SBOM with HTML in component name
-            const sbom = {
+            await uploadSbom(request, projectId, {
                 bomFormat: 'CycloneDX',
                 specVersion: '1.4',
                 version: 1,
                 components: [
-                    {
-                        type: 'library',
-                        name: htmlPayload,
-                        version: '1.0.0',
-                        licenses: [{ license: { id: 'MIT' } }],
-                    },
+                    { type: 'library', name: htmlPayload, version: '1.0.0', licenses: [{ license: { id: 'MIT' } }] },
                 ],
-            };
-
-            await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/sbom`, {
-                data: JSON.stringify(sbom),
-                headers: { 'Content-Type': 'application/json' },
             });
 
             await page.goto(`/en/projects/${projectId}`);
-            await page.waitForLoadState('networkidle');
-
             await page.getByRole('button', { name: /Components/i }).click();
-            await page.waitForTimeout(1000);
 
-            // HTML should be escaped, not rendered
-            const boldElement = page.locator('b').filter({ hasText: 'Bold' });
-            const italicElement = page.locator('i').filter({ hasText: 'Italic' });
-
-            // These elements should NOT exist (HTML not rendered)
-            const hasBold = await boldElement.isVisible().catch(() => false);
-            const hasItalic = await italicElement.isVisible().catch(() => false);
-
-            // The raw HTML text should be visible instead
-            const escapedText = page.getByText(/<b>Bold<\/b>/);
-            const hasEscaped = await escapedText.isVisible().catch(() => false);
-
-            // Either HTML is escaped or not rendered at all
-            expect(!hasBold || hasEscaped).toBeTruthy();
+            // The raw markup is shown as text; none of it became elements.
+            await expect(page.getByText(htmlPayload, { exact: true })).toBeVisible({ timeout: 15000 });
+            await expect(page.locator('main b', { hasText: 'Bold' })).toHaveCount(0);
+            await expect(page.locator('main i', { hasText: 'Italic' })).toHaveCount(0);
+            await expect(page.locator('main a[href="http://evil.com"]')).toHaveCount(0);
         });
 
         // M11-2 #77: re-enabled. The previous failure was the spec
@@ -210,111 +125,55 @@ test.describe('Security Tests', () => {
             await page.waitForTimeout(1000);
 
             // Check that no bold element was created from our input
-            const boldFromSearch = page.locator('b').filter({ hasText: 'CVE-TEST' });
-            const hasBold = await boldFromSearch.isVisible().catch(() => false);
-
-            expect(hasBold).toBeFalsy();
+            await expect(cveInput).toHaveValue('<b>CVE-TEST</b>');
+            await expect(page.locator('main b', { hasText: 'CVE-TEST' })).toHaveCount(0);
         });
     });
 
     test.describe('Special Character Handling', () => {
         test('should handle Unicode characters correctly', async ({ page, request }) => {
             const unicodeName = `Project 日本語 中文 한국어 العربية ${Date.now()}`;
-
-            const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-                data: {
-                    name: unicodeName,
-                    description: '多言語テスト Multilingual test مشروع',
-                },
-            });
-
-            const project = await response.json();
-
-            await page.goto(`/en/projects/${project.id}`);
-            await page.waitForLoadState('networkidle');
-
-            // Unicode characters should be displayed correctly
-            await expect(page.getByText('日本語')).toBeVisible();
-            await expect(page.getByText('中文')).toBeVisible();
-
-            // Cleanup
-            await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
+            const description = '多言語テスト Multilingual test مشروع';
+            const project = await createProject(request, unicodeName, description);
+            try {
+                await page.goto(`/en/projects/${project.id}`);
+                await expect(page.getByRole('heading', { level: 1, name: unicodeName, exact: true })).toBeVisible({ timeout: 15000 });
+                await expect(page.getByText(description, { exact: true })).toBeVisible();
+            } finally {
+                await deleteProject(request, project.id);
+            }
         });
 
         test('should handle emoji in project names', async ({ page, request }) => {
             const emojiName = `🚀 Rocket Project 🔥💻🛡️ ${Date.now()}`;
-
-            const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-                data: {
-                    name: emojiName,
-                    description: 'Project with 🎉 emoji 🎊',
-                },
-            });
-
-            const project = await response.json();
-
-            await page.goto(`/en/projects/${project.id}`);
-            await page.waitForLoadState('networkidle');
-
-            // Emoji should be displayed
-            await expect(page.getByText('🚀')).toBeVisible();
-
-            // Cleanup
-            await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
-        });
-
-        // M11-2 #77: re-enabled with the documented safety posture.
-        // The current behaviour is "API accepts the request and lets
-        // Postgres reject the null byte at the wire layer (postgres
-        // text columns refuse `\x00`)" — so the response is one of
-        // 200/201 (sanitised) or 400/500-class (rejected). The
-        // assertion accepts any of those; what matters is that no
-        // injection executes server-side, which a parameterised
-        // INSERT guarantees regardless of payload content.
-        test('should handle null bytes and control characters', async ({ page, request }) => {
-            // Note: Most systems will strip or reject null bytes
-            const controlChars = `Project\x00Test\x1F${Date.now()}`;
-
-            const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-                data: {
-                    name: controlChars,
-                    description: 'Control character test',
-                },
-            });
-
-            // API should either accept and sanitize, or reject. We
-            // accept 5xx here too: PostgreSQL's text columns refuse
-            // \x00 at the protocol layer ("invalid byte sequence for
-            // encoding") which surfaces as a 500 from the API. That's
-            // a safe outcome — no injection ran — so the assertion
-            // permits the full safe-outcome envelope.
-            expect([200, 201, 400, 422, 500]).toContain(response.status());
-
-            if (response.ok()) {
-                const project = await response.json();
-                await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
+            const project = await createProject(request, emojiName, 'Project with 🎉 emoji 🎊');
+            try {
+                await page.goto(`/en/projects/${project.id}`);
+                await expect(page.getByRole('heading', { level: 1, name: emojiName, exact: true })).toBeVisible({ timeout: 15000 });
+                await expect(page.getByText('Project with 🎉 emoji 🎊', { exact: true })).toBeVisible();
+            } finally {
+                await deleteProject(request, project.id);
             }
         });
 
-        test('should handle very long input strings', async ({ page }) => {
-            await page.goto('/en/projects');
+        test('should reject null bytes and control characters as invalid input', async ({ request }) => {
+            test.fixme(true, 'BUG: a project name containing a NUL byte makes POST /api/v1/projects return 500 "failed to create project" (Postgres rejects \\x00) instead of a 400 validation error');
+            const controlChars = `Project\x00Test\x1F${Date.now()}`;
 
-            await page.getByRole('button', { name: /New Project/i }).click();
-            await expect(page.getByPlaceholder('My Project')).toBeVisible({ timeout: 5000 });
-
-            // Try to enter a very long string
-            const longString = 'A'.repeat(10000);
-            await page.getByPlaceholder('My Project').fill(longString);
-
-            // Input should be truncated or validation should show
-            const inputValue = await page.getByPlaceholder('My Project').inputValue();
-
-            // Either truncated or limited
-            expect(inputValue.length).toBeLessThanOrEqual(10000);
-
-            // Close dialog
-            await page.keyboard.press('Escape');
+            const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
+                data: { name: controlChars, description: 'Control character test' },
+            });
+            try {
+                expect(response.status()).toBe(400);
+            } finally {
+                if (response.ok()) await deleteProject(request, (await response.json()).id);
+            }
         });
+
+        // (Removed: "should handle very long input strings". It asserted
+        // `value.length <= 10000` after filling 10000 characters, which
+        // cannot fail. Over-long names are covered by projects.spec.ts
+        // "should handle long project name".)
     });
 
     test.describe('SQL Injection Prevention', () => {
@@ -373,36 +232,36 @@ test.describe('Security Tests', () => {
         //   subsequent projects-list health check sees the post-write
         //   state rather than racing it.
         test('should handle SQL injection in project creation', async ({ page, request }) => {
-            const sqlPayload = "Test'; DROP TABLE projects; --";
+            const sqlPayload = `Test'; DROP TABLE projects; -- ${Date.now()}`;
+            const description = "1'; DELETE FROM projects;--";
 
-            // Create project with SQL injection payload
             await page.goto('/en/projects');
             await page.getByRole('button', { name: /New Project/i }).first().click();
             await expect(page.getByPlaceholder('My Project')).toBeVisible({ timeout: 5000 });
-
             await page.getByPlaceholder('My Project').fill(sqlPayload);
-            await page.getByPlaceholder('Project description').fill("1'; DELETE FROM projects;--");
-            // Dialog "Create" button sits inside [role="dialog"], so
-            // scope by role to avoid matching the outer "New Project"
-            // CTA on the page.
+            await page.getByPlaceholder('Project description').fill(description);
+
             const createResponse = page.waitForResponse(
-                (resp) =>
-                    resp.url().includes('/api/v1/projects') &&
-                    resp.request().method() === 'POST',
+                (resp) => resp.url().endsWith('/api/v1/projects') && resp.request().method() === 'POST',
                 { timeout: 15000 },
             );
             await page.locator('[role="dialog"]').getByRole('button', { name: /^Create$/ }).click();
-            await createResponse.catch(() => undefined);
+            const created = await createResponse;
+            expect(created.status()).toBe(201);
+            const createdId = (await created.json()).id as string;
 
-            // Page should still be functional. Scope to main so the
-            // sidebar h1 ("SBOMHub") does not interfere.
-            await expect(
-                page.locator('main').getByRole('heading', { name: 'Projects', level: 1 }),
-            ).toBeVisible();
-
-            // Projects should still exist (table not dropped)
-            const projectsResponse = await request.get(`${API_BASE_URL}/api/v1/projects`);
-            expect(projectsResponse.ok()).toBeTruthy();
+            try {
+                // Stored verbatim (parameterised), listed as text, and the
+                // projects table is intact (the suite's own project survives).
+                await expect(page.getByRole('link', { name: sqlPayload, exact: true })).toBeVisible({ timeout: 10000 });
+                const projectsResponse = await request.get(`${API_BASE_URL}/api/v1/projects`);
+                expect(projectsResponse.status()).toBe(200);
+                const projects = (await projectsResponse.json()) as Array<{ id: string; name: string; description: string }>;
+                expect(projects.find((p) => p.id === createdId)).toMatchObject({ name: sqlPayload, description });
+                expect(projects.map((p) => p.id)).toContain(projectId);
+            } finally {
+                await deleteProject(request, createdId);
+            }
         });
     });
 
@@ -417,96 +276,62 @@ test.describe('Security Tests', () => {
 
             for (const payload of pathTraversalPayloads) {
                 await page.goto(`/en/projects/${encodeURIComponent(payload)}`);
-                await page.waitForTimeout(500);
-
-                // Should show 404 or error, not expose system files
-                const notFound = page.getByText(/not found|404|error|見つかりません/i);
-                const hasNotFound = await notFound.isVisible().catch(() => false);
-
-                // Should either show 404 or redirect to safe page
-                expect(hasNotFound || await page.url().includes('/projects')).toBeTruthy();
+                // Treated as an unknown project id; no file content leaks.
+                await expect(page.locator('main')).toHaveText(en.Common.projectNotFound, { timeout: 15000 });
+                await expect(page.locator('body')).not.toContainText('root:');
             }
         });
     });
 
     test.describe('CSRF Protection', () => {
-        test('should reject cross-origin API requests', async ({ request }) => {
-            // This test simulates a cross-origin request by including Origin header
-            const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-                data: {
-                    name: 'CSRF Test',
-                    description: 'CSRF test project',
-                },
-                headers: {
-                    'Origin': 'http://evil.com',
-                    'Referer': 'http://evil.com/attack.html',
-                },
-            });
+        // The API is JSON-only, so a cross-site write needs a CORS
+        // preflight; what protects it is that the API never grants CORS to
+        // a foreign origin. (Server-side, a request carrying a foreign
+        // Origin is processed like any other — CORS is browser-enforced.)
+        test('should not grant CORS to a foreign origin', async ({ request, baseURL }) => {
+            const preflight = (origin: string) =>
+                request.fetch(`${API_BASE_URL}/api/v1/projects`, {
+                    method: 'OPTIONS',
+                    headers: {
+                        Origin: origin,
+                        'Access-Control-Request-Method': 'POST',
+                        'Access-Control-Request-Headers': 'content-type',
+                    },
+                });
 
-            // Depending on CORS configuration, this might be rejected or allowed
-            // We just verify the request doesn't cause server error
-            expect([200, 201, 400, 403, 404]).toContain(response.status());
+            const evil = await preflight('http://evil.com');
+            expect(evil.status()).toBe(204);
+            expect(evil.headers()['access-control-allow-origin']).toBeUndefined();
+            expect(evil.headers()['access-control-allow-methods']).toBeUndefined();
+
+            // Positive control: the web app's own origin is allowed.
+            const appOrigin = new URL(baseURL!).origin;
+            const own = await preflight(appOrigin);
+            expect(own.headers()['access-control-allow-origin']).toBe(appOrigin);
         });
     });
 
     test.describe('Content Security', () => {
         test('should have appropriate security headers', async ({ page }) => {
+            test.fixme(true, 'BUG: web pages are served with no security headers (no X-Content-Type-Options, X-Frame-Options / CSP frame-ancestors, Referrer-Policy) and with X-Powered-By: Next.js');
             const response = await page.goto('/en/projects');
-
-            if (response) {
-                const headers = response.headers();
-
-                // Check for common security headers
-                // Note: These may or may not be present depending on configuration
-                const securityHeaders = [
-                    'x-content-type-options',
-                    'x-frame-options',
-                    'x-xss-protection',
-                    'content-security-policy',
-                    'strict-transport-security',
-                ];
-
-                // Log which headers are present for information
-                for (const header of securityHeaders) {
-                    if (headers[header]) {
-                        console.log(`${header}: ${headers[header]}`);
-                    }
-                }
-
-                // Page should load successfully regardless
-                await expect(page.locator('main')).toBeVisible();
-            }
+            expect(response).not.toBeNull();
+            const headers = response!.headers();
+            expect(headers['x-content-type-options']).toBe('nosniff');
+            expect(headers['x-frame-options'] ?? headers['content-security-policy'] ?? '').toMatch(/DENY|SAMEORIGIN|frame-ancestors/i);
+            expect(headers['referrer-policy']).toBeTruthy();
+            expect(headers['x-powered-by']).toBeUndefined();
         });
 
         test('should not expose sensitive information in error pages', async ({ page }) => {
-            // Trigger an error
             await page.goto('/en/projects/invalid-id-12345');
-            await page.waitForTimeout(1000);
+            await expect(page.locator('main')).toHaveText(en.Common.projectNotFound, { timeout: 15000 });
 
-            // Get page content
-            const pageContent = await page.content();
-
-            // Should not contain stack traces or internal paths
-            const sensitivePatterns = [
-                /at\s+\w+\s+\(/i,  // Stack trace pattern
-                /node_modules/i,
-                /internal/i,
-                /password/i,
-                /secret/i,
-                /api[_-]?key/i,
-            ];
-
-            for (const pattern of sensitivePatterns) {
-                // These patterns should not be visible in the rendered page
-                const matches = pageContent.toLowerCase().match(pattern);
-                // Log for debugging but don't fail on common words
-                if (matches) {
-                    console.log(`Found pattern: ${pattern}`);
-                }
+            // The rendered text carries no stack trace, internal path or secret.
+            const text = await page.locator('body').innerText();
+            for (const pattern of [/at\s+\w+\s+\(/, /node_modules/i, /\.go:\d+/, /password/i, /secret/i, /api[_-]?key/i, /sql/i]) {
+                expect(text, `rendered error page must not match ${pattern}`).not.toMatch(pattern);
             }
-
-            // Page should still be functional
-            await expect(page.locator('body')).toBeVisible();
         });
     });
 });

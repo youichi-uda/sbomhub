@@ -57,9 +57,38 @@ async function expectDeleteConfirm(seen: () => string | null): Promise<void> {
     .toBe(`confirm: ${DELETE_CONFIRM}`);
 }
 
+// Deletes every project with exactly this name (UI-created projects have no
+// id in the test; this keeps them from accumulating across runs).
+async function deleteProjectsNamed(request: APIRequestContext, name: string): Promise<void> {
+  const res = await request.get(`${API_BASE_URL}/api/v1/projects`);
+  expect(res.status()).toBe(200);
+  for (const p of ((await res.json()) ?? []) as Array<{ id: string; name: string }>) {
+    if (p.name === name) await request.delete(`${API_BASE_URL}/api/v1/projects/${p.id}`);
+  }
+}
+
+// Records every native dialog (alert/confirm) the page opens: an injected
+// script that ran would show up here.
+function recordDialogs(page: Page): string[] {
+  const seen: string[] = [];
+  page.on('dialog', async (dialog) => {
+    seen.push(`${dialog.type()}: ${dialog.message()}`);
+    await dialog.dismiss();
+  });
+  return seen;
+}
+
 test.describe('Projects', () => {
+  // Names of projects a test creates through the UI; removed in afterEach.
+  let uiCreated: string[] = [];
+
   test.beforeEach(async ({ page }) => {
+    uiCreated = [];
     await page.goto('/en/projects');
+  });
+
+  test.afterEach(async ({ request }) => {
+    for (const name of uiCreated) await deleteProjectsNamed(request, name);
   });
 
   test('should display projects list page', async ({ page }) => {
@@ -79,6 +108,7 @@ test.describe('Projects', () => {
 
     // Fill in project details using placeholder
     const projectName = `Test Project ${Date.now()}`;
+    uiCreated.push(projectName);
     const projectDescription = 'E2E test project description with details';
     await page.getByPlaceholder('My Project').fill(projectName);
     await page.getByPlaceholder('Project description').fill(projectDescription);
@@ -100,11 +130,9 @@ test.describe('Projects', () => {
     const uploadButton = page.getByRole('button', { name: /Upload SBOM/i });
     await expect(uploadButton).toBeVisible({ timeout: 10000 });
 
-    // Verify description is displayed on detail page (may be in different location)
-    const descriptionVisible = await page.getByText(projectDescription).isVisible().catch(() => false);
-    if (descriptionVisible) {
-      await expect(page.getByText(projectDescription)).toBeVisible();
-    }
+    // The detail page shows the name and the description under it.
+    await expect(page.getByRole('heading', { level: 1, name: projectName })).toBeVisible();
+    await expect(page.getByText(projectDescription, { exact: true })).toBeVisible();
   });
 
   test('should create a project with Japanese name', async ({ page }) => {
@@ -114,6 +142,7 @@ test.describe('Projects', () => {
 
     // Fill in Japanese project name
     const projectName = `テストプロジェクト ${Date.now()}`;
+    uiCreated.push(projectName);
     const projectDescription = 'これは日本語の説明文です';
     await page.getByPlaceholder('My Project').fill(projectName);
     await page.getByPlaceholder('Project description').fill(projectDescription);
@@ -130,46 +159,50 @@ test.describe('Projects', () => {
   });
 
   test('should handle XSS attempt in project name safely', async ({ page }) => {
-    // Click new project button
+    const dialogs = recordDialogs(page);
     await page.getByRole('button', { name: /New Project/i }).first().click();
     await expect(page.getByPlaceholder('My Project')).toBeVisible({ timeout: 5000 });
 
     // Attempt XSS injection in project name
     const xssPayload = `<script>alert('xss')</script>Test${Date.now()}`;
+    uiCreated.push(xssPayload);
     await page.getByPlaceholder('My Project').fill(xssPayload);
     await page.getByPlaceholder('Project description').fill('XSS test description');
 
-    // Submit form
+    const created = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && r.url().endsWith('/api/v1/projects'),
+    );
     await page.locator('.fixed button:has-text("Create")').click();
+    expect((await created).status()).toBe(201);
 
-    // Wait for response
-    await page.waitForTimeout(2000);
-
-    // Verify no script execution occurred (page should still be functional)
-    await expect(page.getByRole('heading', { name: 'Projects', level: 1 })).toBeVisible();
-
-    // If project was created, verify the script tag is escaped/sanitized
-    const projectText = page.getByText(xssPayload);
-    if (await projectText.isVisible().catch(() => false)) {
-      // The text should be visible as plain text, not executed
-      await expect(projectText).toBeVisible();
-    }
+    // The name is rendered as literal text (escaped), in the list and on the
+    // detail page, and nothing was executed.
+    const link = page.getByRole('link', { name: xssPayload, exact: true });
+    await expect(link).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('main script')).toHaveCount(0);
+    await link.click();
+    await expect(page.getByRole('heading', { level: 1, name: xssPayload })).toBeVisible();
+    await expect(page.locator('main script')).toHaveCount(0);
+    expect(dialogs).toEqual([]);
   });
 
   test('should handle HTML injection attempt safely', async ({ page }) => {
+    const dialogs = recordDialogs(page);
     await page.getByRole('button', { name: /New Project/i }).first().click();
     await expect(page.getByPlaceholder('My Project')).toBeVisible({ timeout: 5000 });
 
     // Attempt HTML injection
     const htmlPayload = `<img src=x onerror=alert('xss')>Project${Date.now()}`;
+    uiCreated.push(htmlPayload);
     await page.getByPlaceholder('My Project').fill(htmlPayload);
     await page.getByPlaceholder('Project description').fill('HTML injection test');
 
     await page.locator('.fixed button:has-text("Create")').click();
-    await page.waitForTimeout(2000);
 
-    // Page should remain functional
-    await expect(page.getByRole('heading', { name: 'Projects', level: 1 })).toBeVisible();
+    // Shown as text; no <img> element was created; no alert fired.
+    await expect(page.getByRole('link', { name: htmlPayload, exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('main img[src="x"]')).toHaveCount(0);
+    expect(dialogs).toEqual([]);
   });
 
   test('should handle special characters and emoji in project name', async ({ page }) => {
@@ -178,6 +211,7 @@ test.describe('Projects', () => {
 
     // Use special characters and emoji
     const specialName = `Project 🚀 ñ ü © ${Date.now()}`;
+    uiCreated.push(specialName);
     await page.getByPlaceholder('My Project').fill(specialName);
     await page.getByPlaceholder('Project description').fill('Special chars: ñ ü ö ä © ®');
 
@@ -187,23 +221,17 @@ test.describe('Projects', () => {
     await expect(page.getByText(specialName)).toBeVisible({ timeout: 10000 });
   });
 
-  test('should navigate to project detail page', async ({ page }) => {
-    // Wait for projects to load
-    await page.waitForLoadState('networkidle');
-    await page.waitForTimeout(1000);
+  test('should navigate to project detail page', async ({ page, request }) => {
+    const project = await createProjectViaApi(request, `Navigate Project ${Date.now()}`);
+    try {
+      await page.reload();
+      await projectCard(page, project.name).getByRole('link', { name: project.name, exact: true }).click();
 
-    // Click on the first project's view button (arrow icon)
-    const firstProject = page.locator('[href*="/projects/"]').first();
-    if (await firstProject.isVisible()) {
-      await firstProject.click();
-
-      // Wait for page load
-      await page.waitForLoadState('networkidle');
-      await page.waitForTimeout(1000);
-
-      // Verify we're on the project detail page - check for Upload SBOM button
-      const uploadButton = page.getByRole('button', { name: /Upload SBOM/i });
-      await expect(uploadButton).toBeVisible({ timeout: 10000 });
+      await expect(page).toHaveURL(new RegExp(`/projects/${project.id}$`));
+      await expect(page.getByRole('heading', { level: 1, name: project.name })).toBeVisible();
+      await expect(page.getByRole('button', { name: /Upload SBOM/i })).toBeVisible({ timeout: 10000 });
+    } finally {
+      await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
     }
   });
 
@@ -291,80 +319,72 @@ test.describe('Projects', () => {
     await expect(page.getByPlaceholder('My Project')).toBeVisible();
   });
 
-  test('should handle long project name', async ({ page }) => {
-    // Click new project button
-    await page.getByRole('button', { name: /New Project/i }).first().click();
+  test('should handle long project name', async ({ page, request }) => {
+    test.fixme(true, 'BUG: a 300-char project name makes POST /api/v1/projects return 500 "failed to create project" (should be a 400 validation error), and the create dialog shows no error at all');
 
-    // Wait for dialog content to appear
+    await page.getByRole('button', { name: /New Project/i }).first().click();
     await expect(page.getByPlaceholder('My Project')).toBeVisible({ timeout: 5000 });
 
-    // Create a very long project name (256+ characters)
+    // A very long project name (256+ characters)
     const longProjectName = 'A'.repeat(300);
+    uiCreated.push(longProjectName);
     await page.getByPlaceholder('My Project').fill(longProjectName);
     await page.getByPlaceholder('Project description').fill('E2E test for long project name');
 
-    // Try to submit form
+    const created = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && r.url().endsWith('/api/v1/projects'),
+    );
     await page.locator('.fixed button:has-text("Create")').click();
 
-    // Wait a moment for validation or API response
-    await page.waitForTimeout(2000);
-
-    // Check the outcome - either:
-    // 1. Validation error is shown (name too long)
-    // 2. The dialog is still open
-    // 3. The project was created (possibly truncated)
-    // 4. An error toast appeared
-    // 5. The page is still functional
-    const hasLengthError = await page.getByText(/too long|maximum|limit|exceed|characters/i).isVisible().catch(() => false);
-    const dialogStillOpen = await page.getByPlaceholder('My Project').isVisible().catch(() => false);
-    const projectCreated = await page.getByText(longProjectName.substring(0, 50)).isVisible().catch(() => false);
-    const hasError = await page.getByText(/error|エラー/i).isVisible().catch(() => false);
-    const pageStillWorks = await page.getByRole('heading', { name: 'Projects', level: 1 }).isVisible().catch(() => false);
-
-    // Any of these outcomes is acceptable
-    expect(hasLengthError || dialogStillOpen || projectCreated || hasError || pageStillWorks).toBeTruthy();
+    // Rejected as invalid input, the dialog stays open with an error, and
+    // no project was stored.
+    expect((await created).status()).toBe(400);
+    await expect(page.getByPlaceholder('My Project')).toHaveValue(longProjectName);
+    await expect(page.locator('.fixed').getByText(/too long|maximum|characters/i)).toBeVisible();
+    const res = await request.get(`${API_BASE_URL}/api/v1/projects`);
+    const names = ((await res.json()) ?? []).map((p: { name: string }) => p.name);
+    expect(names).not.toContain(longProjectName);
   });
 
   test('should display project count correctly', async ({ page, request }) => {
-    // Get initial project count from API
-    const response = await request.get(`${API_BASE_URL}/api/v1/projects`);
-    const projects = await response.json();
-    const initialCount = Array.isArray(projects) ? projects.length : 0;
-
-    // Verify the UI shows the correct count or list of projects
-    if (initialCount > 0) {
-      // Wait for projects to load
-      await page.waitForTimeout(1000);
-      // Verify at least some project cards/rows are visible
-      const projectLinks = page.locator('[href*="/projects/"]');
-      expect(await projectLinks.count()).toBeGreaterThan(0);
+    const project = await createProjectViaApi(request, `Count Project ${Date.now()}`);
+    try {
+      // Other suites create/delete projects concurrently: compare the UI and
+      // the API in one retried step.
+      await expect(async () => {
+        await page.reload();
+        await expect(projectCard(page, project.name)).toHaveCount(1);
+        const response = await request.get(`${API_BASE_URL}/api/v1/projects`);
+        expect(response.status()).toBe(200);
+        const apiCount = ((await response.json()) ?? []).length;
+        expect(apiCount).toBeGreaterThan(0);
+        const titleLinks = page.locator('div.bg-card h3 a[href*="/projects/"]');
+        expect(await titleLinks.count()).toBe(apiCount);
+      }).toPass({ timeout: 20000 });
+    } finally {
+      await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
     }
   });
 
-  test('should navigate to project detail and back', async ({ page }) => {
-    // Wait for projects to load
-    await page.waitForTimeout(1000);
-
-    // Click on the first project
-    const firstProject = page.locator('[href*="/projects/"]').first();
-    if (await firstProject.isVisible()) {
-      const projectName = await firstProject.textContent();
-      await firstProject.click();
+  test('should navigate to project detail and back', async ({ page, request }) => {
+    const project = await createProjectViaApi(request, `Back Nav Project ${Date.now()}`);
+    try {
+      await page.reload();
+      await projectCard(page, project.name).getByRole('link', { name: project.name, exact: true }).click();
 
       // Verify we're on the project detail page
-      await expect(page.getByText('Back to Projects')).toBeVisible();
+      await expect(page.getByRole('heading', { level: 1, name: project.name })).toBeVisible();
       await expect(page.getByRole('button', { name: /Upload SBOM/i })).toBeVisible();
 
       // Navigate back
-      await page.getByText('Back to Projects').click();
+      await page.getByRole('link', { name: en.ProjectDetail.backToProjects }).click();
 
-      // Verify we're back on projects list
+      // Back on the list, which still has the project
+      await expect(page).toHaveURL(/\/en\/projects$/);
       await expect(page.getByRole('heading', { name: 'Projects', level: 1 })).toBeVisible();
-
-      // Verify the project is still in the list
-      if (projectName) {
-        await expect(page.getByText(projectName.trim())).toBeVisible();
-      }
+      await expect(projectCard(page, project.name)).toHaveCount(1);
+    } finally {
+      await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
     }
   });
 });

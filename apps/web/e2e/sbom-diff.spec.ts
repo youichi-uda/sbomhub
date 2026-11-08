@@ -57,19 +57,11 @@ test.describe('SBOM Diff', () => {
     expect(targetSbomResponse.ok()).toBeTruthy();
     console.log('Uploaded target SBOM, status:', targetSbomResponse.status());
 
-    // Wait for the async processing to complete
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Verify SBOMs were actually created by fetching them
+    // Both SBOMs must be visible through the API before the UI test runs.
     const sbomsResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/sboms`);
-    console.log('SBOMs GET status:', sbomsResponse.status());
-    if (sbomsResponse.ok()) {
-      const sboms = await sbomsResponse.json();
-      console.log('SBOMs count after upload:', sboms?.length || 0);
-      expect(sboms.length).toBeGreaterThanOrEqual(2);
-    } else {
-      console.log('SBOMs GET failed, response:', await sbomsResponse.text());
-    }
+    expect(sbomsResponse.status(), await sbomsResponse.text()).toBe(200);
+    const sboms = await sbomsResponse.json();
+    expect(sboms.length).toBe(2);
   });
 
   test.afterAll(async ({ request }) => {

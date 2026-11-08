@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
-const API_BASE_URL =
-    process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
+import en from '../messages/en.json';
+import { API_BASE_URL, createProject, uniqueName } from './fixtures/vuln-project';
 
 // M13-1 #87 (F174): un-skipped. Option (A) was chosen — the project
 // detail page now carries an "API Keys" tab driving the
@@ -16,13 +16,7 @@ test.describe('API Keys Management', () => {
 
     test.beforeAll(async ({ request }) => {
         // Create a test project
-        const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-            data: {
-                name: `API Keys Test Project ${Date.now()}`,
-                description: 'Project for API keys E2E tests',
-            },
-        });
-        const project = await response.json();
+        const project = await createProject(request, uniqueName('API Keys Test Project'), 'Project for API keys E2E tests');
         projectId = project.id;
     });
 
@@ -93,63 +87,60 @@ test.describe('API Keys Management', () => {
     });
 
     test('should display API key prefix in list', async ({ page, request }) => {
-        // First create an API key via API (permissions is optional)
+        // Create an API key via API (permissions is optional)
         const response = await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/apikeys`, {
-            data: {
-                name: 'List Test Key',
-            },
+            data: { name: 'List Test Key' },
         });
-
-        // Log response for debugging
-        console.log('API Key creation status:', response.status());
+        expect(response.status(), await response.text()).toBe(201);
+        const key = await response.json();
+        expect(typeof key.key_prefix).toBe('string');
 
         await page.goto(`/en/projects/${projectId}`);
-        await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(2000);
-
         await page.locator('button').filter({ hasText: /API Keys/i }).click();
-        await page.waitForTimeout(1000);
 
-        // Should show key entry with the name and prefix displayed as "(key_prefix...)"
-        // The UI shows: key.name followed by (key.key_prefix...)
-        await expect(page.getByText('List Test Key')).toBeVisible({ timeout: 10000 });
+        // The row shows the name and the prefix.
+        const row = page.locator('.border.rounded-lg.p-3').filter({ hasText: 'List Test Key' });
+        await expect(row).toHaveCount(1, { timeout: 10000 });
+        await expect(row).toContainText(key.key_prefix);
     });
 
     test('should show delete confirmation for API key', async ({ page, request }) => {
-        // Create an API key via API
-        await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/apikeys`, {
-            data: {
-                name: 'Delete Test Key',
-            },
+        const name = `Confirm Delete Key ${Date.now()}`;
+        const response = await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/apikeys`, {
+            data: { name },
         });
+        expect(response.status(), await response.text()).toBe(201);
+        const key = await response.json();
 
         await page.goto(`/en/projects/${projectId}`);
-        await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(2000);
-
         await page.locator('button').filter({ hasText: /API Keys/i }).click();
-        await page.waitForTimeout(1000);
 
-        // Find and click delete button (uses Trash icon, has text-red-500 class)
-        const deleteButton = page.locator('button.text-red-500').first();
-        if (await deleteButton.isVisible({ timeout: 5000 }).catch(() => false)) {
-            await deleteButton.click();
+        const row = page.locator('.border.rounded-lg.p-3').filter({ hasText: name });
+        const deleteButton = row.getByRole('button', { name: en.ProjectDetail.apiKeyDelete, exact: true });
+        await expect(deleteButton).toBeVisible({ timeout: 10000 });
 
-            // The page uses window.confirm() for deletion, so we need to handle the dialog
-            // The confirmation uses "Delete this API key? This action cannot be undone."
-            page.on('dialog', dialog => dialog.dismiss());
+        // Native confirm(): record it and press Cancel.
+        let seen: string | null = null;
+        page.once('dialog', async (dialog) => {
+            seen = `${dialog.type()}: ${dialog.message()}`;
+            await dialog.dismiss();
+        });
+        await deleteButton.click();
+        await expect.poll(() => seen).toBe(`confirm: ${en.ProjectDetail.deleteApiKeyConfirm}`);
 
-            // Just verify the delete button exists
-            await expect(deleteButton).toBeVisible();
-        }
+        // Cancel keeps the key, in the UI and in the API.
+        await expect(row).toHaveCount(1);
+        const list = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/apikeys`);
+        expect(list.status()).toBe(200);
+        expect(((await list.json()) as Array<{ id: string }>).map((k) => k.id)).toContain(key.id);
     });
 
     test('should delete API key', async ({ page, request }) => {
         // Create an API key via API with a unique name for this test
-        const uniqueName = `Delete Test Key ${Date.now()}`;
+        const keyName = `Delete Test Key ${Date.now()}`;
         const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/apikeys`, {
             data: {
-                name: uniqueName,
+                name: keyName,
             },
         });
         const key = await createResponse.json();
@@ -163,11 +154,11 @@ test.describe('API Keys Management', () => {
         await page.waitForTimeout(1000);
 
         // Wait for the key to appear in the list first
-        await expect(page.getByText(uniqueName)).toBeVisible({ timeout: 10000 });
+        await expect(page.getByText(keyName)).toBeVisible({ timeout: 10000 });
 
         // Find the delete button within the same row as the key name
         // The key list item structure has the key name and a delete button in the same container
-        const keyRow = page.locator('.border.rounded-lg.p-3').filter({ hasText: uniqueName });
+        const keyRow = page.locator('.border.rounded-lg.p-3').filter({ hasText: keyName });
         const deleteButton = keyRow.locator('button').filter({ hasText: 'Delete' });
         await expect(deleteButton).toBeVisible({ timeout: 5000 });
 
@@ -202,6 +193,6 @@ test.describe('API Keys Management', () => {
         await page.waitForTimeout(1000);
 
         // Verify the key is no longer present
-        await expect(page.getByText(uniqueName)).toBeHidden({ timeout: 10000 });
+        await expect(page.getByText(keyName)).toBeHidden({ timeout: 10000 });
     });
 });

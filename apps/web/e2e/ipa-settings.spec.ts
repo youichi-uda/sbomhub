@@ -1,4 +1,8 @@
 import { test, expect } from '@playwright/test';
+import en from '../messages/en.json';
+import ja from '../messages/ja.json';
+
+const IPA = en.Settings.IPA;
 
 const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
@@ -66,41 +70,57 @@ test.describe('IPA Settings', () => {
         await enableSwitch.click();
     });
 
-    test('should save IPA settings', async ({ page }) => {
-        await page.goto('/en/settings/ipa');
-        await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(2000);
+    test('should save IPA settings', async ({ page, request }) => {
+        // Known starting point (tenant-wide settings; restored below).
+        const reset = await request.put(`${API_BASE_URL}/api/v1/settings/ipa`, {
+            data: { enabled: true, notify_on_new: true, notify_severity: ['CRITICAL', 'HIGH'] },
+        });
+        expect(reset.status()).toBe(200);
 
-        // Handle any alert dialogs
-        page.on('dialog', dialog => dialog.accept());
+        try {
+            await page.goto('/en/settings/ipa');
+            const medium = page.getByRole('checkbox', { name: 'Medium' });
+            await expect(medium).toHaveAttribute('aria-checked', 'false', { timeout: 15000 });
+            await medium.click();
+            await expect(medium).toHaveAttribute('aria-checked', 'true');
 
-        // Find and click save button - button text is "設定を保存" or contains "保存"
-        const saveButton = page.locator('button').filter({ hasText: /保存|Save/i });
-        await saveButton.waitFor({ state: 'visible', timeout: 10000 });
-        await saveButton.click();
+            const saved = page.waitForResponse(
+                (r) => r.url().endsWith('/api/v1/settings/ipa') && r.request().method() === 'PUT',
+            );
+            await page.getByRole('button', { name: IPA.saveSettings }).click();
+            expect((await saved).status()).toBe(200);
+            await expect(page.getByRole('button', { name: IPA.saveSettings })).toBeEnabled();
 
-        // Wait for save to complete
-        await page.waitForTimeout(2000);
+            // Persisted server-side...
+            const res = await request.get(`${API_BASE_URL}/api/v1/settings/ipa`);
+            expect(res.status()).toBe(200);
+            expect(((await res.json()).notify_severity as string[]).sort()).toEqual(['CRITICAL', 'HIGH', 'MEDIUM']);
 
-        // Page should still be visible (no error)
-        await expect(page.locator('body')).toBeVisible();
+            // ...and shown after a reload.
+            await page.reload();
+            await expect(page.getByRole('checkbox', { name: 'Medium' })).toHaveAttribute('aria-checked', 'true', { timeout: 15000 });
+        } finally {
+            await request.put(`${API_BASE_URL}/api/v1/settings/ipa`, {
+                data: { enabled: true, notify_on_new: true, notify_severity: ['CRITICAL', 'HIGH'] },
+            });
+        }
     });
 
     test('should trigger manual sync', async ({ page }) => {
         await page.goto('/en/settings/ipa');
-        await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(2000);
+        const syncButton = page.getByRole('button', { name: IPA.syncNow });
+        await expect(syncButton).toBeEnabled({ timeout: 15000 });
 
-        // Look for sync now button
-        const syncButton = page.locator('button').filter({ hasText: /Sync|同期/i });
+        const synced = page.waitForResponse(
+            (r) => r.url().endsWith('/api/v1/ipa/sync') && r.request().method() === 'POST',
+        );
+        await syncButton.click();
+        expect((await synced).status()).toBe(200);
 
-        if (await syncButton.isVisible()) {
-            await syncButton.click();
-            await page.waitForTimeout(3000);
-
-            // Should show sync result or remain on page
-            await expect(page.locator('body')).toBeVisible();
-        }
+        // The result counters are shown (the hermetic stack fetches nothing, so 0/0).
+        await expect(page.getByText(new RegExp(`^${IPA.new}: \\d+$`))).toBeVisible();
+        await expect(page.getByText(new RegExp(`^${IPA.updated}: \\d+$`))).toBeVisible();
+        await expect(syncButton).toBeEnabled();
     });
 });
 
@@ -147,19 +167,8 @@ test.describe('IPA in Japanese', () => {
         await page.goto('/ja/settings/ipa');
         await page.waitForLoadState('networkidle');
 
-        // Should show Japanese labels
-        const japaneseLabels = ['IPA', 'セキュリティ', '同期', '通知'];
-        let foundLabel = false;
-
-        for (const label of japaneseLabels) {
-            const element = page.getByText(label);
-            if (await element.isVisible().catch(() => false)) {
-                foundLabel = true;
-                break;
-            }
-        }
-
-        // At least one Japanese label should be visible
-        expect(foundLabel || await page.locator('body').textContent()).toBeTruthy();
+        await expect(page.getByRole('heading', { level: 1, name: ja.Settings.IPA.title })).toBeVisible({ timeout: 15000 });
+        await expect(page.getByRole('button', { name: ja.Settings.IPA.syncNow })).toBeVisible();
+        await expect(page.getByRole('button', { name: ja.Settings.IPA.saveSettings })).toBeVisible();
     });
 });
