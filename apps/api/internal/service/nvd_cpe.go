@@ -193,7 +193,13 @@ func (c cpeCandidate) productQuery() string {
 	return "cpe:2.3:" + c.part + ":" + escapeCPE23(c.vendor) + ":" + escapeCPE23(c.product)
 }
 
-func (c cpeCandidate) productKey() string { return c.part + ":" + c.vendor + ":" + c.product }
+// productKey is the candidate's product identity for dedupe and for the
+// negative cache. It is the ESCAPED form (productQuery), not the unescaped
+// fields joined with ':' — a quoted colon is valid CPE syntax and NVD has
+// such products, so the joined form let `mailcow\:mailcow` + `_dockerized`
+// and `mailcow` + `mailcow\:_dockerized` share one identity, and one tenant
+// could cache "unknown product" for another's (Codex M60 R4 High).
+func (c cpeCandidate) productKey() string { return c.productQuery() }
 
 // distroPurlTypes are purl types whose versions carry a distro revision (and
 // possibly an epoch) on top of the upstream version.
@@ -716,7 +722,7 @@ func matchMethodFor(distro bool) model.MatchMethod {
 
 // String is for logs.
 func (c cpeCandidate) String() string {
-	return fmt.Sprintf("%s@%s", c.productKey(), c.effectiveVersion())
+	return fmt.Sprintf("%s:%s:%s@%s", c.part, c.vendor, c.product, c.effectiveVersion())
 }
 
 // lookupComponent resolves one work item: the CPE path first, the keyword
@@ -736,11 +742,16 @@ func (s *NVDService) lookupComponent(ctx context.Context, item nvdWorkItem, pace
 		}
 		if decided {
 			l.requests = spent
+			// An answer that cost requests is not a cache hit, even if
+			// its last step was (Codex M60 R4 Low): CacheHits promises
+			// "no HTTP request".
+			l.fromCache = l.fromCache && spent == 0
 			return l, nil
 		}
 	}
 	l, err := s.keywordLookup(ctx, item.key.Name, item.key.Version, pace, spent > 0)
 	l.requests += spent
+	l.fromCache = l.fromCache && spent == 0
 	l.method = model.MatchNVDKeyword
 	l.keywordFallback = len(item.candidates) > 0
 	return l, err

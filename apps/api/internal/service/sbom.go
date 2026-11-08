@@ -401,10 +401,13 @@ func normaliseSBOMCPEs(in []string) []string {
 		if lc := strings.ToLower(c); !strings.HasPrefix(lc, "cpe:2.3:") && !strings.HasPrefix(lc, "cpe:/") {
 			continue
 		}
-		if _, dup := seen[c]; dup {
+		// CPE matching is case-insensitive, so case variants are ONE CPE
+		// and must not use up the cap (Codex M60 R4 Medium).
+		key := strings.ToLower(c)
+		if _, dup := seen[key]; dup {
 			continue
 		}
-		seen[c] = struct{}{}
+		seen[key] = struct{}{}
 		out = append(out, c)
 		if len(out) == maxStoredCPEsPerComponent {
 			break

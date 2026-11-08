@@ -17,7 +17,7 @@
 --   'nvd_cpe'          NVD CPE match, verified against the CVE's NVD
 --                      configurations (vulnerable=true, same part:vendor:
 --                      product, component version inside the range).
---   'nvd_cpe_distro'   same, for a distro package (deb/rpm/apk): matched on
+--   'nvd_cpe_distro'   same, for a distro package (deb/rpm/apk/alpm): matched on
 --                      the UPSTREAM version, so distro backports are NOT
 --                      taken into account.
 --   'nvd_cpe_unverified' NVD returned the CVE for the component's CPE but its
