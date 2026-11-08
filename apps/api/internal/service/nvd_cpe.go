@@ -247,6 +247,12 @@ func isDistroComponent(purl string) bool { return distroPurlTypes[purlType(purl)
 //     upstream version.
 func normaliseCPEVersion(v string, distro bool) string {
 	v = strings.TrimSpace(v)
+	// Build metadata takes no part in ordering (compareVersions ignores it)
+	// and names no CPE, so it is not sent in the query either: Go's
+	// "v2.0.0+incompatible" is NVD's 2.0.0 (Codex M60 R9 High-1).
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
 	if distro {
 		if i := strings.Index(v, ":"); i > 0 && isDigits(v[:i]) {
 			v = v[i+1:]
@@ -510,8 +516,9 @@ func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
 type versionToken struct {
 	num   bool
 	value string
-	// dash: the token's preceding separator was "-". dashNum: a number so
-	// preceded (see above).
+	// sep is the separator directly before the token (0: none, or the
+	// start). dash: sep was "-". dashNum: a number so preceded (see above).
+	sep     rune
 	dash    bool
 	dashNum bool
 }
@@ -573,6 +580,11 @@ func tokenKindIgnoringDash(toks []versionToken, i int) tokenKind {
 	if _, ok := preReleaseRank[t.value]; ok {
 		return kindPre
 	}
+	if releaseMarkers[t.value] {
+		// A marker that survived tokenisation was not after '.' ("_ga",
+		// "1.0final"): not decided (Codex M60 R9 High-2).
+		return kindUnknown
+	}
 	if len(t.value) <= 2 && !numberFollows {
 		return kindPost
 	}
@@ -589,7 +601,7 @@ func tokeniseVersion(v string) []versionToken {
 	var sep rune // separator seen since the last token
 	flush := func() {
 		if cur.Len() > 0 {
-			out = append(out, versionToken{num: curNum, value: cur.String(), dash: sep == '-', dashNum: curNum && sep == '-'})
+			out = append(out, versionToken{num: curNum, value: cur.String(), sep: sep, dash: sep == '-', dashNum: curNum && sep == '-'})
 			cur.Reset()
 			sep = 0
 		}
@@ -615,7 +627,7 @@ func tokeniseVersion(v string) []versionToken {
 	kept := out[:0]
 	for i, t := range out {
 		numberFollows := i+1 < len(out) && out[i+1].num
-		if !t.num && !t.dash && releaseMarkers[t.value] && !numberFollows {
+		if !t.num && t.sep == '.' && releaseMarkers[t.value] && !numberFollows {
 			continue
 		}
 		kept = append(kept, t)
