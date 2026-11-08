@@ -202,13 +202,15 @@ GET /api/v1/projects/:id/vulnerabilities
 
 | field | values | meaning |
 |---|---|---|
-| `match_method` | `nvd_cpe`, `nvd_cpe_distro`, `nvd_keyword`, `jvn_keyword`, `cve_sync_keyword`, or absent | the strongest method among this SBOM's links to the CVE |
-| `match_confidence` | `high` (`nvd_cpe`), `medium` (`nvd_cpe_distro`), `low` (any keyword method), `unknown` | `unknown` = every link predates migration 067 |
+| `match_method` | `nvd_cpe`, `nvd_cpe_distro`, `nvd_cpe_unverified`, `nvd_keyword`, `jvn_keyword`, `cve_sync_keyword`, or absent | the strongest method among this SBOM's links to the CVE |
+| `match_confidence` | `high` (`nvd_cpe`), `medium` (`nvd_cpe_distro`), `low` (`nvd_cpe_unverified` and every keyword method), `unknown` | `unknown` = every link predates migration 067 |
 
 `nvd_cpe` means the component's CPE was matched against NVD's affected
 configurations and the version was verified to fall inside a vulnerable range.
-`nvd_cpe_distro` is the same for a distro package (deb/rpm/apk), matched on the
-upstream version, so distro backports are not taken into account. Keyword
+`nvd_cpe_distro` is the same for a distro package (deb/rpm/apk/alpm), matched on
+the upstream version, so distro backports are not taken into account.
+`nvd_cpe_unverified` means NVD returned the CVE for the component's CPE but its
+configurations could not be checked against the version. Keyword
 methods are name-text matches and should be triaged as candidates, not as
 confirmed findings. See `docs/UPGRADE.md` §13.
 

@@ -142,6 +142,7 @@ const bestMatchMethodSQL = `(
 		ORDER BY CASE bm.match_method
 			WHEN 'nvd_cpe' THEN 3
 			WHEN 'nvd_cpe_distro' THEN 2
+			WHEN 'nvd_cpe_unverified' THEN 1
 			WHEN 'nvd_keyword' THEN 1
 			WHEN 'jvn_keyword' THEN 1
 			WHEN 'cve_sync_keyword' THEN 1

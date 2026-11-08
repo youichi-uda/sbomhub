@@ -1653,6 +1653,7 @@ dropped (`1.1.1k-1+deb11u2` → `1.1.1k`).
 |---|---|---|
 | `nvd_cpe` | high | CPE match verified against NVD configurations |
 | `nvd_cpe_distro` | medium | same, for a distro package, on the **upstream** version — a fix the distro backported without changing the upstream version is NOT seen, so these can be false positives |
+| `nvd_cpe_unverified` | low | NVD returned the CVE for the component's CPE, but its configurations could not be checked against the version (absent, or a version comparison that cannot be decided). Kept rather than dropped; none occurred in the measurement below |
 | `nvd_keyword` | low | NVD text search (no usable CPE) |
 | `jvn_keyword` | low | MyJVN text search on the component name |
 | `cve_sync_keyword` | low | the daily CVE-sync linker (product names vs component names) |

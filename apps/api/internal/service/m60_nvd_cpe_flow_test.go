@@ -83,7 +83,7 @@ func m60Item(t *testing.T, name string) nvdWorkItem {
 	}
 	c := m60Find(t, comps, name)
 	return nvdWorkItem{
-		key:        nvdComponentKey{Name: c.Name, Version: c.Version, CPEKey: nvdCPEKey(c.CPEs), Distro: isDistroComponent(c.Purl)},
+		key:        nvdWorkKey(c.Name, c.Version, c.CPEs, c.Purl),
 		candidates: cpeCandidates(c.CPEs, c.Version, c.Purl),
 		distro:     isDistroComponent(c.Purl),
 	}

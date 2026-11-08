@@ -76,10 +76,14 @@ type cpeName struct {
 func parseCPE(s string) (cpeName, bool) {
 	s = strings.TrimSpace(s)
 	var fields []string
+	// The scheme is case-insensitive (SPDX 2.2's CPE 2.2 locator pattern
+	// accepts "cPE:/A:..."; Codex M60 R2 Medium-2). Attribute values are
+	// lower-cased below anyway.
+	lower := strings.ToLower(s)
 	switch {
-	case strings.HasPrefix(s, "cpe:2.3:"):
+	case strings.HasPrefix(lower, "cpe:2.3:"):
 		fields = splitCPE23(s[len("cpe:2.3:"):])
-	case strings.HasPrefix(s, "cpe:/"):
+	case strings.HasPrefix(lower, "cpe:/"):
 		for _, f := range strings.Split(s[len("cpe:/"):], ":") {
 			u, err := url.PathUnescape(f)
 			if err != nil {
@@ -433,9 +437,26 @@ func criterionContains(crit cpeName, m NVDCPEMatch, version string) cpeVerdict {
 // preReleaseWords sort BEFORE the release they qualify ("2.0-beta9" <
 // "2.0"). Any other alphabetic suffix sorts AFTER it, which is what OpenSSL's
 // letter releases need ("1.1.1k" > "1.1.1", "1.1.1za" > "1.1.1z").
+//
+// "m" (a Tomcat-style milestone, "9.0.0.M1") is a pre-release ONLY when a
+// number follows it: OpenSSL 1.1.1m is a patch release, and treating it as a
+// pre-release put openssl 1.1.1k outside CVE-2021-4160's `< 1.1.1m` range
+// (caught by the recorded-openssl test). See isPreRelease.
 var preReleaseWords = map[string]bool{
 	"alpha": true, "beta": true, "rc": true, "cr": true, "pre": true, "preview": true,
-	"dev": true, "snapshot": true, "milestone": true, "m": true,
+	"dev": true, "snapshot": true, "milestone": true,
+}
+
+// isPreRelease reports whether toks[i] is a pre-release qualifier.
+func isPreRelease(toks []versionToken, i int) bool {
+	t := toks[i]
+	if t.num {
+		return false
+	}
+	if preReleaseWords[t.value] {
+		return true
+	}
+	return t.value == "m" && i+1 < len(toks) && toks[i+1].num
 }
 
 type versionToken struct {
@@ -504,6 +525,18 @@ func compareVersions(a, b string) (int, bool) {
 				return c, true
 			}
 		case !x.num && !y.num:
+			// A pre-release word precedes any other suffix at the same
+			// position ("1.0.0-beta2" < "1.0.0" < "1.0.0a"), so the two
+			// classes are ordered before the letters are compared —
+			// lexically "a" < "beta", which made the order intransitive
+			// (Codex M60 R2 High, found by the transitivity check).
+			px, py := isPreRelease(ta, i), isPreRelease(tb, i)
+			if px != py {
+				if px {
+					return -1, true
+				}
+				return 1, true
+			}
 			if c := strings.Compare(x.value, y.value); c != 0 {
 				return c, true
 			}
@@ -511,10 +544,10 @@ func compareVersions(a, b string) (int, bool) {
 			// A pre-release word against a number at the same position is
 			// older than it ("2.0-beta9" vs "2.0.1"). Anything else is not
 			// orderable without knowing the project's scheme.
-			if !x.num && preReleaseWords[x.value] {
+			if isPreRelease(ta, i) {
 				return -1, true
 			}
-			if !y.num && preReleaseWords[y.value] {
+			if isPreRelease(tb, i) {
 				return 1, true
 			}
 			return 0, false
@@ -523,24 +556,24 @@ func compareVersions(a, b string) (int, bool) {
 	if len(ta) == len(tb) {
 		return 0, true
 	}
-	// One is a prefix of the other. The longer one's next token decides.
+	// One is a prefix of the other. Zero padding is skipped FIRST ("1.0" ==
+	// "1.0.0"), then the longer one's next token decides: a pre-release word
+	// makes it older, anything else newer. Skipping the padding before
+	// looking for the word is what keeps "1.0.0-rc1" < "1.0" consistent with
+	// "1.0.0-rc1" < "1.0.0" (Codex M60 R2 High).
 	longer, sign := ta, 1
 	if len(tb) > len(ta) {
 		longer, sign = tb, -1
 	}
 	rest := longer[n:]
-	if !rest[0].num && preReleaseWords[rest[0].value] {
+	for len(rest) > 0 && rest[0].num && strings.TrimLeft(rest[0].value, "0") == "" {
+		rest = rest[1:]
+	}
+	if len(rest) == 0 {
+		return 0, true
+	}
+	if isPreRelease(rest, 0) {
 		return -sign, true
-	}
-	allZero := true
-	for _, t := range rest {
-		if !t.num || strings.TrimLeft(t.value, "0") != "" {
-			allZero = false
-			break
-		}
-	}
-	if allZero {
-		return 0, true // "1.0" == "1.0.0"
 	}
 	return sign, true
 }
@@ -574,6 +607,22 @@ func nvdNoCPECacheName(c cpeCandidate) string {
 	k := c.productKey()
 	sum := sha256.Sum256([]byte(strconv.Itoa(len(k)) + ":" + k))
 	return nvdNoCPECacheSchema + hex.EncodeToString(sum[:])
+}
+
+// nvdWorkKey is the deduplication key of one component: everything its lookup
+// depends on — the name and version (keyword fallback), the CPE candidates
+// ACTUALLY tried, in order, and whether it is a distro package. Built from the
+// candidates rather than the stored CPE list, so components that differ only
+// in CPEs past the candidate cap share one lookup (Codex M60 R2 Low-1).
+func nvdWorkKey(name, version string, cpes []string, purl string) nvdComponentKey {
+	var b strings.Builder
+	for _, c := range cpeCandidates(cpes, version, purl) {
+		q := c.query()
+		b.WriteString(strconv.Itoa(len(q)))
+		b.WriteByte(':')
+		b.WriteString(q)
+	}
+	return nvdComponentKey{Name: name, Version: version, CPEKey: b.String(), Distro: isDistroComponent(purl)}
 }
 
 // matchMethodFor is the label a CPE-path link gets.
@@ -679,8 +728,12 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 		switch verifyCPEMatch(e.CVE, c) {
 		case cpeMatched:
 			out.vulns = append(out.vulns, res.vulns[i])
+			out.methods = append(out.methods, method)
 		case cpeUndecidable:
+			// Kept (NVD selected it for this CPE), but NOT labelled as
+			// verified (Codex M60 R2 Medium-1).
 			out.vulns = append(out.vulns, res.vulns[i])
+			out.methods = append(out.methods, model.MatchNVDCPEUnverified)
 			out.cpeUndecidable++
 		case cpeRejected:
 			out.cpeRejected++
@@ -688,7 +741,10 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 	}
 	// Same rule as the keyword path: a truncated answer is never cached, or
 	// the truncation would be reported once and then laundered for a TTL.
-	if !res.truncated {
+	// Nor is an answer holding an unverified CVE: the cache carries no
+	// per-CVE provenance, so a hit would relabel it as verified.
+	out.uncacheable = res.truncated || out.cpeUndecidable > 0
+	if !out.uncacheable {
 		s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
 	}
 	return out, true, nil

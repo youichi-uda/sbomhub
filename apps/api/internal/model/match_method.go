@@ -18,6 +18,12 @@ const (
 	// revision and epoch stripped), so a fix the distro backported without
 	// changing the upstream version is NOT taken into account.
 	MatchNVDCPEDistro MatchMethod = "nvd_cpe_distro"
+	// MatchNVDCPEUnverified: NVD returned the CVE for the component's CPE,
+	// but its configurations could not be checked against the version
+	// (absent, never naming the product, or a version comparison that cannot
+	// be decided). Kept so a comparator limit is not a silent false
+	// negative, but NOT claimed as verified: low confidence.
+	MatchNVDCPEUnverified MatchMethod = "nvd_cpe_unverified"
 	// MatchNVDKeyword: NVD keywordSearch on "<name> <version>"; used when the
 	// component has no CPE whose product NVD knows.
 	MatchNVDKeyword MatchMethod = "nvd_keyword"
@@ -42,7 +48,7 @@ const (
 // IsValid reports whether m is one of the methods migration 067 accepts.
 func (m MatchMethod) IsValid() bool {
 	switch m {
-	case MatchNVDCPE, MatchNVDCPEDistro, MatchNVDKeyword, MatchJVNKeyword, MatchCVESyncKeyword:
+	case MatchNVDCPE, MatchNVDCPEDistro, MatchNVDCPEUnverified, MatchNVDKeyword, MatchJVNKeyword, MatchCVESyncKeyword:
 		return true
 	}
 	return false
@@ -57,7 +63,7 @@ func (m MatchMethod) Rank() int {
 		return 3
 	case MatchNVDCPEDistro:
 		return 2
-	case MatchNVDKeyword, MatchJVNKeyword, MatchCVESyncKeyword:
+	case MatchNVDCPEUnverified, MatchNVDKeyword, MatchJVNKeyword, MatchCVESyncKeyword:
 		return 1
 	}
 	return 0
@@ -82,7 +88,7 @@ func (m MatchMethod) Confidence() string {
 // stored values a link written with m is allowed to replace.
 func WeakerMatchMethods(m MatchMethod) []string {
 	var out []string
-	for _, w := range []MatchMethod{MatchNVDCPE, MatchNVDCPEDistro, MatchNVDKeyword, MatchJVNKeyword, MatchCVESyncKeyword} {
+	for _, w := range []MatchMethod{MatchNVDCPE, MatchNVDCPEDistro, MatchNVDCPEUnverified, MatchNVDKeyword, MatchJVNKeyword, MatchCVESyncKeyword} {
 		if w.Rank() < m.Rank() {
 			out = append(out, string(w))
 		}

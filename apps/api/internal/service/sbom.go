@@ -397,7 +397,8 @@ func normaliseSBOMCPEs(in []string) []string {
 		if c == "" || len(c) > maxStoredCPELength {
 			continue
 		}
-		if !strings.HasPrefix(c, "cpe:2.3:") && !strings.HasPrefix(c, "cpe:/") {
+		// Scheme matched case-insensitively (SPDX 2.2 allows "cPE:/A:...").
+		if lc := strings.ToLower(c); !strings.HasPrefix(lc, "cpe:2.3:") && !strings.HasPrefix(lc, "cpe:/") {
 			continue
 		}
 		if _, dup := seen[c]; dup {

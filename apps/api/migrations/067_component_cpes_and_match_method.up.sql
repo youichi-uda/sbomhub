@@ -20,6 +20,9 @@
 --   'nvd_cpe_distro'   same, for a distro package (deb/rpm/apk): matched on
 --                      the UPSTREAM version, so distro backports are NOT
 --                      taken into account.
+--   'nvd_cpe_unverified' NVD returned the CVE for the component's CPE but its
+--                      configurations could not be checked against the
+--                      version; kept, not claimed as verified.
 --   'nvd_keyword'      NVD keywordSearch on "<name> <version>" (no usable
 --                      CPE on the component).
 --   'jvn_keyword'      MyJVN keyword search on the component name.
@@ -51,5 +54,5 @@ ALTER TABLE component_vulnerabilities ADD COLUMN IF NOT EXISTS match_method VARC
 ALTER TABLE component_vulnerabilities
     ADD CONSTRAINT component_vulnerabilities_match_method_check
     CHECK (match_method IS NULL OR match_method IN (
-        'nvd_cpe', 'nvd_cpe_distro', 'nvd_keyword', 'jvn_keyword', 'cve_sync_keyword'
+        'nvd_cpe', 'nvd_cpe_distro', 'nvd_cpe_unverified', 'nvd_keyword', 'jvn_keyword', 'cve_sync_keyword'
     )) NOT VALID;

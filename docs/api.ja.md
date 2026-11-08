@@ -204,13 +204,15 @@ GET /api/v1/projects/:id/vulnerabilities
 
 | フィールド | 値 | 意味 |
 |---|---|---|
-| `match_method` | `nvd_cpe`、`nvd_cpe_distro`、`nvd_keyword`、`jvn_keyword`、`cve_sync_keyword`、または省略 | この SBOM のリンクのうち最も強い照合方法 |
-| `match_confidence` | `high` (`nvd_cpe`)、`medium` (`nvd_cpe_distro`)、`low` (keyword 系)、`unknown` | `unknown` = すべてのリンクが migration 067 以前に作られた |
+| `match_method` | `nvd_cpe`、`nvd_cpe_distro`、`nvd_cpe_unverified`、`nvd_keyword`、`jvn_keyword`、`cve_sync_keyword`、または省略 | この SBOM のリンクのうち最も強い照合方法 |
+| `match_confidence` | `high` (`nvd_cpe`)、`medium` (`nvd_cpe_distro`)、`low` (`nvd_cpe_unverified` と keyword 系)、`unknown` | `unknown` = すべてのリンクが migration 067 以前に作られた |
 
 `nvd_cpe` はコンポーネントの CPE を NVD の影響構成 (configurations) と照合し、
 バージョンが脆弱な範囲に入ることを検証したものです。`nvd_cpe_distro` は
-ディストリビューションパッケージ (deb/rpm/apk) について upstream バージョンで
-同じ照合をしたもので、ディストリのバックポート修正は考慮されません。keyword 系は
+ディストリビューションパッケージ (deb/rpm/apk/alpm) について upstream バージョンで
+同じ照合をしたもので、ディストリのバックポート修正は考慮されません。
+`nvd_cpe_unverified` は NVD がその CPE について返した CVE のうち、影響構成を
+バージョンと照合できなかったものです。keyword 系は
 名前の文字列一致であり、確定した所見ではなく候補として扱ってください。
 `docs/UPGRADE.md` §13 を参照。
 

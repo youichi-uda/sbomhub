@@ -326,7 +326,8 @@ type CvssData struct {
 // M60: two components with the same (name, version) but different CPE lists
 // or a different distro-ness are different work — their candidates differ —
 // so both are part of the key. CPEKey is a length-prefixed encoding of the
-// ordered CPE list (injective for the same reason nvdCacheName is).
+// ordered CPE candidate queries (injective for the same reason nvdCacheName
+// is); see nvdWorkKey.
 type nvdComponentKey struct {
 	Name    string
 	Version string
@@ -342,16 +343,6 @@ type nvdWorkItem struct {
 	// keyword path only.
 	candidates []cpeCandidate
 	distro     bool
-}
-
-func nvdCPEKey(cpes []string) string {
-	var b strings.Builder
-	for _, c := range cpes {
-		b.WriteString(strconv.Itoa(len(c)))
-		b.WriteByte(':')
-		b.WriteString(c)
-	}
-	return b.String()
 }
 
 // NVDScanReport is the accounting for one NVDService sweep.
@@ -472,7 +463,7 @@ func (s *NVDService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.U
 			continue
 		}
 		distro := isDistroComponent(comp.Purl)
-		key := nvdComponentKey{Name: comp.Name, Version: comp.Version, CPEKey: nvdCPEKey(comp.CPEs), Distro: distro}
+		key := nvdWorkKey(comp.Name, comp.Version, comp.CPEs, comp.Purl)
 		item, ok := uniqueComponents[key]
 		if !ok {
 			item = &nvdWorkItem{
@@ -704,7 +695,7 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 				mu.Unlock()
 
 				// Link vulnerabilities to all component instances
-				refused := s.persistWorkItem(ctx, &dbMu, lookup.vulns, work.componentIDs, lookup.method)
+				refused := s.persistWorkItem(ctx, &dbMu, lookup.vulns, lookup.methods, work.componentIDs, lookup.method)
 				if refused > 0 {
 					mu.Lock()
 					refusedWrites += refused
@@ -940,6 +931,7 @@ func (s *NVDService) persistWorkItem(
 	ctx context.Context,
 	dbMu *sync.Mutex,
 	vulns []model.Vulnerability,
+	methods []model.MatchMethod,
 	componentIDs []uuid.UUID,
 	method model.MatchMethod,
 ) int {
@@ -949,6 +941,10 @@ func (s *NVDService) persistWorkItem(
 	refused := 0
 	for i := range vulns {
 		vuln := vulns[i]
+		linkMethod := method
+		if i < len(methods) {
+			linkMethod = methods[i]
+		}
 		existing, err := s.vulnRepo.GetByCVE(ctx, vuln.CVEID)
 		if err != nil {
 			if err := s.vulnRepo.Create(ctx, &vuln); err != nil {
@@ -960,7 +956,7 @@ func (s *NVDService) persistWorkItem(
 		}
 
 		for _, compID := range componentIDs {
-			if err := s.vulnRepo.LinkComponent(ctx, compID, existing.ID, method); err != nil {
+			if err := s.vulnRepo.LinkComponent(ctx, compID, existing.ID, linkMethod); err != nil {
 				// Kept at Debug for volume (one line per component instance
 				// per CVE), but no longer the ONLY trace: the refused count
 				// this function returns is what reaches the caller.
@@ -988,8 +984,14 @@ type nvdLookup struct {
 	requests int
 	// method is how the vulns were matched (M60): nvd_cpe / nvd_cpe_distro
 	// for the CPE path, nvd_keyword for the keyword path. It is what the
-	// links are labelled with.
+	// links are labelled with, unless methods overrides it per CVE.
 	method model.MatchMethod
+	// methods, when non-nil, is index-aligned with vulns and labels each
+	// CVE individually (the CPE path: an unverifiable CVE is
+	// nvd_cpe_unverified while its siblings are nvd_cpe).
+	methods []model.MatchMethod
+	// uncacheable is set when the answer must not be cached.
+	uncacheable bool
 	// keywordFallback: the item HAD CPE candidates, none of which named a
 	// product NVD knows, so the keyword path answered.
 	keywordFallback bool

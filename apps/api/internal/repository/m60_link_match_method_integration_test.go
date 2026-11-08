@@ -324,3 +324,31 @@ func TestM60LinkComponent_RelabelsARowInsertedConcurrently(t *testing.T) {
 		t.Errorf("stored method = %s, want nvd_cpe: the relabel was lost to a concurrent weak insert", m)
 	}
 }
+
+// The CHECK in migration 067 and model.MatchMethod.IsValid are two copies of
+// one vocabulary; every method Go considers valid must be accepted by the
+// database (Codex M60 R2 added nvd_cpe_unverified to both).
+func TestM60LinkComponent_DatabaseAcceptsEveryGoMethod(t *testing.T) {
+	appURL, migURL := rlsTestEnv(t)
+	appDB := openOrSkip(t, appURL)
+	migDB := openOrSkip(t, migURL)
+
+	tenantID, componentID := m54SeedComponentForLink(t, migDB)
+	repo := NewVulnerabilityRepository(appDB)
+	for _, m := range []model.MatchMethod{
+		model.MatchNVDCPE, model.MatchNVDCPEDistro, model.MatchNVDCPEUnverified,
+		model.MatchNVDKeyword, model.MatchJVNKeyword, model.MatchCVESyncKeyword,
+	} {
+		v := m57ScannerVuln(t, migDB, m55MetaCVEID())
+		if err := repo.Create(context.Background(), v); err != nil {
+			t.Fatal(err)
+		}
+		_, ctx, commit := m57OpenTenantTx(t, appDB, tenantID)
+		if err := repo.LinkComponent(ctx, componentID, v.ID, m); err != nil {
+			t.Errorf("%s refused by the database: %v", m, err)
+		}
+		if err := commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
