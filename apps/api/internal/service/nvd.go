@@ -490,11 +490,17 @@ func (s *NVDService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.U
 // on different transactions with nothing to contend over.
 //
 // What this does NOT fix: a statement that fails on its own merits still
-// aborts the shared transaction and discards every row the sweep wrote (M50).
+// aborts the shared transaction and discards every LINK the sweep wrote (M50).
 // Serialising the workers removes the concurrency as a CAUSE of that abort; it
 // does not change what an abort costs. What it does change, as of the R1
 // follow-up below, is that the scanner now REPORTS it instead of returning
 // nil.
+//
+// M57 narrowed which statements can trigger it: the catalogue INSERT (Create)
+// no longer runs on the shared transaction at all — see persistWorkItem — so
+// a refused catalogue write costs its own match and nothing else. What can
+// still abort the sweep is a statement that IS on the transaction: GetByCVE
+// and LinkComponent.
 func (s *NVDService) processComponentsParallel(ctx context.Context, components map[nvdComponentKey][]uuid.UUID) (NVDScanReport, error) {
 	report := NVDScanReport{UniqueComponents: len(components)}
 
@@ -784,6 +790,23 @@ func (r NVDScanReport) incompleteErr() error {
 // instance that shares the item's (name, version) to each matched CVE, and
 // inserts the CVE into the global catalogue if it was not there already.
 //
+// # Which statements are on the tenant transaction (M57)
+//
+// GetByCVE and LinkComponent run on ctx's transaction. Create does NOT: the
+// repository writes the global catalogue on its own pool whatever ctx carries
+// (VulnerabilityRepository.Create, "It never joins the caller's
+// transaction"). Before M57 it did, and the row it inserted was invisible to
+// the catalogue's owner (scheduler.CVESyncJob) for the rest of the sweep, so a
+// refresh arriving in that window read "absent", skipped, and let this
+// scanner's possibly-cached copy commit; a refused INSERT also aborted the
+// transaction and discarded every link the sweep had written. Both measured
+// in handler/m57_nvd_catalogue_boundary_integration_test.go.
+//
+// The links stay on the transaction on purpose: they are the tenant's own
+// findings, and the scan's all-or-nothing durability for them is unchanged.
+// A catalogue row can now outlive a failed sweep with nothing linked to it,
+// which is the state cve_sync leaves every unmatched CVE in already.
+//
 // It is NOT an upsert of the freshly fetched data, and an earlier draft of
 // this comment called it one (Codex M54 R3, Critical). Create only runs when
 // GetByCVE MISSES. When the CVE is already in the catalogue this function
@@ -816,13 +839,15 @@ func (r NVDScanReport) incompleteErr() error {
 // normal "not in the catalogue yet" branch, i.e. control flow, not failure.
 //
 // Per-statement failures are logged and skipped rather than aborting the item.
-// Do NOT read that as "one bad row only costs that row" — an earlier draft of
-// this comment said exactly that and it was wrong (Codex M54 R2, High). On a
-// tx-bearing ctx, which is every production caller, PostgreSQL aborts the
-// whole transaction at the FIRST refusal: every later statement is refused as
-// well, and every earlier one is discarded at rollback. The loss is the whole
-// sweep, and TestM54NVDScan_RefusedWritesAreReportedAsFailure measures it at
-// 0 durable rows.
+// Do NOT read that as "one bad row only costs that row" for every statement —
+// an earlier draft of this comment said exactly that and it was wrong (Codex
+// M54 R2, High). For a statement ON the transaction (GetByCVE,
+// LinkComponent), PostgreSQL aborts the whole transaction at the FIRST
+// refusal: every later statement is refused as well, and every earlier link is
+// discarded at rollback. Since M57 a refused Create is the exception — it runs
+// off the transaction, so it really does cost only its own match
+// (TestM57NVDScan_ACatalogueRefusalDoesNotDiscardTheSweep: 2 of 2 links
+// survive where 0 did before).
 //
 // What the skipping buys is that the loop keeps going and keeps counting, so
 // the returned number does not stop at the first refusal. It is still only a
@@ -834,7 +859,7 @@ func (r NVDScanReport) incompleteErr() error {
 //
 // Row-local loss is what the skipping buys on a tx-FREE ctx (Querier falling
 // back to the pooled *sql.DB, i.e. autocommit), which no production caller
-// uses today.
+// uses today — and, since M57, for Create on every ctx.
 func (s *NVDService) persistWorkItem(
 	ctx context.Context,
 	dbMu *sync.Mutex,

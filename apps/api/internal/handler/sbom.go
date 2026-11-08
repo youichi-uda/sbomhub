@@ -309,6 +309,15 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 // option, but it trades this route's all-or-nothing durability for
 // partial durability and was deliberately NOT taken in M54 — see the
 // commit note on processComponentsParallel.
+//
+// M57 moved exactly one write off it: the catalogue INSERT
+// (VulnerabilityRepository.Create), which is global rather than this
+// tenant's, and which — inside this transaction — was invisible to the
+// catalogue's owner for the whole scan and aborted the scan when refused. It
+// writes on a separate small pool (database.ConnectCatalogue) so that a scan
+// holding this transaction's connection never waits on the pool it is
+// holding. The LINKS stay here, so the all-or-nothing durability of what the
+// scan found is unchanged.
 func (h *SbomHandler) startBackgroundScan(sbomID, tenantID, projectID uuid.UUID) {
 	go func() {
 		ctx := context.Background()

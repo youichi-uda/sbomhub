@@ -568,7 +568,16 @@ func main() {
 	projectRepo := repository.NewProjectRepository(db)
 	sbomRepo := repository.NewSbomRepository(db)
 	componentRepo := repository.NewComponentRepository(db)
-	vulnRepo := repository.NewVulnerabilityRepository(db)
+	// M57: the scanners' catalogue Create no longer joins their tenant
+	// transaction, so it needs a connection that is not one a tenant
+	// transaction can be holding. See VulnerabilityRepository.WithCatalogueDB.
+	catalogueDB, err := database.ConnectCatalogue(cfg.DatabaseURL)
+	if err != nil {
+		slog.Error("Failed to connect to database (catalogue pool)", "error", err)
+		os.Exit(1)
+	}
+	defer catalogueDB.Close()
+	vulnRepo := repository.NewVulnerabilityRepository(db).WithCatalogueDB(catalogueDB)
 	statsRepo := repository.NewStatsRepository(db)
 	vexRepo := repository.NewVEXRepository(db)
 	licensePolicyRepo := repository.NewLicensePolicyRepository(db)

@@ -526,7 +526,9 @@ func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component, e
 			continue
 		}
 
-		// Create new vulnerability
+		// Create new vulnerability. The catalogue row is written OFF this
+		// scan's tenant transaction (M57, VulnerabilityRepository.Create), so a
+		// refusal here costs this match only; the link below stays on it.
 		vuln.ID = uuid.New()
 		if err := s.vulnRepo.Create(ctx, &vuln); err != nil {
 			slog.Error("Failed to create JVN vulnerability", "cve_id", vuln.CVEID, "error", err)

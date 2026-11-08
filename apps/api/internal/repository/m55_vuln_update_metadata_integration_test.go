@@ -668,6 +668,13 @@ func TestM55Create_ConflictDoesNotRewriteMetadata(t *testing.T) {
 //
 // The test holds an open transaction across a conflicting Create and then
 // requires UpdateMetadata, on a different connection, to complete anyway.
+//
+// Since M57 Create does not run on the caller's transaction at all, so this
+// test now also passes for that reason; the conflict branch's DO NOTHING is
+// still what keeps the autocommit statement itself lock-free. The lock a
+// scanner's transaction DOES still hold on a catalogue row — the link's
+// foreign-key KEY SHARE — is pinned by
+// TestM57UpdateMetadata_IsNotBlockedByATenantTxLink.
 func TestM55Create_ConflictTakesNoRowLock(t *testing.T) {
 	appURL, migURL := rlsTestEnv(t)
 	appDB := openOrSkip(t, appURL)

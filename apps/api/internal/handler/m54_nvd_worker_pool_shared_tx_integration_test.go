@@ -412,10 +412,16 @@ func TestM54NVDWorkerPool_ConcurrentWorkersDoNotCorruptTheSharedTx(t *testing.T)
 // The poison here is data, not privileges or DDL: `vulnerabilities.cve_id` is
 // VARCHAR(50), so a CVE id longer than that is refused by PostgreSQL with
 // "value too long". Nothing about the schema is mutated, so this test cannot
-// leak state into the rest of the package. It also reproduces the M50 cascade
-// on the way through — the failed INSERT aborts the shared transaction, so the
-// writes that follow are refused too and the commit fails — which is why the
-// durable count is 0 rather than "all but one".
+// leak state into the rest of the package.
+//
+// Until M57 it also reproduced the M50 cascade on the way through: the failed
+// catalogue INSERT aborted the shared tenant transaction, the writes after it
+// were refused too, the commit failed, and the durable count was 0. Since M57
+// Create writes the global catalogue outside the tenant transaction, so the
+// refusal costs that one match and the other two CVEs and their links survive
+// (TestM57NVDScan_ACatalogueRefusalDoesNotDiscardTheSweep measures the
+// before/after). What this test pins is unchanged: the scan still REPORTS the
+// lost match as a failure.
 //
 // Scope: this pins REFUSED WRITES only. Fetch failures are a separate axis and
 // this sentence used to describe them all as "reported as success", which the
@@ -508,17 +514,21 @@ func TestM54NVDScan_RefusedWritesAreReportedAsFailure(t *testing.T) {
 		t.Errorf("the scanner did not report failure. digest = %s", m54Digest(logs))
 	}
 
-	// And nothing survived, which is what makes the false success expensive
-	// rather than merely inaccurate.
+	// Exactly one write was refused — the poison — and nothing else (M57: a
+	// refused catalogue write no longer aborts the tenant transaction, so the
+	// CVE after it is not refused in a cascade).
+	if !strings.Contains(logs, "database refused 1 vulnerability write(s)") {
+		t.Errorf("want exactly one refused write reported. digest = %s", m54Digest(logs))
+	}
 	var durable int
 	if err := appDB.QueryRow(
 		`SELECT COUNT(*) FROM vulnerabilities WHERE cve_id = ANY($1)`,
 		m54TextArray(okIDs)).Scan(&durable); err != nil {
 		t.Fatalf("count durable: %v", err)
 	}
-	if durable != 0 {
-		t.Errorf("durable vulnerabilities = %d, want 0 — the failed statement aborts the shared "+
-			"transaction, so even the write that succeeded before it is discarded (M50)", durable)
+	if durable != good {
+		t.Errorf("durable vulnerabilities = %d, want %d — the refused catalogue write must cost only its own "+
+			"match, not abort the tenant transaction (M57)", durable, good)
 	}
 }
 
