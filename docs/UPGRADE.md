@@ -1672,7 +1672,7 @@ metadata is ignored, as SemVer specifies.
 |---|---|---|
 | `nvd_cpe` | high | CPE match verified against NVD configurations |
 | `nvd_cpe_distro` | medium | same, for a distro package, on the **upstream** version — a fix the distro backported without changing the upstream version is NOT seen, so these can be false positives |
-| `nvd_cpe_unverified` | low | NVD returned the CVE for the component's CPE, but its configurations could not be checked against the version (absent, or a version comparison that cannot be decided). Kept rather than dropped; none occurred in the measurement below |
+| `nvd_cpe_unverified` | low | NVD returned the CVE for the component's CPE, but its configurations could not be checked against the version (absent, or a version comparison that cannot be decided). Kept rather than dropped; one occurred in the measurement below (³) |
 | `nvd_keyword` | low | NVD text search (no usable CPE) |
 | `jvn_keyword` | low | MyJVN text search on the component name |
 | `cve_sync_keyword` | low | the daily CVE-sync linker (product names vs component names) |
@@ -1702,16 +1702,19 @@ OSV for Maven/npm/Go, openssl.org's 1.1.1 advisory list for OpenSSL):
 | lodash 4.17.20 | 4 | 1 (0) | 5 (4) | nvd_cpe |
 | golang.org/x/net v0.7.0 | 24 | 0 | 2 (2) | nvd_cpe |
 | gin v1.7.0 | 3 | 0 | 2 (2) | nvd_cpe |
-| openssl 1.1.1k-1 (deb) | 49 | 0 | 42 (42) | nvd_cpe_distro |
+| openssl 1.1.1k-1 (deb) | 49 | 0 | 43 (42) | 42 nvd_cpe_distro + 1 nvd_cpe_unverified³ |
 | glibc 2.31 | 26¹ | 3 (0) | 26 (26) | nvd_cpe |
 | libc6 2.31-13 (deb) | 26¹ | 0 | 0 | keyword fallback |
 | linux kernel 5.10.46 | 7,059² | 0 | 493, **truncated** | nvd_cpe |
 
 ¹ NVD's own configurations — not an independent source. ² NVD's count; not
-verified independently.
+verified independently. ³ CVE-2019-1543: its range ends at `1.1.1b`, and a bare
+`b` is scheme-dependent, so it is kept unverified; the ground truth says 1.1.1k
+is not affected.
 
-Across the components with ground truth: **before 4 links, 0 true; after 164
-links, 134 true (precision 82%, recall 70%)**. The remaining false positives
+Across the components with ground truth: **before 4 links, 0 true; after 165
+links, 134 true (precision 81%, recall 70%)**; of the 31 false positives, 1 is
+labelled low confidence. The remaining false positives
 are mostly NVD's product granularity (NVD's `apache:tomcat` covers server-only
 issues that do not affect the embedded jar); the remaining misses are CVEs NVD
 has not configured (golang.org/x/net: NVD's CPE data covers 2 of 24) and
@@ -1734,7 +1737,7 @@ replaced.
 - **Requests.** A component whose first CPE candidate is NVD's product costs one
   request, as before. Each unknown candidate costs two (query + product probe),
   so Maven packages where Syft guesses `apache:log4j-core` first cost up to 5.
-  The fixture above took 40 NVD requests for 13 components on a cold cache (14
+  The fixture above took 41 NVD requests for 13 components on a cold cache (14
   before: one keyword walk each, two pages for one of them) and 5 on the next scan (24-hour cache; "unknown product" answers are
   cached too). Without an NVD API key that is ~6 s per request.
 - **Truncation.** The CPE path uses the same page budget as the keyword path
