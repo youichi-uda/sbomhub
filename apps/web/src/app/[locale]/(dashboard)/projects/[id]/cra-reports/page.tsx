@@ -236,8 +236,8 @@ export default function CRAReportsPage() {
   /**
    * Submission timelines for the approved reports on screen (non-approved
    * reports cannot carry submissions — the backend rejects them with 409).
-   * Best-effort: a per-report failure leaves that timeline empty, so one
-   * bad row does not blank the whole queue.
+   * Best-effort: a per-report failure leaves that timeline as it was (empty
+   * on first load), so one bad row does not blank the whole queue.
    */
   const approvedIds = useMemo(
     () => reports.filter((r) => r.decision === "approved").map((r) => r.id),
@@ -246,13 +246,11 @@ export default function CRAReportsPage() {
   const submissionQueries = useQueries({
     queries: approvedIds.map((reportId) => ({
       queryKey: queryKeys.projects.craSubmissions(projectId, reportId),
-      queryFn: async (): Promise<CRASubmission[]> => {
-        try {
-          return await api.craSubmissions.list(projectId, reportId);
-        } catch {
-          return [];
-        }
-      },
+      // Rejects on failure (Codex R4): react-query then keeps the timeline
+      // it already had — e.g. the submission just recorded — instead of a
+      // failed refetch replacing it with an empty one. A first-load failure
+      // still renders as an empty timeline (data ?? [] below).
+      queryFn: () => api.craSubmissions.list(projectId, reportId),
     })),
   });
   const submissionsByReport: Record<string, CRASubmission[]> = {};
