@@ -23,7 +23,6 @@
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
 import Link from "next/link";
 import { useLocale, useTranslations } from "next-intl";
 import {
@@ -54,29 +53,18 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { SubmissionTimeline } from "@/components/cra-reports/submission-timeline";
+import {
+  reportEditSchema,
+  reportSubmitSchema,
+  type ReportEditFormValues,
+  type ReportSubmitFormValues,
+} from "@/lib/form-schemas/cra-report";
 
 const DRAFT_TRUNCATE_LENGTH = 800;
 
-const editSchema = z.object({
-  draft_text: z.string().min(1, "draft_text is required").max(50000),
-  decision_note: z.string().max(2000),
-});
-
-export type ReportEditFormValues = z.infer<typeof editSchema>;
-
-// SubmitForm schema. authority is required (backend rejects empty with 400)
-// and free-text VARCHAR(255) (Wave A: no enum). submitted_at is a
-// datetime-local value that page.tsx converts to RFC3339 before POST; an
-// empty value lets the server default to NOW(). reference_number is
-// VARCHAR(255); notes is TEXT (kept generous but bounded client-side).
-const submitSchema = z.object({
-  authority: z.string().min(1, "authority is required").max(255),
-  submitted_at: z.string(),
-  reference_number: z.string().max(255),
-  notes: z.string().max(5000),
-});
-
-export type ReportSubmitFormValues = z.infer<typeof submitSchema>;
+// Schemas live in @/lib/form-schemas/cra-report so their accept/reject
+// behaviour and messages are pinned by node --test.
+export type { ReportEditFormValues, ReportSubmitFormValues };
 
 /**
  * Current wall-clock time formatted for a <input type="datetime-local">
@@ -779,7 +767,7 @@ function EditForm({ report, disabled, onSubmit, onCancel }: EditFormProps) {
     handleSubmit,
     formState: { errors, isSubmitting },
   } = useForm<ReportEditFormValues>({
-    resolver: zodResolver(editSchema),
+    resolver: zodResolver(reportEditSchema),
     defaultValues: {
       draft_text: report.draft_text ?? "",
       decision_note: "",
@@ -869,7 +857,7 @@ function SubmitForm({ report, disabled, onSubmit, onCancel }: SubmitFormProps) {
     handleSubmit,
     formState: { errors, isSubmitting },
   } = useForm<ReportSubmitFormValues>({
-    resolver: zodResolver(submitSchema),
+    resolver: zodResolver(reportSubmitSchema),
     defaultValues: {
       authority: "",
       submitted_at: nowLocalDatetime(),

@@ -24,7 +24,6 @@
 import { useEffect, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
 import { useTranslations } from "next-intl";
 import {
   Loader2,
@@ -54,42 +53,19 @@ import {
 } from "@/components/ui/select";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DIFF_WEBHOOK_FORMATS,
+  diffWebhookSchema,
+  type DiffWebhookFormat,
+  type DiffWebhookFormValues,
+} from "@/lib/form-schemas/diff-webhook";
 
 const SECRET_PLACEHOLDER = "***";
-const FORMATS = ["json", "slack"] as const;
-type Format = (typeof FORMATS)[number];
-
-const schema = z
-  .object({
-    enabled: z.boolean(),
-    webhook_url: z.string().optional().default(""),
-    webhook_secret: z.string().optional().default(""),
-    format: z.enum(FORMATS),
-    critical_threshold: z.coerce.number().int().min(0),
-    high_threshold: z.coerce.number().int().min(0),
-    license_violation_threshold: z.coerce.number().int().min(0),
-  })
-  .superRefine((data, ctx) => {
-    if (data.enabled && data.webhook_url.trim() === "") {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["webhook_url"],
-        message: "url_required",
-      });
-    }
-    if (
-      data.webhook_url.trim() !== "" &&
-      !/^https?:\/\//.test(data.webhook_url)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["webhook_url"],
-        message: "url_protocol",
-      });
-    }
-  });
-
-type FormValues = z.infer<typeof schema>;
+// Schema lives in @/lib/form-schemas/diff-webhook (pinned by node --test).
+const FORMATS = DIFF_WEBHOOK_FORMATS;
+type Format = DiffWebhookFormat;
+const schema = diffWebhookSchema;
+type FormValues = DiffWebhookFormValues;
 
 interface SettingsDiffWebhookResponse {
   enabled: boolean;

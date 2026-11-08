@@ -16,7 +16,6 @@
 import { useEffect, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
 import { useTranslations } from "next-intl";
 import { Loader2, ShieldCheck, AlertTriangle, KeyRound } from "lucide-react";
 
@@ -39,6 +38,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  buildLlmSettingsSchema,
+  type LlmSettingsFormValues,
+} from "@/lib/form-schemas/llm-settings";
 
 // The PROVIDERS array below is one of three cross-language mirrors of
 // the LLM provider registry (Go supportedLLMProviders +
@@ -59,34 +62,13 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 const PROVIDERS = ["openai", "anthropic", "gemini", "azure_openai", "ollama"] as const;
 type Provider = (typeof PROVIDERS)[number];
 
-const API_KEY_PLACEHOLDER = "***";
-
-// Zod schema for the form. The api_key field is optional because the form
-// pre-fills it with the placeholder when a key is already configured —
-// re-submitting the placeholder means "preserve existing key".
+// Schema lives in @/lib/form-schemas/llm-settings (pinned by node --test).
+// PROVIDERS is passed in so the literal above stays where the Go parity
+// test reads it.
 const buildSchema = (requireKey: boolean) =>
-  z
-    .object({
-      provider: z.enum(PROVIDERS),
-      api_key: z.string().optional().default(""),
-      model: z.string().optional().default(""),
-      azure_endpoint: z.string().optional().default(""),
-      azure_deployment: z.string().optional().default(""),
-      ollama_url: z.string().optional().default(""),
-    })
-    .superRefine((data, ctx) => {
-      // Ollama is local — no API key needed.
-      if (data.provider === "ollama") return;
-      if (requireKey && (!data.api_key || data.api_key === API_KEY_PLACEHOLDER)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["api_key"],
-          message: "api_key_required",
-        });
-      }
-    });
+  buildLlmSettingsSchema(PROVIDERS, requireKey);
 
-type FormValues = z.infer<ReturnType<typeof buildSchema>>;
+type FormValues = LlmSettingsFormValues<typeof PROVIDERS>;
 
 interface SettingsLLMResponse {
   mode: string;

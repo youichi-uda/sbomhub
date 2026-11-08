@@ -17,7 +17,10 @@
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
+import {
+  triageEditSchema,
+  type TriageEditFormValues,
+} from "@/lib/form-schemas/triage-draft";
 import { useTranslations } from "next-intl";
 import {
   CheckCircle2,
@@ -82,25 +85,8 @@ const JUSTIFICATION_OPTIONS: readonly VexDraftJustification[] = [
   "inline_mitigations_already_exist",
 ] as const;
 
-const editSchema = z.object({
-  state: z.enum(["not_affected", "affected", "under_investigation", "resolved"]),
-  justification: z.enum([
-    "",
-    "code_not_present",
-    "code_not_reachable",
-    "requires_configuration",
-    "requires_dependency",
-    "requires_environment",
-    "protected_by_compiler",
-    "protected_at_perimeter",
-    "protected_at_runtime",
-    "inline_mitigations_already_exist",
-  ]),
-  detail: z.string().max(4000),
-  note: z.string().max(2000),
-});
-
-export type EditFormValues = z.infer<typeof editSchema>;
+// Schema lives in @/lib/form-schemas/triage-draft (pinned by node --test).
+export type EditFormValues = TriageEditFormValues;
 
 export interface DraftCardProps {
   draft: VexDraft;
@@ -497,7 +483,7 @@ function EditForm({ draft, disabled, onSubmit, onCancel }: EditFormProps) {
     handleSubmit,
     formState: { errors, isSubmitting },
   } = useForm<EditFormValues>({
-    resolver: zodResolver(editSchema),
+    resolver: zodResolver(triageEditSchema),
     defaultValues: {
       state: draft.State,
       justification: draft.Justification ?? "",
