@@ -3,17 +3,16 @@ import en from '../messages/en.json';
 import { API_BASE_URL, createProject, deleteProject, uniqueName } from './fixtures/vuln-project';
 
 // The projects list page (src/app/[locale]/(dashboard)/projects/page.tsx)
-// catches a failed GET /projects and renders its normal "No projects yet"
-// empty state: there is no error or retry UI. The two failure-path tests
-// below keep the honest assertions (an error is shown, the misleading empty
-// state is not) behind a fixme until the page grows an error state.
-const LOAD_FAILURE_BUG =
-    'BUG: projects list shows the "No projects yet" empty state when GET /api/v1/projects fails (network error or HTTP 500); no error message or retry is rendered';
-
+// used to catch a failed GET /projects and render its normal "No projects
+// yet" empty state (M65 bug 10). It now shows an error with a Retry button.
 async function expectLoadFailureShown(page: Page) {
     await expect(page.getByRole('heading', { level: 1, name: en.Projects.title })).toBeVisible({ timeout: 15000 });
+    const error = page.getByTestId('projects-load-error');
+    await expect(error).toBeVisible();
+    await expect(error).toContainText(en.Projects.loadFailed);
     await expect(page.getByText(/failed to load|could not load|error/i)).toBeVisible();
     await expect(page.getByText(en.Projects.noProjects)).toHaveCount(0);
+    return error;
 }
 
 test.describe('Error Handling', () => {
@@ -30,10 +29,17 @@ test.describe('Error Handling', () => {
     });
 
     test('should handle network error gracefully', async ({ page }) => {
-        test.fixme(true, LOAD_FAILURE_BUG);
-        await page.route(`${API_BASE_URL}/api/v1/projects`, (route) => route.abort());
+        let fail = true;
+        await page.route(`${API_BASE_URL}/api/v1/projects`, (route) => (fail ? route.abort() : route.continue()));
         await page.goto('/en/projects');
-        await expectLoadFailureShown(page);
+        const error = await expectLoadFailureShown(page);
+
+        // Retry re-issues the request; once the API answers, the list renders.
+        fail = false;
+        const retried = page.waitForResponse((r) => r.url() === `${API_BASE_URL}/api/v1/projects`);
+        await error.getByRole('button', { name: en.Common.retry }).click();
+        expect((await retried).status()).toBe(200);
+        await expect(error).toHaveCount(0);
     });
 
     test('should show a loading state while the projects request is pending', async ({ page }) => {
@@ -125,7 +131,6 @@ test.describe('Error Handling', () => {
     // auth.spec.ts.)
 
     test('should handle API error responses gracefully', async ({ page }) => {
-        test.fixme(true, LOAD_FAILURE_BUG);
         await page.route(`${API_BASE_URL}/api/v1/projects`, (route) =>
             route.fulfill({
                 status: 500,
@@ -135,6 +140,67 @@ test.describe('Error Handling', () => {
         );
         await page.goto('/en/projects');
         await expectLoadFailureShown(page);
+    });
+
+    // M65 bug 10, same pattern on the other list pages migrated in M64: a
+    // failed GET used to render the page's normal empty state.
+    for (const page_ of [
+        {
+            name: 'API keys settings',
+            path: '/en/settings/apikeys',
+            api: '/api/v1/apikeys',
+            testId: 'apikeys-load-error',
+            message: en.Settings.APIKeys.loadFailed,
+            empty: en.Settings.APIKeys.noKeys,
+        },
+        {
+            name: 'integrations settings',
+            path: '/en/settings/integrations',
+            api: '/api/v1/integrations',
+            testId: 'integrations-load-error',
+            message: en.Settings.Integrations.loadFailed,
+            empty: en.Settings.Integrations.addFirstIntegration,
+        },
+    ]) {
+        test(`should show a load error with retry on the ${page_.name} page`, async ({ page }) => {
+            let fail = true;
+            await page.route(`${API_BASE_URL}${page_.api}`, (route) =>
+                fail
+                    ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'boom' }) })
+                    : route.continue(),
+            );
+            await page.goto(page_.path);
+            const error = page.getByTestId(page_.testId);
+            await expect(error).toBeVisible({ timeout: 15000 });
+            await expect(error).toContainText(page_.message);
+            await expect(page.getByText(page_.empty, { exact: true })).toHaveCount(0);
+
+            fail = false;
+            const retried = page.waitForResponse((r) => r.url() === `${API_BASE_URL}${page_.api}`);
+            await error.getByRole('button', { name: en.Common.retry }).click();
+            expect((await retried).status()).toBe(200);
+            await expect(error).toHaveCount(0);
+        });
+    }
+
+    test("should show a load error on a project's API keys tab", async ({ page, request }) => {
+        const project = await createProject(request, uniqueName('API Keys Load Error'), 'load error');
+        try {
+            await page.route(`${API_BASE_URL}/api/v1/projects/${project.id}/apikeys`, (route) =>
+                route.request().method() === 'GET'
+                    ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'boom' }) })
+                    : route.continue(),
+            );
+            await page.goto(`/en/projects/${project.id}`);
+            await expect(page.getByRole('heading', { level: 1, name: project.name })).toBeVisible({ timeout: 15000 });
+            await page.getByRole('button', { name: /^API Keys/ }).click();
+            const error = page.getByTestId('project-apikeys-load-error');
+            await expect(error).toBeVisible();
+            await expect(error).toContainText(en.ProjectDetail.apiKeysLoadFailed);
+            await expect(page.getByText(en.ProjectDetail.noApiKeys, { exact: true })).toHaveCount(0);
+        } finally {
+            await deleteProject(request, project.id);
+        }
     });
 
     // Duplicate project names: the API deliberately allows them within a

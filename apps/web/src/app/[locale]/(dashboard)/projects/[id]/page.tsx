@@ -14,6 +14,7 @@ import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
 import { KEVBadge } from "@/components/vulnerability/kev-badge";
 import { EOLBadge } from "@/components/component/eol-badge";
 import { DependencyPathPanel } from "@/components/component/dependency-path";
+import { LoadError } from "@/components/ui/load-error";
 import Link from "next/link";
 import { queryKeys } from "@/lib/query/keys";
 import { useRetainedData } from "@/lib/query/use-retained-data";
@@ -168,22 +169,20 @@ export default function ProjectDetailPage() {
   });
   const licensePolicies = licensePoliciesQuery.data ?? [];
 
-  // Latest SBOM id, used to check license violations. NOTE: plain fetch
-  // without the API client's auth headers — unchanged from before, kept as
-  // is (behaviour-preserving migration).
+  // Latest SBOM id, used to check license violations. Through the API
+  // client so it carries the auth / org headers (it used to be a bare fetch
+  // that 401'd in Clerk mode — M64 residual). No SBOM (404) is
+  // null; any other failure is logged and also leaves the id null, so the
+  // license tab simply has nothing to check, as before.
   const sbomIdQuery = useQuery({
     queryKey: queryKeys.projects.latestSbomId(projectId),
     queryFn: async (): Promise<string | null> => {
       try {
-        const sbom = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/api/v1/projects/${projectId}/sbom`);
-        if (sbom.ok) {
-          const data = await sbom.json();
-          return data.id;
-        }
+        return (await api.projects.getLatestSbom(projectId))?.id ?? null;
       } catch (error) {
         console.error("Failed to load SBOM ID:", error);
+        return null;
       }
-      return null;
     },
   });
   const sbomId = sbomIdQuery.data ?? null;
@@ -218,8 +217,9 @@ export default function ProjectDetailPage() {
   // validated + audit-logged) `/projects/:id/apikeys` route. Preloaded on
   // mount so the tab counter renders an accurate badge before the operator
   // switches tabs. F164 normalisation (`data || []`) keeps the array shape
-  // stable when the backend emits a JSON null; a failure is logged and
-  // resets the list to [] (it does not block project-level rendering).
+  // stable when the backend emits a JSON null. A failure does not block
+  // project-level rendering; the tab shows an error with retry instead of
+  // the "no API keys" empty state (M65 bug 10: it used to resolve to []).
   const apiKeysQuery = useQuery({
     queryKey: queryKeys.projects.apiKeys(projectId),
     queryFn: async (): Promise<APIKey[]> => {
@@ -227,11 +227,12 @@ export default function ProjectDetailPage() {
         return (await api.projects.getAPIKeys(projectId)) || [];
       } catch (error) {
         console.error("Failed to load API keys:", error);
-        return [];
+        throw error;
       }
     },
   });
   const apiKeys = apiKeysQuery.data ?? [];
+  const apiKeysLoadFailed = apiKeysQuery.isError;
 
   const loadComponents = () => void componentsQuery.refetch();
   const loadVexStatements = () => void vexQuery.refetch();
@@ -1244,7 +1245,17 @@ export default function ProjectDetailPage() {
             {/* Key list — `.border.rounded-lg.p-3` per-row class and
                 an inline `Delete` button with `text-red-500` are pinned
                 in api-keys.spec.ts L139/L176. */}
-            {apiKeys.length === 0 && !showCreateApiKey && !apiKeyJustCreated ? (
+            {apiKeysLoadFailed && (
+              <LoadError
+                compact={apiKeys.length > 0}
+                testId="project-apikeys-load-error"
+                message={tp("apiKeysLoadFailed")}
+                retryLabel={tc("retry")}
+                onRetry={() => void apiKeysQuery.refetch()}
+                retrying={apiKeysQuery.isFetching}
+              />
+            )}
+            {apiKeysLoadFailed && apiKeys.length === 0 ? null : apiKeys.length === 0 && !showCreateApiKey && !apiKeyJustCreated ? (
               <p className="text-center text-muted-foreground py-8">
                 {tp("noApiKeys")}
               </p>

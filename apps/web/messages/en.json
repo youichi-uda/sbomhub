@@ -233,7 +233,9 @@
     "deleteConfirm": "Delete this project?",
     "deleteAriaLabel": "Delete project {name}",
     "namePlaceholder": "My Project",
-    "descriptionPlaceholder": "Project description"
+    "descriptionPlaceholder": "Project description",
+    "loadFailed": "Failed to load projects. Check that the API is reachable, then retry.",
+    "createFailed": "Failed to create the project"
   },
   "ProjectDetail": {
     "backToProjects": "Back to Projects",
@@ -322,7 +324,8 @@
     "apiKeyDeleteFailed": "Failed to delete API key",
     "apiKeyDescription": "API keys for CLI, MCP Server, and CI/CD integrations, limited to this project.",
     "apiKeyExpired": "Expired",
-    "apiKeyPrefix": "Prefix"
+    "apiKeyPrefix": "Prefix",
+    "apiKeysLoadFailed": "Failed to load this project's API keys. Check that the API is reachable, then retry."
   },
   "VexForm": {
     "createFor": "Create VEX Statement for {cveId}",
@@ -616,6 +619,7 @@
   },
   "RemediationPanel": {
     "fetchFailed": "Failed to fetch remediation information",
+    "notAvailable": "No remediation guidance is available for this CVE (OSV has no entry, or it could not be reached).",
     "unknownError": "Unknown error",
     "affectedComponent": "Affected Component",
     "remediationMethod": "Remediation Method",
@@ -821,7 +825,8 @@
     "yes": "Yes",
     "no": "No",
     "notFound": "Not found",
-    "projectNotFound": "Project not found"
+    "projectNotFound": "Project not found",
+    "retry": "Retry"
   },
   "Header": {
     "logout": "Logout",
@@ -916,7 +921,8 @@
       "step2Title": "2. Create Tickets from Vulnerabilities",
       "step2Description": "Click the \"Create Ticket\" button from the vulnerability list or detail page to create an issue.",
       "step3Title": "3. Sync Status",
-      "step3Description": "Ticket status is automatically synced. When an issue is resolved, the vulnerability status is also updated."
+      "step3Description": "Ticket status is automatically synced. When an issue is resolved, the vulnerability status is also updated.",
+      "loadFailed": "Failed to load integrations. Check that the API is reachable, then retry."
     },
     "Scan": {
       "title": "Periodic Scan Settings",
@@ -1069,7 +1075,8 @@
       "usageDescription": "Use your API key with the following integrations",
       "usageCLI": "CLI (sbomhub-cli)",
       "usageMCP": "MCP Server",
-      "usageCI": "CI/CD (GitHub Actions, etc.)"
+      "usageCI": "CI/CD (GitHub Actions, etc.)",
+      "loadFailed": "Failed to load API keys. Check that the API is reachable, then retry."
     }
   },
   "DependencyPath": {
@@ -1462,13 +1469,13 @@
       "overrideSubmit": "Save override",
       "overrideSubmitting": "Saving...",
       "overrideFormStatusLabel": "New status",
-      "overrideFormNoteLabel": "Override reason (optional)",
+      "overrideFormNoteLabel": "Override reason (required)",
       "overrideFormNotePlaceholder": "Why are you overriding the evaluator verdict? (e.g. vendor attestation reviewed)",
       "overrideFormImprovementLabel": "Improvement action (optional)",
       "overrideFormImprovementPlaceholder": "Next step for this criterion (leave blank to keep existing)",
       "overrideFormImprovementHint": "Leaving this empty keeps the existing improvement action. To clear it, enter a single space, or use 'Clear override' to drop the override entirely.",
       "overrideValidationStatus": "Status is required",
-      "overrideValidationNote": "Note must be 2000 characters or fewer",
+      "overrideValidationNote": "Enter a reason of 1–2000 characters (whitespace-only is not accepted)",
       "clearOverrideButton": "Clear override",
       "clearOverrideConfirm": "This drops the manual override on this row and reverts to the evaluator verdict. The rationale (why the override is no longer needed) is recorded in the audit log.",
       "clearOverrideNoteLabel": "Clear rationale (required)",

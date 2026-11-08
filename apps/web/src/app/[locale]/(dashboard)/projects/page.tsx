@@ -7,7 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, Project } from "@/lib/api";
+import { api, APIError, Project } from "@/lib/api";
+import { LoadError } from "@/components/ui/load-error";
 import { queryKeys } from "@/lib/query/keys";
 import { Plus, Trash2, Upload, FolderOpen } from "lucide-react";
 import Link from "next/link";
@@ -19,6 +20,7 @@ export default function ProjectsPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const projectsQuery = useQuery({
     queryKey: queryKeys.projects.list(),
@@ -26,13 +28,19 @@ export default function ProjectsPage() {
       try {
         return (await api.projects.list()) || [];
       } catch (error) {
-        // A failed load renders the empty state, as before.
+        // M65 bug 10: a failed load used to resolve to [] and render the
+        // "No projects yet" empty state. It is now an error (with retry).
         console.error("Failed to load projects:", error);
-        return [] as Project[];
+        throw error;
       }
     },
   });
   const projects = projectsQuery.data ?? [];
+  // Failed with nothing to show (first load) vs. a failed refetch while the
+  // previous rows are still on screen.
+  const loadFailed = projectsQuery.isError && projectsQuery.data === undefined;
+  const refetchFailed = projectsQuery.isError && projectsQuery.data !== undefined;
+  const retry = () => void projectsQuery.refetch();
 
   // Create / delete patch the cached list in place (no refetch), exactly as
   // the previous local-state version did.
@@ -41,6 +49,7 @@ export default function ProjectsPage() {
   }
 
   async function handleCreate() {
+    setCreateError(null);
     try {
       const project = await api.projects.create({ name, description });
       setProjects((prev) => [project, ...prev]);
@@ -49,7 +58,19 @@ export default function ProjectsPage() {
       setDescription("");
     } catch (error) {
       console.error("Failed to create project:", error);
+      // Keep the dialog open with the API's own reason (e.g. a validation
+      // 400) — it used to close nothing and say nothing.
+      setCreateError(
+        error instanceof APIError && typeof error.body?.error === "string"
+          ? `${t("createFailed")}: ${error.body.error}`
+          : t("createFailed"),
+      );
     }
+  }
+
+  function handleDialogOpenChange(open: boolean) {
+    setDialogOpen(open);
+    if (!open) setCreateError(null);
   }
 
   async function handleDelete(id: string) {
@@ -80,7 +101,26 @@ export default function ProjectsPage() {
         </Button>
       </div>
 
-      {projects.length === 0 ? (
+      {refetchFailed && (
+        <LoadError
+          compact
+          testId="projects-load-error"
+          message={t("loadFailed")}
+          retryLabel={tc("retry")}
+          onRetry={retry}
+          retrying={projectsQuery.isFetching}
+        />
+      )}
+
+      {loadFailed ? (
+        <LoadError
+          testId="projects-load-error"
+          message={t("loadFailed")}
+          retryLabel={tc("retry")}
+          onRetry={retry}
+          retrying={projectsQuery.isFetching}
+        />
+      ) : projects.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <FolderOpen className="h-12 w-12 text-muted-foreground mb-4" />
@@ -132,7 +172,7 @@ export default function ProjectsPage() {
         </div>
       )}
 
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+      <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("create")}</DialogTitle>
@@ -154,9 +194,14 @@ export default function ProjectsPage() {
                 placeholder={t("descriptionPlaceholder")}
               />
             </div>
+            {createError && (
+              <p role="alert" className="text-sm text-destructive bg-destructive/10 p-3 rounded-md">
+                {createError}
+              </p>
+            )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>
+            <Button variant="outline" onClick={() => handleDialogOpenChange(false)}>
               {tc("cancel")}
             </Button>
             <Button onClick={handleCreate} disabled={!name}>

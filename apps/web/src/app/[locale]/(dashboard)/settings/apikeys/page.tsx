@@ -36,11 +36,13 @@ import {
 } from "@/components/ui/alert-dialog";
 import { api, APIKey, APIKeyWithSecret } from "@/lib/api";
 import { queryKeys } from "@/lib/query/keys";
+import { LoadError } from "@/components/ui/load-error";
 import { Plus, Trash2, RefreshCw, Copy, Check, Key, Terminal, Server } from "lucide-react";
 import { useTranslations } from "next-intl";
 
 export default function APIKeysPage() {
   const t = useTranslations("Settings.APIKeys");
+  const tc = useTranslations("Common");
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,8 +54,9 @@ export default function APIKeysPage() {
   const [permissions, setPermissions] = useState("write");
   const [expiresInDays, setExpiresInDays] = useState<string>("");
 
-  // A failed load leaves the previous list (or the empty state) on screen
-  // and is only logged, as before; the mutations below refetch the list.
+  // A failed load shows an error with retry (M65 bug 10: it used to fall
+  // through to the "no keys" empty state); a failed refetch keeps the
+  // previous rows under an error banner. The mutations below refetch.
   const keysQuery = useQuery({
     queryKey: queryKeys.apiKeys.list(),
     queryFn: async (): Promise<APIKey[]> => {
@@ -68,6 +71,8 @@ export default function APIKeysPage() {
   const keys = keysQuery.data ?? [];
   const loading = keysQuery.isPending;
   const loadKeys = () => keysQuery.refetch();
+  const loadFailed = keysQuery.isError && keysQuery.data === undefined;
+  const refetchFailed = keysQuery.isError && keysQuery.data !== undefined;
 
   const resetForm = () => {
     setName("");
@@ -270,7 +275,26 @@ export default function APIKeysPage() {
         </Dialog>
       </div>
 
-      {keys.length === 0 ? (
+      {refetchFailed && (
+        <LoadError
+          compact
+          testId="apikeys-load-error"
+          message={t("loadFailed")}
+          retryLabel={tc("retry")}
+          onRetry={() => void loadKeys()}
+          retrying={keysQuery.isFetching}
+        />
+      )}
+
+      {loadFailed ? (
+        <LoadError
+          testId="apikeys-load-error"
+          message={t("loadFailed")}
+          retryLabel={tc("retry")}
+          onRetry={() => void loadKeys()}
+          retrying={keysQuery.isFetching}
+        />
+      ) : keys.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <Key className="h-12 w-12 text-muted-foreground mb-4" />

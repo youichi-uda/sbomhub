@@ -5,7 +5,6 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslations, useLocale } from 'next-intl';
 import { Loader2, FileText, Download, Plus, RefreshCw, Clock, CheckCircle2, AlertTriangle, Settings } from 'lucide-react';
 import { api, GeneratedReport, ReportListResponse } from '@/lib/api';
-import { useAuth, useOrganization } from '@/lib/auth';
 import { queryKeys } from '@/lib/query/keys';
 import { useRetainedData } from '@/lib/query/use-retained-data';
 import { errorSlot, resolveErrorSlot, type ErrorSlot } from '@/lib/query/error-slot';
@@ -15,8 +14,6 @@ export default function ReportsPage() {
     const t = useTranslations("Reports");
     const tc = useTranslations("Common");
     const locale = useLocale();
-    const { getToken } = useAuth();
-    const { organization } = useOrganization();
     const [page, setPage] = useState(1);
     const [generating, setGenerating] = useState(false);
     // Generate / download failures share the banner with load failures.
@@ -80,19 +77,8 @@ export default function ReportsPage() {
 
     const handleDownload = async (report: GeneratedReport) => {
         try {
-            const token = await getToken();
-            const headers: Record<string, string> = {
-                'Authorization': `Bearer ${token}`,
-            };
-            if (organization?.id) {
-                headers['X-Clerk-Org-ID'] = organization.id;
-            }
-            const response = await fetch(api.reports.downloadUrl(report.id), {
-                headers,
-            });
-            if (!response.ok) throw new Error('Download failed');
-
-            const blob = await response.blob();
+            // Through the API client: its auth / org headers (M64 residual).
+            const { blob } = await api.reports.download(report.id);
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;

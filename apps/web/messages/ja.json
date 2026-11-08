@@ -233,7 +233,9 @@
     "deleteConfirm": "このプロジェクトを削除しますか？",
     "deleteAriaLabel": "プロジェクト「{name}」を削除",
     "namePlaceholder": "マイプロジェクト",
-    "descriptionPlaceholder": "プロジェクトの説明"
+    "descriptionPlaceholder": "プロジェクトの説明",
+    "loadFailed": "プロジェクトの読み込みに失敗しました。API に接続できるか確認して、再試行してください。",
+    "createFailed": "プロジェクトの作成に失敗しました"
   },
   "ProjectDetail": {
     "backToProjects": "プロジェクトに戻る",
@@ -322,7 +324,8 @@
     "apiKeyDeleteFailed": "APIキーの削除に失敗しました",
     "apiKeyDescription": "CLI / MCP Server / CI/CD 連携用の API キー。このプロジェクトに限定されます。",
     "apiKeyExpired": "期限切れ",
-    "apiKeyPrefix": "プレフィックス"
+    "apiKeyPrefix": "プレフィックス",
+    "apiKeysLoadFailed": "このプロジェクトの API キーの読み込みに失敗しました。API に接続できるか確認して、再試行してください。"
   },
   "VexForm": {
     "createFor": "{cveId}のVEXステートメントを作成",
@@ -616,6 +619,7 @@
   },
   "RemediationPanel": {
     "fetchFailed": "修正情報の取得に失敗しました",
+    "notAvailable": "この CVE の対処情報はありません (OSV に情報がないか、OSV に接続できません)。",
     "unknownError": "不明なエラー",
     "affectedComponent": "影響を受けるコンポーネント",
     "remediationMethod": "修正方法",
@@ -821,7 +825,8 @@
     "yes": "はい",
     "no": "いいえ",
     "notFound": "見つかりませんでした",
-    "projectNotFound": "プロジェクトが見つかりません"
+    "projectNotFound": "プロジェクトが見つかりません",
+    "retry": "再試行"
   },
   "Header": {
     "logout": "ログアウト",
@@ -916,7 +921,8 @@
       "step2Title": "2. 脆弱性からチケットを作成",
       "step2Description": "脆弱性一覧や詳細ページから「チケットを作成」ボタンをクリックして、課題を作成できます。",
       "step3Title": "3. ステータスを同期",
-      "step3Description": "作成されたチケットのステータスは自動的に同期されます。課題が解決されると、脆弱性のステータスも更新されます。"
+      "step3Description": "作成されたチケットのステータスは自動的に同期されます。課題が解決されると、脆弱性のステータスも更新されます。",
+      "loadFailed": "連携の読み込みに失敗しました。API に接続できるか確認して、再試行してください。"
     },
     "Scan": {
       "title": "定期スキャン設定",
@@ -1069,7 +1075,8 @@
       "usageDescription": "作成したAPIキーは以下の用途で使用できます",
       "usageCLI": "CLI (sbomhub-cli)",
       "usageMCP": "MCP Server",
-      "usageCI": "CI/CD (GitHub Actions など)"
+      "usageCI": "CI/CD (GitHub Actions など)",
+      "loadFailed": "API キーの読み込みに失敗しました。API に接続できるか確認して、再試行してください。"
     }
   },
   "DependencyPath": {
@@ -1462,13 +1469,13 @@
       "overrideSubmit": "上書きを保存",
       "overrideSubmitting": "保存中...",
       "overrideFormStatusLabel": "新しいステータス",
-      "overrideFormNoteLabel": "上書き理由 (任意)",
+      "overrideFormNoteLabel": "上書き理由 (必須)",
       "overrideFormNotePlaceholder": "上書きの根拠を残してください (例: ベンダー証明書を確認済み)",
       "overrideFormImprovementLabel": "改善アクション (任意)",
       "overrideFormImprovementPlaceholder": "次に行うべき作業を記入してください (空欄で既存値を保持)",
       "overrideFormImprovementHint": "空欄を送信すると既存の改善アクションを保持します。 空文字で上書きしたい場合は半角スペースを入れるか、 「上書きをクリア」 で先に解除してください。",
       "overrideValidationStatus": "ステータスを選択してください",
-      "overrideValidationNote": "メモは 2000 文字以内で入力してください",
+      "overrideValidationNote": "上書き理由を 1〜2000 文字で入力してください (空白のみは不可)",
       "clearOverrideButton": "上書きをクリア",
       "clearOverrideConfirm": "この項目の手動上書きを解除し、 evaluator 判定に戻します。 解除の根拠 (なぜ上書きが不要になったか) は監査ログに記録されます。",
       "clearOverrideNoteLabel": "解除理由 (必須)",

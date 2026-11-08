@@ -183,23 +183,86 @@ test.describe('Vulnerabilities', () => {
     await expect.poll(renderedOrder).toEqual(byCvss.map((v) => v.cve_id));
   });
 
+  // M65 bug 3: RemediationPanel fetched the RELATIVE /api/v1/remediation/:cve
+  // on the web origin (a Next.js 404) and never rendered the NVD/OSV links.
+  // It now calls the API (NEXT_PUBLIC_API_URL) through the API client.
+  const remediationUrl = (cveId: string) =>
+    (r: { url(): string }) => new URL(r.url()).pathname === `/api/v1/remediation/${cveId}`;
+
   test('should display CVE link that opens in new tab', async ({ page }) => {
-    test.fixme(
-      true,
-      'BUG: RemediationPanel fetches the relative /api/v1/remediation/:cve on the web origin (404), so it only shows "Failed to fetch remediation information" and never renders the NVD/OSV links',
-    );
     await openVulnerabilitiesTab(page, fixture.projectId);
 
     const cveId = FIXTURE_CVES[0].cveId;
     const entry = page.locator(`[data-vuln-cve-id="${cveId}"]`);
+    // The real request goes to the API origin, not the web origin, and gets
+    // a JSON answer from the API (the hermetic stack is SBOMHUB_OFFLINE, so
+    // OSV is unreachable and the API answers 404 "remediation not available").
+    const asked = page.waitForRequest(remediationUrl(cveId));
+    const answered = page.waitForResponse(remediationUrl(cveId));
     // The RemediationPanel trigger is the button labelled with the CVE id.
     await entry.getByRole('button', { name: new RegExp(cveId) }).click();
+    expect(new URL((await asked).url()).origin).toBe(new URL(API_BASE_URL).origin);
+    const res = await answered;
+    expect(res.headers()['content-type']).toContain('application/json');
+    expect(res.status()).toBe(404);
+    expect((await res.json()).error).toBe('remediation not available');
 
     const nvdLink = entry.getByRole('link', { name: 'NVD' });
     await expect(nvdLink).toBeVisible({ timeout: 10000 });
+    await expect(entry.getByText(en.RemediationPanel.notAvailable)).toBeVisible();
     await expect(entry.getByText(en.RemediationPanel.fetchFailed)).toHaveCount(0);
     await expect(nvdLink).toHaveAttribute('href', `https://nvd.nist.gov/vuln/detail/${cveId}`);
     await expect(nvdLink).toHaveAttribute('target', '_blank');
     await expect(nvdLink).toHaveAttribute('rel', /noopener/);
+    await expect(entry.getByRole('link', { name: 'OSV' })).toHaveAttribute('href', `https://osv.dev/vulnerability/${cveId}`);
+  });
+
+  test('should render remediation guidance returned by the API', async ({ page }) => {
+    const cveId = FIXTURE_CVES[0].cveId;
+    // Stubbed: the hermetic stack cannot reach OSV. Only the rendering of a
+    // successful answer is checked here; the real round trip is above.
+    await page.route(`${API_BASE_URL}/api/v1/remediation/${cveId}**`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          cve_id: cveId,
+          summary: 'stub',
+          severity: 'CRITICAL',
+          affected_component: { name: 'log4j-core', ecosystem: 'Maven', current_version: '2.14.1' },
+          remediation: { type: 'upgrade', target_version: '2.17.1', commands: { maven: 'mvn versions:use-dep-version -Dincludes=org.apache.logging.log4j:log4j-core -DdepVersion=2.17.1' } },
+          workarounds: null,
+        }),
+      }),
+    );
+    await openVulnerabilitiesTab(page, fixture.projectId);
+    const entry = page.locator(`[data-vuln-cve-id="${cveId}"]`);
+    await entry.getByRole('button', { name: new RegExp(cveId) }).click();
+
+    await expect(entry.getByText(en.RemediationPanel.recommendedUpdate.replace('{version}', '2.17.1'), { exact: false })).toBeVisible({ timeout: 10000 });
+    await expect(entry.getByText(/mvn versions:use-dep-version/)).toBeVisible();
+    await expect(entry.getByRole('link', { name: 'NVD' })).toBeVisible();
+    await expect(entry.getByText(en.RemediationPanel.notAvailable)).toHaveCount(0);
+    await expect(entry.getByText(en.RemediationPanel.fetchFailed)).toHaveCount(0);
+  });
+
+  test('should report a failed remediation request as a failure, and retry on the next open', async ({ page }) => {
+    const cveId = FIXTURE_CVES[0].cveId;
+    let calls = 0;
+    await page.route(`${API_BASE_URL}/api/v1/remediation/${cveId}**`, (route) => {
+      calls += 1;
+      return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'boom' }) });
+    });
+    await openVulnerabilitiesTab(page, fixture.projectId);
+    const entry = page.locator(`[data-vuln-cve-id="${cveId}"]`);
+    const trigger = entry.getByRole('button', { name: new RegExp(cveId) });
+    await trigger.click();
+    await expect(entry.getByText(en.RemediationPanel.fetchFailed)).toBeVisible({ timeout: 10000 });
+    await expect(entry.getByText(en.RemediationPanel.notAvailable)).toHaveCount(0);
+    await trigger.click(); // collapse
+    await expect(entry.getByText(en.RemediationPanel.fetchFailed)).toHaveCount(0);
+    await trigger.click(); // re-open retries
+    await expect(entry.getByText(en.RemediationPanel.fetchFailed)).toBeVisible();
+    expect(calls).toBe(2);
   });
 });

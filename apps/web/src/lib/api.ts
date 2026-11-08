@@ -1885,6 +1885,38 @@ export function setOrgIdGetter(getter: () => string | null) {
   getOrgId = getter;
 }
 
+/**
+ * GET a non-JSON body (file download / CSV export) from the API with the
+ * same auth + org headers as request(). Callers used to hand-roll this with
+ * a raw fetch() and their own copy of the header logic (M64 residual); a
+ * non-2xx answer throws APIError exactly like request() does.
+ */
+async function requestBlob(path: string): Promise<{ blob: Blob; filename: string | null }> {
+  const headers: Record<string, string> = {};
+  if (getAuthToken) {
+    const token = await getAuthToken();
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+  }
+  if (getOrgId) {
+    const orgId = getOrgId();
+    if (orgId) headers["X-Clerk-Org-ID"] = orgId;
+  }
+  const res = await fetch(`${API_URL}${path}`, { headers });
+  if (!res.ok) {
+    let body: Record<string, unknown> | undefined;
+    try {
+      const text = await res.text();
+      if (text) body = JSON.parse(text);
+    } catch {
+      // body left undefined; APIError falls back to "API error: <status>".
+    }
+    throw new APIError(res.status, body);
+  }
+  const cd = res.headers.get("Content-Disposition") || "";
+  const match = cd.match(/filename="([^"]+)"/i);
+  return { blob: await res.blob(), filename: match ? match[1] : null };
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -1997,7 +2029,67 @@ function cleanCRAReportFilter(filter?: CRAReportListFilter): URLSearchParams {
   return params;
 }
 
+function auditExportPath(filter?: AuditFilter): string {
+  const params = new URLSearchParams();
+  if (filter?.action) params.set("action", filter.action);
+  if (filter?.resource_type) params.set("resource_type", filter.resource_type);
+  if (filter?.user_id) params.set("user_id", filter.user_id);
+  if (filter?.start_date) params.set("start_date", filter.start_date);
+  if (filter?.end_date) params.set("end_date", filter.end_date);
+  const query = params.toString();
+  return `/api/v1/audit-logs/export${query ? `?${query}` : ""}`;
+}
+
+/** GET /api/v1/remediation/:cve_id (handler/remediation.go). */
+export interface RemediationGuidance {
+  cve_id: string;
+  summary: string;
+  severity: string;
+  affected_component: {
+    name: string;
+    ecosystem: string;
+    current_version: string;
+    affected_versions?: string;
+  };
+  remediation: {
+    type: string;
+    target_version: string;
+    commands: Record<string, string>;
+  };
+  workarounds: Array<{ description: string; command?: string }>;
+}
+
 export const api = {
+  /**
+   * Remediation guidance for a CVE (OSV-backed). Answers 404 "remediation
+   * not available" when OSV has nothing or is unreachable (including
+   * SBOMHUB_OFFLINE). Nil Go maps / slices are normalised here.
+   */
+  remediation: {
+    getByCVE: async (
+      cveId: string,
+      opts?: { componentName?: string; componentVersion?: string },
+    ): Promise<RemediationGuidance> => {
+      const params = new URLSearchParams();
+      if (opts?.componentName) params.set("component_name", opts.componentName);
+      if (opts?.componentVersion) params.set("component_version", opts.componentVersion);
+      const qs = params.toString();
+      const raw = await request<RemediationGuidance>(
+        `/api/v1/remediation/${encodeURIComponent(cveId)}${qs ? `?${qs}` : ""}`,
+      );
+      return {
+        ...raw,
+        affected_component: raw.affected_component ?? { name: "", ecosystem: "", current_version: "" },
+        remediation: {
+          type: raw.remediation?.type ?? "",
+          target_version: raw.remediation?.target_version ?? "",
+          commands: raw.remediation?.commands ?? {},
+        },
+        workarounds: raw.workarounds ?? [],
+      };
+    },
+  },
+
   stats: () => request<Stats>("/api/v1/stats"),
 
   // Dashboard
@@ -2118,6 +2210,20 @@ export const api = {
     list: async (): Promise<Project[]> =>
       (await request<Project[]>("/api/v1/projects")) ?? [],
     get: (id: string) => request<Project>(`/api/v1/projects/${id}`),
+    /**
+     * Latest SBOM record of a project (raw_data is never serialised), or
+     * null when the project has none (the API answers 404 "sbom not
+     * found"). Any other failure throws. Goes through request() so it
+     * carries the auth / org headers (M64 residual).
+     */
+    getLatestSbom: async (id: string): Promise<Sbom | null> => {
+      try {
+        return (await request<Sbom>(`/api/v1/projects/${id}/sbom`)) ?? null;
+      } catch (err) {
+        if (err instanceof APIError && err.status === 404) return null;
+        throw err;
+      }
+    },
     create: (data: { name: string; description: string }) =>
       request<Project>("/api/v1/projects", {
         method: "POST",
@@ -3260,7 +3366,8 @@ export const api = {
       return { ...safe, reports };
     },
     get: (id: string) => request<GeneratedReport>(`/api/v1/reports/${id}`),
-    downloadUrl: (id: string) => `${API_URL}/api/v1/reports/${id}/download`,
+    /** The generated report file, fetched with the client's auth headers. */
+    download: (id: string) => requestBlob(`/api/v1/reports/${id}/download`),
   },
   // Analytics methods
   analytics: {
@@ -3367,16 +3474,8 @@ export const api = {
       });
       return { ...safe, logs: safe.logs ?? [] };
     },
-    exportUrl: (filter?: AuditFilter) => {
-      const params = new URLSearchParams();
-      if (filter?.action) params.set("action", filter.action);
-      if (filter?.resource_type) params.set("resource_type", filter.resource_type);
-      if (filter?.user_id) params.set("user_id", filter.user_id);
-      if (filter?.start_date) params.set("start_date", filter.start_date);
-      if (filter?.end_date) params.set("end_date", filter.end_date);
-      const query = params.toString();
-      return `${API_URL}/api/v1/audit-logs/export${query ? `?${query}` : ""}`;
-    },
+    /** The CSV export, fetched with the client's auth headers. */
+    export: (filter?: AuditFilter) => requestBlob(auditExportPath(filter)),
     getStatistics: async (days?: number): Promise<AuditStatistics> => {
       const raw = await request<AuditStatistics>(
         `/api/v1/audit-logs/statistics${days ? `?days=${days}` : ""}`,

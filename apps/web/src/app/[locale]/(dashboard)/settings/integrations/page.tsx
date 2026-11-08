@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { LoadError } from "@/components/ui/load-error";
 import {
   Dialog,
   DialogContent,
@@ -126,8 +127,9 @@ export default function IntegrationsPage() {
     });
   };
 
-  // A failed load leaves the previous list (or the empty state) on screen
-  // and is only logged, as before; create / delete refetch the list.
+  // A failed load shows an error with retry (M65 bug 10: it used to fall
+  // through to the "no integrations" empty state); a failed refetch keeps
+  // the previous rows under an error banner. Create / delete refetch.
   const connectionsQuery = useQuery({
     queryKey: queryKeys.integrations.list(),
     queryFn: async (): Promise<IssueTrackerConnection[]> => {
@@ -143,6 +145,8 @@ export default function IntegrationsPage() {
   const connections = connectionsQuery.data ?? [];
   const loading = connectionsQuery.isPending;
   const loadConnections = () => connectionsQuery.refetch();
+  const loadFailed = connectionsQuery.isError && connectionsQuery.data === undefined;
+  const refetchFailed = connectionsQuery.isError && connectionsQuery.data !== undefined;
 
   const resetForm = () => {
     setTrackerType("jira");
@@ -378,7 +382,26 @@ export default function IntegrationsPage() {
         </Dialog>
       </div>
 
-      {connections.length === 0 ? (
+      {refetchFailed && (
+        <LoadError
+          compact
+          testId="integrations-load-error"
+          message={t("loadFailed")}
+          retryLabel={tCommon("retry")}
+          onRetry={() => void loadConnections()}
+          retrying={connectionsQuery.isFetching}
+        />
+      )}
+
+      {loadFailed ? (
+        <LoadError
+          testId="integrations-load-error"
+          message={t("loadFailed")}
+          retryLabel={tCommon("retry")}
+          onRetry={() => void loadConnections()}
+          retrying={connectionsQuery.isFetching}
+        />
+      ) : connections.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <div className="text-center space-y-3">

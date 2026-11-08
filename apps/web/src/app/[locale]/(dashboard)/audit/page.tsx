@@ -5,7 +5,6 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslations, useLocale } from 'next-intl';
 import { Download, Loader2, ChevronLeft, ChevronRight, Filter, X, Lock } from 'lucide-react';
 import { api, AuditLog, AuditListResponse, AuditFilter, ActionInfo, ResourceTypeInfo } from '@/lib/api';
-import { useAuth, useOrganization } from '@/lib/auth';
 import { queryKeys } from '@/lib/query/keys';
 import { useRetainedData } from '@/lib/query/use-retained-data';
 import { errorSlot, resolveErrorSlot, type ErrorSlot } from '@/lib/query/error-slot';
@@ -15,8 +14,6 @@ export default function AuditLogPage() {
     const t = useTranslations("Audit");
     const tBilling = useTranslations("Billing");
     const locale = useLocale();
-    const { getToken } = useAuth();
-    const { organization } = useOrganization();
     const [page, setPage] = useState(1);
     // Export failures share the banner with load failures (see error-slot.ts).
     const [actionError, setActionError] = useState<ErrorSlot | null>(null);
@@ -95,20 +92,8 @@ export default function AuditLogPage() {
 
     const handleExport = async () => {
         try {
-            const token = await getToken();
-            const headers: Record<string, string> = {
-                'Authorization': `Bearer ${token}`,
-            };
-            if (organization?.id) {
-                headers['X-Clerk-Org-ID'] = organization.id;
-            }
-            const exportUrl = api.auditLogs.exportUrl(filter);
-            const response = await fetch(exportUrl, {
-                headers,
-            });
-            if (!response.ok) throw new Error('Export failed');
-
-            const blob = await response.blob();
+            // Through the API client: its auth / org headers (M64 residual).
+            const { blob } = await api.auditLogs.export(filter);
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
