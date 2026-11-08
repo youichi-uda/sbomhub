@@ -1009,12 +1009,27 @@ func main() {
 
 	e := echo.New()
 
+	// Client IP derivation (c.RealIP) for rate-limit buckets and the audit
+	// log. echo >= v4.16.3 ignores forwarding headers unless an extractor is
+	// configured; SBOMHUB_TRUSTED_PROXIES opts specific proxies back in.
+	ipExtractor, err := appmw.ClientIPExtractor(cfg.TrustedProxies)
+	if err != nil {
+		slog.Error("Configuration validation failed", "error", err)
+		os.Exit(1)
+	}
+	e.IPExtractor = ipExtractor
+
 	// F444: wrap the error handler so every 5xx *echo.HTTPError is collapsed
 	// to a generic body (detail logged server-side), closing the whole
 	// raw-error-leak class in one place. See sanitizingErrorHandler.
 	e.HTTPErrorHandler = sanitizingErrorHandler(e.HTTPErrorHandler)
 
-	e.Use(middleware.Logger())
+	// middleware.Logger is deprecated since echo v4.16 in favour of
+	// RequestLogger, which is NOT a drop-in swap: it changes the access-log
+	// format (slog instead of the JSON line) and, with its default
+	// HandleError=true, the point at which the error handler runs. Kept as-is
+	// in the dependency bump; migrating is a separate, reviewed change.
+	e.Use(middleware.Logger()) //nolint:staticcheck // SA1019: see comment above
 	e.Use(middleware.Recover())
 	// SECURITY: Limit request body size to prevent memory exhaustion DoS attacks
 	// 10MB should be sufficient for most SBOM files while preventing abuse

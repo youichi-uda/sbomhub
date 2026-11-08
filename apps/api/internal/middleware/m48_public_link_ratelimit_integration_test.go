@@ -34,6 +34,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -88,7 +89,7 @@ func newM48Harness(t *testing.T, perToken, perIP int) *m48Harness {
 // get issues one request and returns the response recorder.
 func (h *m48Harness) get(token, ip string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/public/"+token, nil)
-	req.Header.Set("X-Real-IP", ip)
+	req.RemoteAddr = net.JoinHostPort(ip, "1234")
 	rec := httptest.NewRecorder()
 	h.e.ServeHTTP(rec, req)
 	return rec
@@ -281,7 +282,7 @@ func TestM48PublicLinkConcurrentBurstIsBounded(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/public/"+token, nil)
-			req.Header.Set("X-Real-IP", ip)
+			req.RemoteAddr = net.JoinHostPort(ip, "1234")
 			e.ServeHTTP(httptest.NewRecorder(), req)
 		}()
 	}
@@ -352,7 +353,7 @@ func TestM48PublicLinkConcurrentSuccessesAreNotCappedAtTheFailureBudget(t *testi
 		go func() {
 			defer wg.Done()
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/public/"+token, nil)
-			req.Header.Set("X-Real-IP", ip)
+			req.RemoteAddr = net.JoinHostPort(ip, "1234")
 			rec := httptest.NewRecorder()
 			e.ServeHTTP(rec, req)
 			if rec.Code == http.StatusTooManyRequests {
@@ -445,7 +446,7 @@ func TestM48PublicLinkCancelledRequestIsStillCharged(t *testing.T) {
 		cancel() // the client has hung up before we even dispatch
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/public/"+token, nil).
 			WithContext(cancelledCtx)
-		req.Header.Set("X-Real-IP", ip)
+		req.RemoteAddr = net.JoinHostPort(ip, "1234")
 		e.ServeHTTP(httptest.NewRecorder(), req)
 	}
 

@@ -368,10 +368,12 @@ const (
 //
 //   - The per-token buckets are the real defence and cannot be evaded: the
 //     token IS the target.
-//   - The per-IP buckets are derived from c.RealIP(), which trusts
-//     X-Forwarded-For. Behind a proxy that does not overwrite it, an attacker
-//     can rotate the header and reset their own IP buckets. They are a speed
-//     bump against enumeration from one host, not a boundary.
+//   - The per-IP buckets are derived from c.RealIP(). Since echo v4.16.3 that
+//     is the connection peer unless SBOMHUB_TRUSTED_PROXIES names the proxies
+//     whose X-Forwarded-For is believed (see ClientIPExtractor), so a client
+//     can no longer rotate the header to reset its own buckets. Behind a proxy
+//     that is NOT listed, every client shares the proxy's bucket. Either way
+//     they are a speed bump against enumeration from one host, not a boundary.
 //   - The cumulative window is FIXED, not sliding (matching
 //     RateLimitByAPIKey): a caller can spend one bucket at the end of an hour
 //     and the next at the start of the following one.

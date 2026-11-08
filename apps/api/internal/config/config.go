@@ -167,6 +167,14 @@ type Config struct {
 	// default. Set it only when the destination policy is enforced on the proxy.
 	EgressAllowProxy bool
 
+	// TrustedProxies (SBOMHUB_TRUSTED_PROXIES) is a comma/space separated list
+	// of reverse-proxy IP addresses / CIDRs whose X-Forwarded-For hops are
+	// believed when deriving the client IP (rate-limit buckets, audit log).
+	// Empty (default) = the connection peer only; forwarding headers are
+	// ignored. Raw string; parsed by middleware.ClientIPExtractor at wiring
+	// time so a typo is a startup refusal.
+	TrustedProxies string
+
 	// SMTP settings (for email notifications)
 	SMTPHost     string
 	SMTPPort     string
@@ -251,6 +259,8 @@ func Load() *Config {
 		EgressAllowedInternal: getEnv("SBOMHUB_EGRESS_ALLOWED_INTERNAL", ""),
 		EgressAllowProxy:      getEnvBool("SBOMHUB_EGRESS_ALLOW_PROXY", false),
 		EgressNAT64Prefixes:   getEnv("SBOMHUB_EGRESS_NAT64_PREFIXES", ""),
+
+		TrustedProxies: getEnv("SBOMHUB_TRUSTED_PROXIES", ""),
 
 		// SMTP
 		SMTPHost:     getEnv("SMTP_HOST", ""),
