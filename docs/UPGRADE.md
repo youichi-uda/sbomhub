@@ -1674,7 +1674,7 @@ be incomplete (measured: for log4j `2.0-beta9` it omitted Log4Shell).
 |---|---|---|
 | `nvd_cpe` | high | CPE match verified against NVD configurations |
 | `nvd_cpe_distro` | medium | same, for a distro package, on the **upstream** version — a fix the distro backported without changing the upstream version is NOT seen, so these can be false positives |
-| `nvd_cpe_unverified` | low | NVD returned the CVE for the component's CPE, but its configurations could not be checked against the version (absent, or a version comparison that cannot be decided). Kept rather than dropped; five occurred in the measurement below (³) |
+| `nvd_cpe_unverified` | low | NVD returned the CVE for the component's CPE, but no plain version comparison could confirm or exclude it (non-plain component version or bound, pinned update, or absent configurations). Kept rather than dropped; 315 in the measurement below |
 | `nvd_keyword` | low | NVD text search (no usable CPE) |
 | `jvn_keyword` | low | MyJVN text search on the component name |
 | `cve_sync_keyword` | low | the daily CVE-sync linker (product names vs component names) |
@@ -1697,32 +1697,34 @@ words, and the version string rarely appears in a CVE description. Measured on
 tree + Maven/npm/Go manifests, plus a kernel and glibc component; ground truth
 OSV for Maven/npm/Go, openssl.org's 1.1.1 advisory list for OpenSSL):
 
-| component | ground truth | NVD links before | NVD links after (true) | method |
+| component | ground truth | NVD links before | NVD links after (true) | labels after |
 |---|---|---|---|---|
-| log4j-core 2.14.1 | 8 | **0** (Log4Shell missed) | 10 (8) | nvd_cpe |
-| tomcat-embed-core 9.0.30 | 51 | 0 | 77 (50) | nvd_cpe |
-| lodash 4.17.20 | 4 | 1 (0) | 5 (4) | nvd_cpe |
-| golang.org/x/net v0.7.0 | 24 | 0 | 2 (2) | nvd_cpe |
-| gin v1.7.0 | 3 | 0 | 2 (2) | nvd_cpe |
-| openssl 1.1.1k-1 (deb) | 49 | 0 | 47 (42) | 42 nvd_cpe_distro + 5 nvd_cpe_unverified³ |
-| glibc 2.31 | 26¹ | 3 (0) | 26 (26) | nvd_cpe |
+| log4j-core 2.14.1 | 8 | **0** (Log4Shell missed) | 10 (8) | 10 nvd_cpe |
+| tomcat-embed-core 9.0.30 | 51 | 0 | 77 (50) | 76 nvd_cpe + 1 unverified |
+| lodash 4.17.20 | 4 | 1 (0) | 5 (4) | 5 nvd_cpe |
+| golang.org/x/net v0.7.0 | 24 | 0 | 2 (2) | 2 nvd_cpe |
+| gin v1.7.0 | 3 | 0 | 2 (2) | 1 nvd_cpe + 1 unverified |
+| openssl 1.1.1k-1 (deb) | 49 | 0 | 313 (44) | 313 nvd_cpe_unverified³ |
+| glibc 2.31 | 26¹ | 3 (0) | 26 (26) | 26 nvd_cpe |
 | libc6 2.31-13 (deb) | 26¹ | 0 | 0 | keyword fallback |
-| linux kernel 5.10.46 | 7,059² | 0 | 493, **truncated** | nvd_cpe |
+| linux kernel 5.10.46 | 7,059² | 0 | 493, **truncated** | 492 nvd_cpe + 1 unverified |
 
 ¹ NVD's own configurations — not an independent source. ² NVD's count; not
-verified independently. ³ CVE-2019-1543/1547/1549/1552/1563: their ranges end at
-`1.1.1b`/`1.1.1c`, and a bare `b`/`c` is scheme-dependent (PEP 440 beta/rc vs
-OpenSSL patch), so they are kept unverified; the ground truth says 1.1.1k is not
-affected by any of them.
+verified independently. ³ `1.1.1k-1` is not a plain version, so no version
+comparison may exclude anything (13.1): every openssl CVE NVD configures is kept
+except the 8 that name openssl only as a platform. 44 of the 313 affect 1.1.1k
+per openssl.org — two more than the exact `cpeName` answer contained.
 
-Across the components with ground truth: **before 4 links, 0 true; after 169
-links, 134 true (precision 79%, recall 70%)**; of the 35 false positives, 5 are
-labelled low confidence. Counting only high/medium-confidence links: 164 links,
-134 true (precision 82%). The remaining false positives
-are mostly NVD's product granularity (NVD's `apache:tomcat` covers server-only
-issues that do not affect the embedded jar); the remaining misses are CVEs NVD
-has not configured (golang.org/x/net: NVD's CPE data covers 2 of 24) and
-packages whose CPE Syft could not guess (Debian `libc6`).
+Across the components with ground truth: **before 4 links, 0 true; after 435
+links, 136 true (precision 31%, recall 71%)**. Counting only verified
+(high/medium-confidence) links: **120 links, 91 true (precision 76%, recall
+48%)**. The 315 `nvd_cpe_unverified` links hold 45 true findings and 270 false
+ones, almost all from the Debian openssl package; they are candidates to triage,
+not confirmed findings. Verified false positives are mostly NVD's product
+granularity (NVD's `apache:tomcat` covers server-only issues that do not affect
+the embedded jar); the remaining misses are CVEs NVD has not configured
+(golang.org/x/net: NVD's CPE data covers 2 of 24) and packages whose CPE Syft
+could not guess (Debian `libc6`).
 
 JVN matching is **unchanged** (see 13.6), so the JVN half of the counts does not
 move; it is now labelled `jvn_keyword`.
@@ -1746,10 +1748,11 @@ replaced.
   otherwise, and a known product whose exact version has no CVE costs 1 plus
   its product walk. Maven packages where Syft guesses `apache:log4j-core` first
   cost up to 5.
-  The fixture above took 41 NVD requests for 13 components on a cold cache (14
-  before: one keyword walk each, two pages for one of them) and 7 on the next scan (24-hour cache; "unknown product" answers are
+  The fixture above took 37 NVD requests for 13 components on a cold cache (14
+  before: one keyword walk each, two pages for one of them) and 9 on the next scan (24-hour cache; "unknown product" answers are
   cached too; truncated answers and answers holding an `nvd_cpe_unverified` CVE
-  are not — here the kernel's 5 pages and openssl's 2). Without an NVD API key
+  are not — here the kernel's 5 pages, openssl's 2, and the other answers
+  holding an unverified CVE). Without an NVD API key
   that is ~6 s per request.
 - **Truncation.** The CPE path uses the same page budget as the keyword path
   (5 pages, 996 records). A Linux kernel component exceeds it (NVD: 7,059 CVEs

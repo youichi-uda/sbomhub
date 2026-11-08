@@ -367,3 +367,20 @@ func TestM60VerifyCPEMatch_RangeBoundaries(t *testing.T) {
 		t.Errorf("log4j-core product matched: %v", got)
 	}
 }
+
+// The evidence behind "non-plain versions skip cpeName and walk the product":
+// NVD's own cpeName answer for log4j 2.0-beta9 (recorded live 2026-11-08) has
+// 4 CVEs and NOT Log4Shell, although CVE-2021-44228's configurations list
+// log4j:2.0:beta9. NVD's server-side evaluation of a non-plain version is
+// incomplete, so it may not stand in for an exclusion either.
+func TestM60CPENameAnswerForQualifiedVersionIsIncomplete(t *testing.T) {
+	r := m60NVDFixture(t, "w01_cpename_log4j_beta9_dash")
+	for _, e := range r.entries() {
+		if e.CVE.ID == "CVE-2021-44228" {
+			t.Fatalf("fixture changed: the cpeName answer now contains Log4Shell")
+		}
+	}
+	if n := len(r.entries()); n != 4 {
+		t.Errorf("fixture holds %d CVEs, recorded 4", n)
+	}
+}
