@@ -5,6 +5,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -60,6 +61,15 @@ func Options(redisURL string) (*redis.Options, error) {
 	}
 	if opts.PoolTimeout == 0 {
 		opts.PoolTimeout = DefaultPoolTimeout
+	}
+	// No automatic retries. go-redis replays a command whose reply was lost
+	// (EOF, reset) up to 3 times by default, and the commands the API sends
+	// that matter — INCR and the public-link Lua scripts — are not
+	// idempotent: a replay after Redis executed the command charged one
+	// request several times (Codex R1 Medium). Every caller already handles
+	// an error (fail closed, or cache miss). A max_retries in the URL is kept.
+	if opts.MaxRetries == 0 && !strings.Contains(redisURL, "max_retries=") {
+		opts.MaxRetries = -1
 	}
 	opts.ContextTimeoutEnabled = true
 	return opts, nil

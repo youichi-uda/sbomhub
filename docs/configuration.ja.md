@@ -254,7 +254,9 @@ maxmemory-policy allkeys-lru
 
 クライアントの timeout: `REDIS_URL` で指定しない限り、API は go-redis に
 `dial_timeout=3s`、`read_timeout=2s`、`write_timeout=2s`、`pool_timeout=3s`
-を明示設定します (URL の値が優先、`-1` は socket timeout なし)。それとは別に、
+を明示設定します (URL の値が優先、`-1` は socket timeout なし)。
+自動 retry は無効です (go-redis は応答を失ったコマンドを再送し、rate limit を
+二重に課金しうるため)。URL の `max_retries` で上書きできます。それとは別に、
 API が行う Redis 操作はすべて呼び出し側で期限を持ちます (rate limit の記録は
 3s、NVD cache の 1 往復は 1s)。Redis が停止・応答なしになったときの挙動:
 

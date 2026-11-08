@@ -218,3 +218,38 @@ func TestMigrateLock_WaitIsBoundedAndNamed(t *testing.T) {
 		t.Fatalf("after release: %v", err)
 	}
 }
+
+// Codex R1 Medium: the wait budget must cover getting a connection, not only
+// the polling after it. With the pool exhausted, db.Conn used to block for
+// ever on context.Background().
+func TestMigrateLock_WaitCoversConnectionAcquisition(t *testing.T) {
+	dsn := scratchDB(t)
+	db := openPool(t, dsn)
+	db.SetMaxOpenConns(1)
+	ctx := context.Background()
+	hog, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hog.Close()
+
+	fsys := fstest.MapFS{"001_x.up.sql": {Data: []byte(`CREATE TABLE never_created (id int);`)}}
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		done <- MigrateWithOptions(ctx, db, fsys, MigrateOptions{LockWait: time.Second})
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "migration lock") {
+			t.Fatalf("want a migration lock error, got %v", err)
+		}
+		if el := time.Since(start); el > 4*time.Second {
+			t.Fatalf("gave up after %v, want ~1s", el)
+		}
+	case <-time.After(10 * time.Second):
+		_ = hog.Close() // unblock the goroutine
+		<-done
+		t.Fatal("Migrate blocked on an exhausted pool past its lock wait")
+	}
+}

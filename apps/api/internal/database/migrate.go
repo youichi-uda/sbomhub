@@ -33,6 +33,9 @@ const DefaultMigrationLockWait = 10 * time.Minute
 // defaultMigrationLockLogEvery is how often a waiting migrator says so.
 const defaultMigrationLockLogEvery = 10 * time.Second
 
+// migrationLockQueryTimeout bounds each statement of the acquisition loop.
+const migrationLockQueryTimeout = 10 * time.Second
+
 // migrationLockPoll is the retry interval of pg_try_advisory_lock.
 const migrationLockPoll = 250 * time.Millisecond
 
@@ -178,18 +181,32 @@ func AcquireMigrationLock(ctx context.Context, db *sql.DB, opts MigrateOptions) 
 		logEvery = defaultMigrationLockLogEvery
 	}
 
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("migration lock: get connection: %w", err)
-	}
-
+	// Getting a connection counts against the wait, and every statement
+	// below has its own short timeout (Codex R1 Medium: an exhausted pool or
+	// a stalled server used to block db.Conn / the poll on the caller's
+	// context, which at startup has no deadline).
 	start := time.Now()
 	deadline := start.Add(wait)
+	cctx, cancelConn := context.WithDeadline(ctx, deadline)
+	conn, err := db.Conn(cctx)
+	cancelConn()
+	if err != nil {
+		return nil, nil, fmt.Errorf("migration lock: no database connection within %s: %w", wait, err)
+	}
+
 	nextLog := start
 	for {
+		// Each statement has its own short budget, so a stalled server
+		// cannot hold the loop past the wait by more than one of them, and a
+		// poll in flight at the deadline is not cancelled half way.
 		var got bool
-		if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, MigrationLockKey).Scan(&got); err != nil {
-			_ = conn.Close()
+		qctx, cancelQ := context.WithTimeout(ctx, migrationLockQueryTimeout)
+		err := conn.QueryRowContext(qctx, `SELECT pg_try_advisory_lock($1)`, MigrationLockKey).Scan(&got)
+		cancelQ()
+		if err != nil {
+			// A cancelled poll may still have taken the lock server-side, so
+			// the session is discarded, never returned to the pool.
+			discardConn(conn)
 			return nil, nil, fmt.Errorf("migration lock: %w", err)
 		}
 		if got {
@@ -200,8 +217,10 @@ func AcquireMigrationLock(ctx context.Context, db *sql.DB, opts MigrateOptions) 
 		}
 		now := time.Now()
 		if !now.Before(deadline) {
+			// The acquisition context has expired; describe the holder with
+			// a short budget of its own.
 			holder := migrationLockHolder(ctx, conn)
-			_ = conn.Close()
+			discardConn(conn)
 			return nil, nil, fmt.Errorf("migration lock: another migrator (%s) still held it after %s; "+
 				"retry when it has finished", holder, wait)
 		}
@@ -214,7 +233,7 @@ func AcquireMigrationLock(ctx context.Context, db *sql.DB, opts MigrateOptions) 
 		}
 		select {
 		case <-ctx.Done():
-			_ = conn.Close()
+			discardConn(conn)
 			return nil, nil, fmt.Errorf("migration lock: %w", ctx.Err())
 		case <-time.After(migrationLockPoll):
 		}
@@ -231,16 +250,26 @@ func AcquireMigrationLock(ctx context.Context, db *sql.DB, opts MigrateOptions) 
 			// Discard the session rather than return it to the pool still
 			// holding the lock; closing it releases the lock server-side.
 			slog.Warn("migration lock: unlock failed, discarding the connection", "error", err, "unlocked", unlocked)
-			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			discardConn(conn)
+			return
 		}
 		_ = conn.Close()
 	}
 	return conn, release, nil
 }
 
+// discardConn closes conn's underlying session instead of returning it to
+// the pool. Ending the session releases any advisory lock it holds.
+func discardConn(conn *sql.Conn) {
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = conn.Close()
+}
+
 // migrationLockHolder describes the session holding the migration lock, for
 // the wait log. Best effort: it never fails the caller.
 func migrationLockHolder(ctx context.Context, conn *sql.Conn) string {
+	ctx, cancel := context.WithTimeout(ctx, migrationLockQueryTimeout)
+	defer cancel()
 	var pid sql.NullInt64
 	var app, addr sql.NullString
 	err := conn.QueryRowContext(ctx, `

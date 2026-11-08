@@ -1,7 +1,12 @@
 package redis
 
 import (
+	"bufio"
 	"context"
+	"net"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,5 +84,77 @@ func TestCommandContext_BoundsAHungCommand(t *testing.T) {
 	}
 	if elapsed > CommandTimeout+time.Second {
 		t.Fatalf("GET took %v (bound %v)", elapsed, CommandTimeout)
+	}
+}
+
+// Codex R1 Medium: go-redis retries a command whose reply was lost (EOF /
+// connection reset) up to MaxRetries times — 3 by default. INCR and the
+// public-link Lua scripts are not idempotent, so a reply lost after Redis
+// executed the command charged one request several times. The API's client
+// does not retry.
+func TestOptions_NoAutomaticRetries(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		incrs int
+	)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				r := bufio.NewReader(c)
+				for {
+					// Read one RESP array command: *N then N bulk strings.
+					head, err := r.ReadString('\n')
+					if err != nil || !strings.HasPrefix(head, "*") {
+						return
+					}
+					n, _ := strconv.Atoi(strings.TrimSpace(head[1:]))
+					var args []string
+					for i := 0; i < n; i++ {
+						if _, err := r.ReadString('\n'); err != nil { // $len
+							return
+						}
+						a, err := r.ReadString('\n')
+						if err != nil {
+							return
+						}
+						args = append(args, strings.TrimSpace(a))
+					}
+					if len(args) > 0 && strings.EqualFold(args[0], "INCR") {
+						mu.Lock()
+						incrs++
+						mu.Unlock()
+						return // "executed", reply lost: close without answering
+					}
+					_, _ = c.Write([]byte("-ERR unknown command\r\n"))
+				}
+			}(c)
+		}
+	}()
+
+	opts, err := Options("redis://" + ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := goredis.NewClient(opts)
+	defer c.Close()
+	ctx, cancel := CommandContext(context.Background())
+	defer cancel()
+	if err := c.Incr(ctx, "k").Err(); err == nil {
+		t.Fatal("INCR with a lost reply reported success")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if incrs != 1 {
+		t.Fatalf("INCR reached the server %d times for one call, want 1 (no automatic retry)", incrs)
 	}
 }

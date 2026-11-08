@@ -255,6 +255,9 @@ maxmemory-policy allkeys-lru
 Client timeouts. The API sets explicit go-redis timeouts unless `REDIS_URL`
 sets them: `dial_timeout=3s`, `read_timeout=2s`, `write_timeout=2s`,
 `pool_timeout=3s` (a value in the URL wins; `-1` means no socket timeout).
+Automatic command retries are off (go-redis would otherwise replay a command
+whose reply was lost, double-charging the rate limits); set `max_retries` in
+the URL to override.
 Independently of those, every Redis operation the API performs is bounded at
 the call site: rate-limit bookkeeping gives up after 3s, an NVD cache round
 trip after 1s. A Redis that is down or hung therefore degrades requests

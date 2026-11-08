@@ -129,15 +129,22 @@ func startM48Server(t *testing.T, trustedProxies string) *m48Server {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	// done is closed once the process has been reaped, so any number of
+	// observers (the startup loop, the cleanup) can wait on it.
+	done := make(chan struct{})
+	var waitErr error
+	go func() { waitErr = cmd.Wait(); close(done) }()
 	t.Cleanup(func() {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
 		select {
-		case <-exited:
-		case <-time.After(15 * time.Second):
-			_ = cmd.Process.Kill()
-			<-exited
+		case <-done:
+		default:
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			select {
+			case <-done:
+			case <-time.After(15 * time.Second):
+				_ = cmd.Process.Kill()
+				<-done
+			}
 		}
 		if t.Failed() {
 			t.Logf("server output:\n%s", out.String())
@@ -148,8 +155,8 @@ func startM48Server(t *testing.T, trustedProxies string) *m48Server {
 	deadline := time.Now().Add(90 * time.Second)
 	for {
 		select {
-		case err := <-exited:
-			t.Fatalf("server exited during startup: %v\n%s", err, out.String())
+		case <-done:
+			t.Fatalf("server exited during startup: %v\n%s", waitErr, out.String())
 		default:
 		}
 		resp, err := http.Get(base + "/api/v1/health")

@@ -23,9 +23,10 @@ func BlackHole(t testing.TB) string {
 		t.Fatalf("black hole listen: %v", err)
 	}
 	var (
-		mu    sync.Mutex
-		conns []net.Conn
-		wg    sync.WaitGroup
+		mu     sync.Mutex
+		closed bool
+		conns  []net.Conn
+		wg     sync.WaitGroup
 	)
 	wg.Add(1)
 	go func() {
@@ -35,10 +36,18 @@ func BlackHole(t testing.TB) string {
 			if err != nil {
 				return
 			}
+			// Register under the same lock cleanup takes, so a connection
+			// accepted while cleanup runs is either closed by cleanup or
+			// closed here — never left open with a reader blocked on it.
 			mu.Lock()
+			if closed {
+				mu.Unlock()
+				_ = c.Close()
+				return
+			}
 			conns = append(conns, c)
-			mu.Unlock()
 			wg.Add(1)
+			mu.Unlock()
 			go func() {
 				defer wg.Done()
 				_, _ = io.Copy(io.Discard, c)
@@ -46,12 +55,13 @@ func BlackHole(t testing.TB) string {
 		}
 	}()
 	t.Cleanup(func() {
-		_ = ln.Close()
 		mu.Lock()
+		closed = true
 		for _, c := range conns {
 			_ = c.Close()
 		}
 		mu.Unlock()
+		_ = ln.Close()
 		wg.Wait()
 	})
 	return "redis://" + ln.Addr().String()
