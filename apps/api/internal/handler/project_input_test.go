@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
@@ -275,6 +276,38 @@ func TestCLIUpload_RejectsInvalidProjectNameAndSBOMTextWith400(t *testing.T) {
 			}
 			if rec.Code != http.StatusBadRequest || !strings.Contains(errorBody(t, rec), tc.want) {
 				t.Fatalf("status = %d, body = %s; want 400 containing %q", rec.Code, rec.Body.String(), tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// Codex R2: the CLI multipart upload runs the same SBOM text check as the
+// canonical route (CLIService.UploadSBOM -> checkSBOMText). The project
+// resolves (GetByName finds it); the SBOM is then refused with 400 before any
+// SBOM or component write — sqlmock fails any further statement.
+func TestCLIUpload_SBOMWithNULOrInvalidUTF8Is400(t *testing.T) {
+	for name, sbom := range map[string]string{
+		"nul escape":   `{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"name":"a\u0000b","version":"1"}]}`,
+		"invalid utf8": "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.5\",\"components\":[{\"name\":\"a\xffb\"}]}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			tenantID, projectID := uuid.New(), uuid.New()
+			mock.ExpectQuery(`SELECT id, name, COALESCE\(description, ''\), COALESCE\(created_at, NOW\(\)\), COALESCE\(updated_at, NOW\(\)\) FROM projects WHERE tenant_id = \$1 AND name = \$2`).
+				WithArgs(tenantID, "test-project").
+				WillReturnRows(sqlmock.NewRows([]string{"id", "name", "description", "created_at", "updated_at"}).
+					AddRow(projectID, "test-project", "", time.Now(), time.Now()))
+			h := NewCLIHandler(service.NewCLIService(repository.NewProjectRepository(db), repository.NewSbomRepository(db), repository.NewComponentRepository(db)))
+			rec := driveCLIUpload(t, h, tenantID, sbom)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "failed to parse SBOM") {
+				t.Fatalf("status = %d, body = %s; want 400 failed to parse SBOM", rec.Code, rec.Body.String())
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)

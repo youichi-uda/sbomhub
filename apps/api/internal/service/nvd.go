@@ -1817,11 +1817,11 @@ func parseRetryAfter(v string, now time.Time) time.Duration {
 		return nvdRetryAfterDefault
 	}
 	var d time.Duration
-	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-		if n < 0 {
-			return nvdRetryAfterDefault
-		}
-		if n > int64(nvdRetryAfterMax/time.Second) {
+	if isASCIIDigits(v) {
+		// delta-seconds: any all-digit value, however long, is a valid
+		// (huge) delay — clamp it rather than treat it as unparsable.
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n > int64(nvdRetryAfterMax/time.Second) {
 			return nvdRetryAfterMax
 		}
 		d = time.Duration(n) * time.Second
@@ -1836,7 +1836,24 @@ func parseRetryAfter(v string, now time.Time) time.Duration {
 	if d > nvdRetryAfterMax {
 		return nvdRetryAfterMax
 	}
-	return d.Round(time.Second)
+	// Round UP: telling the caller to come back before the upstream deadline
+	// would only earn another refusal.
+	if r := d % time.Second; r != 0 {
+		d += time.Second - r
+	}
+	return d
+}
+
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // SearchByCVEID searches for a specific CVE by ID from NVD API

@@ -20,10 +20,19 @@
 -- older binaries both run on either schema. On the narrowed schema every 72h
 -- report insert fails with 500 again -- the defect 068 fixed.
 --
--- LOCK BUDGET: same rationale as the up file.
+-- LOCK BUDGET: same lock_timeout rationale as the up file. Unlike the up
+--   file, narrowing is NOT metadata-only: PostgreSQL rewrites the table
+--   (measured 2026-11-09, PostgreSQL 15, 300,000 rows with 500-character
+--   drafts: pg_relation_filenode changed, 0.53 s) while holding ACCESS
+--   EXCLUSIVE, and lock_timeout does not bound that. statement_timeout does:
+--   a rewrite that has not finished within 60 s is cancelled and the whole
+--   rollback (DDL and schema_migrations row) is undone, so the table is never
+--   blocked for longer than that. On a table large enough to need more, run
+--   the rollback in a maintenance window with a larger value.
 -- ============================================
 
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 DO $$
 BEGIN
