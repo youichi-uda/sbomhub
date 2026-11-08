@@ -1,0 +1,216 @@
+[
+  {
+    "name": "sbomhub_list_projects",
+    "description": "この資格情報が参照できるプロジェクトの一覧を取得。テナント単位のAPIキーではテナントの全プロジェクト、プロジェクトスコープのAPIキーではそのプロジェクト1件のみが返る。件数からテナントの規模を推測しないこと",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "sbomhub_get_dashboard",
+    "description": "テナント全体のダッシュボードサマリーを取得。テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは403で拒否される (絞り込むと集計値の意味が変わるため、サーバーは狭い答えを返さず拒否する)",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "sbomhub_get_project_dashboard",
+    "description": "プロジェクト別ダッシュボードを取得 (脆弱性サマリー/コンプライアンス/SBOM状況)。脆弱性は最大5000件まで走査し、超える場合は vulnerabilities.scan_truncated=true になる。そのとき by_severity と top_by_cvss は走査した analyzed 件の集計であって、プロジェクトの全件を数えた値ではない (全体の件数は total)。件数は非同期スキャンの途中経過のことがある。counts_final=true は「サーバーが追跡しているスキャンが読み取りの前後とも完了扱いで、その間に件数が動かず、走査も打ち切られていない」ことを表す。false のときは scan_state を見ること (completed=完了、running=走査中、failed=失敗、unknown=状態不明、changed=読み取り中にスキャンかSBOMが変わった、unavailable=状態を取得できず。これ以外の値が返ることもあり、その場合も確定値ではない)。scan_state がどのSBOMについての状態かは scanned_sbom_id (counts_final=true のときはその件数の出所でもある。特定できないときは null)。counts_final=false のときの0件や極端に少ない件数を「脆弱性なし」と断定しないこと。これらは vulnerabilities の下に入る",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "プロジェクトID (UUID)。プロジェクトスコープのAPIキーでは、そのキー自身のプロジェクト以外を指定すると403で拒否される。この403は「このキーではそのIDを扱えない」という意味だけで、そのプロジェクトが存在するかどうかは判断できない"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "sbomhub_list_sboms",
+    "description": "プロジェクトのSBOM一覧を取得 (新しい順)。version はSBOM仕様のバージョン (CycloneDX/SPDX) であってアップロードの版数ではないため、同じ値が並ぶのが普通。個々のSBOMを指すには id を使うこと",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "プロジェクトID (UUID)。プロジェクトスコープのAPIキーでは、そのキー自身のプロジェクト以外を指定すると403で拒否される。この403は「このキーではそのIDを扱えない」という意味だけで、そのプロジェクトが存在するかどうかは判断できない"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "sbomhub_search_cve",
+    "description": "CVE IDでテナントの全プロジェクトを横断検索。テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは403で拒否される。「見つからない」と「見る権限が無い」を区別できなくなるため、絞り込みではなく拒否する",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "cve_id": {
+          "type": "string",
+          "pattern": "^(?:CVE|cve)-\\d{4}-\\d{4,}$",
+          "description": "CVE ID (例: CVE-2021-44228)"
+        }
+      },
+      "required": [
+        "cve_id"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "sbomhub_search_component",
+    "description": "コンポーネント名でテナントの全プロジェクトを横断検索。テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは403で拒否される (理由は sbomhub_search_cve と同じ)",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "コンポーネント名 (例: log4j)"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "バージョン (任意)"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "sbomhub_diff",
+    "description": "2つのSBOMを比較して差分を取得。バージョン省略時は最新2つを比較。テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは403で拒否される — 自分のプロジェクトのSBOM同士であっても拒否される (対象SBOMをbodyのUUIDで選ぶため、どのプロジェクトのものかが判明するのが両行の読み込み後になる)",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "プロジェクトID (UUID)。プロジェクトスコープのAPIキーでは、そのキー自身のプロジェクト以外を指定すると403で拒否される。この403は「このキーではそのIDを扱えない」という意味だけで、そのプロジェクトが存在するかどうかは判断できない"
+        },
+        "base_sbom_id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "比較元SBOMのID (sbomhub_list_sboms の id。任意。指定すると base_version より優先)"
+        },
+        "target_sbom_id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "比較先SBOMのID (sbomhub_list_sboms の id。任意。指定すると target_version より優先)"
+        },
+        "base_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "比較元SBOMの仕様バージョン (省略時: 2番目に新しいSBOM)。これはCycloneDX/SPDXの仕様バージョンでアップロードの版数ではないため、同じ値のSBOMが複数あるのが普通で、その場合はエラーになる — base_sbom_id を使うこと"
+        },
+        "target_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "比較先SBOMの仕様バージョン (省略時: 最新SBOM)。base_version と同じ注意点"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "sbomhub_get_vulnerabilities",
+    "description": "プロジェクトの脆弱性一覧を取得 (CVSS/EPSS順、最大500件、severityで絞り込み可)。内部の走査は最大5000件までで、それを超えるプロジェクトでは scan_truncated=true が返る。その場合 matched と returned は走査した範囲での件数なので、プロジェクト全体の値として報告しないこと (全体の件数は total_in_project)。件数は非同期スキャンの途中経過のことがある。counts_final=true は「サーバーが追跡しているスキャンが読み取りの前後とも完了扱いで、その間に件数が動かず、走査も打ち切られていない」ことを表す。false のときは scan_state を見ること (completed=完了、running=走査中、failed=失敗、unknown=状態不明、changed=読み取り中にスキャンかSBOMが変わった、unavailable=状態を取得できず。これ以外の値が返ることもあり、その場合も確定値ではない)。scan_state がどのSBOMについての状態かは scanned_sbom_id (counts_final=true のときはその件数の出所でもある。特定できないときは null)。counts_final=false のときの0件や極端に少ない件数を「脆弱性なし」と断定しないこと。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "プロジェクトID (UUID)。プロジェクトスコープのAPIキーでは、そのキー自身のプロジェクト以外を指定すると403で拒否される。この403は「このキーではそのIDを扱えない」という意味だけで、そのプロジェクトが存在するかどうかは判断できない"
+        },
+        "severity": {
+          "type": "string",
+          "pattern": "^(?:critical|high|medium|low|CRITICAL|HIGH|MEDIUM|LOW)$",
+          "description": "severity で絞り込み (任意): critical / high / medium / low (小文字または大文字)"
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "cvss",
+            "epss"
+          ],
+          "description": "並び順 (デフォルト: cvss)"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "sbomhub_get_compliance",
+    "description": "コンプライアンススコアを取得 (経産省ガイドライン準拠チェック)",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "プロジェクトID (UUID)。プロジェクトスコープのAPIキーでは、そのキー自身のプロジェクト以外を指定すると403で拒否される。この403は「このキーではそのIDを扱えない」という意味だけで、そのプロジェクトが存在するかどうかは判断できない"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  }
+]
