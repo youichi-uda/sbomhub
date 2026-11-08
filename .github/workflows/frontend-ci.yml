@@ -180,6 +180,16 @@ jobs:
             apps/web/src/components/ui/__tests__/card.test.mjs \
             apps/web/src/components/ui/__tests__/alert-dialog.test.mjs
 
+      # M59 (zod 3 -> 4 migration, GHSA-mrhx-c7xc-m3w5): pins every form
+      # schema's accept/reject set and the exact user-visible messages to
+      # the zod 3 behaviour, including the diff-webhook URL scheme gate
+      # (javascript: / data: / file: must stay rejected). The test imports
+      # the schema modules as .ts directly, which needs Node's default type
+      # stripping (Node >= 22.18; `node-version: 22` resolves to the newest
+      # 22.x).
+      - name: Form schema zod 3 parity pins (M59)
+        run: pnpm --filter web test:schemas
+
       # M11-5 #80: hard gate after the ESLint v9 flat-config migration.
       # Next 16 removed `next lint`; we now invoke eslint directly against
       # apps/web/eslint.config.mjs. The migration brought the project to
