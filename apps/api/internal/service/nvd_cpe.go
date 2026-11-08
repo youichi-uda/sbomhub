@@ -416,10 +416,10 @@ func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
 		// with an update is a different release; a concrete update names
 		// one release.
 		target, mine := crit.Version, version
-		switch {
-		case crit.Update == "" || crit.Update == "*":
+		switch crit.Update {
+		case "", "*":
 			mine = c.version
-		case crit.Update == "-":
+		case "-":
 			if c.update != "" {
 				return cpeRejected
 			}
