@@ -1807,3 +1807,37 @@ advisories. JVN results stay keyword matches, labelled low confidence.
 CPE names come back on re-upload; the link methods do not (all return to
 `unknown`). Roll the binary back with the schema: this release writes both
 columns.
+
+## 14. Web UI dependency majors and Node.js 22 image
+
+The web image (`apps/web/Dockerfile`) now runs on `node:22-alpine`; it previously
+used `node:20-alpine`, which is end-of-life. Root `package.json` `engines.node`
+is now `>=22.18.0`. If you build or run the web app outside Docker, upgrade
+Node.js to 22.18 or newer first.
+
+The web UI moved to Tailwind CSS 4, lucide-react 1, TypeScript 6 and
+Clerk 7 (`@clerk/nextjs` 7 / `@clerk/localizations` 4). What changes for operators:
+
+- **Appearance.** The UI looks the same as before, apart from two things. The
+  landing hero is slightly taller: v4 now honours its `leading-tight`, which
+  v3 silently overrode. Icon shapes also follow upstream lucide redesigns. No
+  icon was removed.
+- **Browser support.** Tailwind CSS 4 needs Safari 16.4+, Chrome 111+ or
+  Firefox 128+. Older browsers render the UI incorrectly.
+- **Touch devices.** Hover styles now only apply on devices that support
+  hover, so they no longer stick after a tap.
+- **Clerk mode.** No environment variables changed. The web server logs a
+  Clerk "`createRouteMatcher` is deprecated" warning. It is expected and
+  harmless: the matcher behaves the same, and CI pins the public/protected
+  route classification (`apps/web/src/proxy.public-routes.test.mjs`).
+  `CLERK_ENCRYPTION_KEY` is not needed, because SBOMHub does not pass
+  `secretKey` to `clerkMiddleware`.
+- **Open Graph images** now render on the Node.js runtime instead of the
+  deprecated Edge runtime. Output is the same: PNG, 1200×630.
+
+Not upgraded:
+
+- **ESLint 10.** It waits for `eslint-plugin-react`, `eslint-plugin-import` and
+  `eslint-plugin-jsx-a11y` to support it.
+- **TypeScript 7.** It waits for `typescript-eslint` and Next's build
+  typecheck to support it.
