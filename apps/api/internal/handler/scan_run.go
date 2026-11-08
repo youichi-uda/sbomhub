@@ -116,14 +116,16 @@ func beginScanRun(tracker *service.ScanTracker, sbomID uuid.UUID) uint64 {
 	return tracker.Begin(sbomID)
 }
 
-// recordScanOutcome moves the tracker to run gen's terminal state, unless a
-// later run of the same SBOM has started since (then that run reports).
+// recordScanOutcome reports run gen's outcome to the tracker. The SBOM's state
+// becomes terminal only when no overlapping run is still active (see
+// ScanTracker.Begin); Finish returns false only for a run the tracker no
+// longer counts as active (ended by a legacy MarkCompleted / MarkFailed).
 func recordScanOutcome(tracker *service.ScanTracker, sbomID uuid.UUID, gen uint64, o scanOutcome) {
 	if tracker == nil {
 		return
 	}
 	if !tracker.Finish(sbomID, gen, o.reasons, o.message()) {
-		slog.Info("scan: outcome not recorded; a newer scan of the same SBOM is current",
+		slog.Info("scan: outcome not recorded; the tracker no longer counts this run as active",
 			"sbom_id", sbomID, "failed", o.failed())
 	}
 }

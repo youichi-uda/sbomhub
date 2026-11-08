@@ -11,6 +11,8 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"net/http"
 	"slices"
 	"sync"
 	"testing"
@@ -268,5 +270,59 @@ func TestM62Scan_WriteWaitingPastTheDeadlineIsStillComplete(t *testing.T) {
 	}
 	if st, msg := tracker.Get(seed.sbomID); st != service.ScanStateCompleted {
 		t.Errorf("state = %s (%q), want completed: every component was fetched before the deadline and written", st, msg)
+	}
+}
+
+// Codex M62 R3 Low: the scan-status ENDPOINT emits `reasons` (and keeps every
+// pre-M62 field) for a failed scan, and omits it for a completed one.
+func TestM62ScanStatus_EndpointEmitsReasons(t *testing.T) {
+	appURL, migURL := m46b1HandlerEnv(t)
+	migDB := m46b1OpenOrSkip(t, migURL)
+	appDB := m46b1OpenOrSkip(t, appURL)
+	seed := m47SeedAll(t, migDB, "m62status")
+
+	tracker := service.NewScanTracker()
+	h := &SbomHandler{
+		sbomService: service.NewSbomService(repository.NewSbomRepository(appDB), repository.NewComponentRepository(appDB)),
+		scanTracker: tracker,
+	}
+	call := func() map[string]any {
+		code, body := m47Call(t, appDB, m47Req{
+			method:     http.MethodGet,
+			target:     "/api/v1/projects/" + seed.projectID.String() + "/sboms/" + seed.sbomID.String() + "/scan-status",
+			paramNames: []string{"id", "sbom_id"},
+			paramVals:  []string{seed.projectID.String(), seed.sbomID.String()},
+			tenantID:   seed.tenantID,
+		}, h.ScanStatus)
+		if code != http.StatusOK {
+			t.Fatalf("scan-status: %d %s", code, body)
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(body), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+
+	gen := tracker.Begin(seed.sbomID)
+	tracker.Finish(seed.sbomID, gen, []string{service.ScanReasonDeadlineExceeded}, "nvd: scan failed (deadline_exceeded)")
+	m := call()
+	for _, k := range []string{"status", "sbom_id", "project_id", "error", "vulnerabilities", "reasons"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("failed scan-status lacks %q: %v", k, m)
+		}
+	}
+	if r, _ := m["reasons"].([]any); len(r) != 1 || r[0] != service.ScanReasonDeadlineExceeded {
+		t.Errorf("reasons = %v, want [deadline_exceeded]", m["reasons"])
+	}
+
+	gen = tracker.Begin(seed.sbomID)
+	tracker.Finish(seed.sbomID, gen, nil, "")
+	m = call()
+	if m["status"] != "completed" {
+		t.Errorf("status = %v, want completed", m["status"])
+	}
+	if _, ok := m["reasons"]; ok {
+		t.Errorf("a completed scan-status carries reasons: %v", m)
 	}
 }

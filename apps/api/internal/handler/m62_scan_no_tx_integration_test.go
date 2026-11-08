@@ -230,3 +230,63 @@ func TestM62Scan_NoTransactionIsOpenWhileNVDFetchBlocks(t *testing.T) {
 		})
 	}
 }
+
+// Codex M62 R3 Low: the same observation for the JVN scanner, which has its
+// own sweep (JVNService.ScanComponentsReport): while a MyJVN request is
+// blocked, no app-role backend is inside a transaction.
+func TestM62Scan_NoTransactionIsOpenWhileJVNFetchBlocks(t *testing.T) {
+	appURL, migURL := m46b1HandlerEnv(t)
+	migDB := m46b1OpenOrSkip(t, migURL)
+	appDB := m46b1OpenOrSkip(t, appURL)
+
+	for _, route := range []string{"upload", "manual"} {
+		t.Run(route, func(t *testing.T) {
+			seed := m47SeedAll(t, migDB, "m62jvnnotx"+route)
+			entered := make(chan struct{}, 4)
+			release := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					return
+				}
+				http.Error(w, "m62 MyJVN stub", http.StatusServiceUnavailable)
+			}))
+			var once sync.Once
+			rel := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(func() { rel(); srv.Close() })
+
+			jvn := service.NewJVNService(repository.NewVulnerabilityRepository(appDB),
+				repository.NewComponentRepository(appDB), srv.URL, false)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				switch route {
+				case "upload":
+					h := &SbomHandler{db: appDB, jvnService: jvn, scanTracker: service.NewScanTracker()}
+					h.runScan(context.Background(), seed.sbomID, seed.tenantID)
+				case "manual":
+					h := &VulnerabilityHandler{db: appDB, jvnService: jvn}
+					h.runScan(context.Background(), seed.sbomID, seed.tenantID, "jvn")
+				}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(30 * time.Second):
+				t.Fatal("MyJVN request never arrived")
+			}
+			time.Sleep(500 * time.Millisecond)
+			st := m62AppSessionState(t, appDB)
+			rel()
+			<-done
+			if st.inTx != 0 || st.locks != 0 {
+				t.Errorf("while MyJVN was blocked, %d app-role backend(s) were inside a transaction holding %d lock(s): %s",
+					st.inTx, st.locks, st.detail)
+			}
+		})
+	}
+}

@@ -43,8 +43,9 @@ type ScanTracker struct {
 	mu        sync.RWMutex
 	entries   map[uuid.UUID]scanEntry
 	retention time.Duration
-	// nextGen numbers runs (M62, Codex R1/R2 High): every Begin /
-	// MarkRunning starts a new run of its SBOM; see Begin.
+	// nextGen numbers runs (M62, Codex R1/R2 High): every Begin starts a
+	// tracked run of its SBOM, and the SBOM's state is terminal only when
+	// none of its runs is active; see Begin.
 	nextGen uint64
 }
 

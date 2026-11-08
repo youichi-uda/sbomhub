@@ -175,3 +175,28 @@ func TestM62R2_TrackerWaitsForEveryOverlappingRun(t *testing.T) {
 		t.Errorf("a later clean run alone: state = %s, want completed", st)
 	}
 }
+
+// Codex M62 R3 Low: the FAILED run finishing first and a clean run last must
+// still publish failed, and distinct reasons from several runs are merged.
+func TestM62R3_TrackerKeepsAnEarlierFailureAndMergesReasons(t *testing.T) {
+	tr := NewScanTracker()
+	id := uuid.New()
+	a, b, c := tr.Begin(id), tr.Begin(id), tr.Begin(id)
+	tr.Finish(id, a, []string{ScanReasonFetchFailed}, "jvn: scan failed (fetch_failed)")
+	tr.Finish(id, b, []string{ScanReasonDeadlineExceeded, ScanReasonTruncated}, "nvd: scan failed (deadline_exceeded, truncated)")
+	if st, _ := tr.Get(id); st != ScanStateRunning {
+		t.Fatalf("state = %s while run c is active, want running", st)
+	}
+	tr.Finish(id, c, nil, "")
+	st, msg, reasons := tr.GetDetail(id)
+	if st != ScanStateFailed {
+		t.Fatalf("a clean last run hid earlier failures: state = %s", st)
+	}
+	want := []string{ScanReasonFetchFailed, ScanReasonDeadlineExceeded, ScanReasonTruncated}
+	if !slices.Equal(reasons, want) {
+		t.Errorf("reasons = %v, want %v", reasons, want)
+	}
+	if msg != "jvn: scan failed (fetch_failed); nvd: scan failed (deadline_exceeded, truncated)" {
+		t.Errorf("message = %q", msg)
+	}
+}

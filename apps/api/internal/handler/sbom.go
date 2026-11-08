@@ -260,9 +260,10 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 	// persisted — a client polling for it is asking about a row that does
 	// not exist.
 	//
-	// M62: Begin returns this run's generation; only the run that is still
-	// current when it finishes records its outcome (a manual scan of the same
-	// SBOM started meanwhile supersedes it — Codex M62 R1 High).
+	// M62: Begin returns this run's generation for Finish. If another scan of
+	// the same SBOM (a manual one) overlaps this one, scan-status stays
+	// running until every overlapping run has finished, and then reports
+	// failed if any of them failed (Codex M62 R1/R2 High).
 	var gen uint64
 	if h.scanTracker != nil {
 		gen = h.scanTracker.Begin(sbom.ID)
@@ -808,12 +809,12 @@ type VulnerabilitySummaryCount struct {
 // The counts reflect the current COMMITTED state of the
 // component_vulnerabilities join.
 //
-// They do not climb during a scan: each scanner commits all of its links in
-// one write transaction at the end of its sweep (M62; before M62 the whole
-// NVD + JVN sweep was one transaction). The observable sequence is a step
-// after the NVD sweep and another after the JVN sweep. A "running" poll
-// therefore means "not committed yet", never "nothing found so far", and CLI
-// callers (`sbomhub scan --fail-on`) must trust counts only once
+// They are not final while status is "running": each scanner commits all of
+// its links in one write transaction at the end of its sweep (M62), so the
+// counts step after the NVD sweep and again after the JVN sweep, and — when
+// scans of the same SBOM overlap — after each of them. A "running" poll
+// therefore means "not final", never "nothing found so far", and CLI callers
+// (`sbomhub scan --fail-on`) must trust counts only once
 // status = "completed".
 func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	projectID, err := uuid.Parse(c.Param("id"))
