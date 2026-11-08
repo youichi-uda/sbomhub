@@ -25,7 +25,19 @@ async function getSettings(request: APIRequestContext, projectId: string): Promi
 
 async function openNotificationsTab(page: Page, projectId: string) {
     await page.goto(`/en/projects/${projectId}`);
+    // Opening the tab re-fetches the settings, and the form re-seeds every
+    // field from that answer when it lands (NotificationSettingsForm's
+    // useEffect). Filling before then is overwritten — the flake seen on
+    // 2026-11-09 ("slack_webhook_url: undefined", passed on retry). So wait
+    // for the tab's GET and for the page to settle before handing back.
+    const settingsLoaded = page.waitForResponse(
+        (r) =>
+            r.request().method() === 'GET' &&
+            new URL(r.url()).pathname === `/api/v1/projects/${projectId}/notifications`,
+    );
     await page.getByRole('button', { name: P.notifications, exact: true }).click();
+    expect((await settingsLoaded).status()).toBe(200);
+    await page.waitForLoadState('networkidle');
     await expect(page.locator('input[name="slack_webhook"]')).toBeVisible({ timeout: 15000 });
 }
 

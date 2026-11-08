@@ -128,6 +128,19 @@ test.describe('Search Functionality', () => {
     });
 
     test('should handle non-existent CVE search gracefully', async ({ page }) => {
+        // A CVE the database does not hold falls through to a LIVE NVD
+        // lookup (search_handler -> nvd), so the real status depends on
+        // NVD's mood: 404 when it answers "unknown", 500 when it rate-limits
+        // (observed 2026-11-09: NVD 429 -> 500). This test is about how the
+        // PAGE renders a not-found answer, so that one response is pinned to
+        // the handler's own 404 body (apps/api/internal/handler/search.go).
+        await page.route('**/api/v1/search/cve?*', (route) =>
+            route.fulfill({
+                status: 404,
+                contentType: 'application/json',
+                body: JSON.stringify({ error: 'CVE not found' }),
+            }),
+        );
         await searchCve(page, 'CVE-9999-99999', 404);
 
         const errorCard = page.getByTestId('empty-state');
