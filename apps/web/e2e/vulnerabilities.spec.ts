@@ -1,297 +1,186 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
+import en from '../messages/en.json';
+import {
+  API_BASE_URL,
+  FIXTURE_CVES,
+  createVulnerableProject,
+  deleteProject,
+  type VulnerableProject,
+} from './fixtures/vuln-project';
 
-const API_BASE_URL =
-  process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
+// Every test here runs against a fresh project that carries exactly the
+// four FIXTURE_CVES (2 CRITICAL in KEV, 2 HIGH not in KEV). There is no
+// "fresh project has no vulns, so skip" branch: if the fixture is missing
+// createVulnerableProject fails the setup.
+
+const vulnTabName = new RegExp(`^${en.Vulnerabilities.title} \\((\\d+)\\)$`);
+
+async function openVulnerabilitiesTab(page: Page, projectId: string): Promise<void> {
+  await page.goto(`/en/projects/${projectId}`);
+  await page.getByRole('button', { name: vulnTabName }).click();
+  // The list is fetched asynchronously; wait until every fixture entry is in.
+  await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length, { timeout: 15000 });
+}
+
+async function apiOrder(request: APIRequestContext, projectId: string, sort: 'cvss' | 'epss') {
+  const res = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities?sort=${sort}`);
+  expect(res.status()).toBe(200);
+  return (await res.json()) as Array<{ cve_id: string; cvss_score: number | null }>;
+}
 
 test.describe('Vulnerabilities', () => {
-  let projectId: string;
-  let sbomId: string;
+  let fixture: VulnerableProject;
 
   test.beforeAll(async ({ request }) => {
-    // Create a test project with vulnerable components
-    const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-      data: {
-        name: `Vuln Test Project ${Date.now()}`,
-        description: 'Project for vulnerability E2E tests',
-      },
-    });
-    const project = await createResponse.json();
-    projectId = project.id;
-
-    // Upload SBOM with vulnerable components
-    const sbom = {
-      bomFormat: 'CycloneDX',
-      specVersion: '1.4',
-      version: 1,
-      components: [
-        {
-          type: 'library',
-          name: 'lodash',
-          version: '4.17.20', // Known vulnerable version
-          licenses: [{ license: { id: 'MIT' } }],
-        },
-      ],
-    };
-
-    const uploadResponse = await request.post(
-      `${API_BASE_URL}/api/v1/projects/${projectId}/sbom`,
-      {
-        data: JSON.stringify(sbom),
-        headers: { 'Content-Type': 'application/json' },
-      }
-    );
-    const sbomData = await uploadResponse.json();
-    sbomId = sbomData.id; // Changed from sbom_id to id
+    fixture = await createVulnerableProject(request, 'Vuln Test Project');
   });
 
   test.afterAll(async ({ request }) => {
-    if (projectId) {
-      await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
-    }
+    await deleteProject(request, fixture?.projectId);
   });
 
   test('should trigger vulnerability scan', async ({ page, request }) => {
-    // Trigger vulnerability scan via API
-    const scanResponse = await request.post(
-      `${API_BASE_URL}/api/v1/projects/${projectId}/scan?sbom_id=${sbomId}`
-    );
-    expect(scanResponse.status()).toBe(202);
+    // The scan mutates link state in the background, so it gets its own
+    // project rather than racing the read-only tests on the shared one.
+    const own = await createVulnerableProject(request, 'Vuln Scan Project');
+    try {
+      const scanResponse = await request.post(
+        `${API_BASE_URL}/api/v1/projects/${own.projectId}/scan?sbom_id=${own.sbomId}`
+      );
+      expect(scanResponse.status()).toBe(202);
+      const started = await scanResponse.json();
+      expect(started.sbom_id).toBe(own.sbomId);
+      expect(started.status_url).toBe(`/api/v1/projects/${own.projectId}/sboms/${own.sbomId}/scan-status`);
 
-    // Wait for scan to complete (NVD has rate limits)
-    await page.waitForTimeout(10000);
+      // The run is tracked: it reaches a terminal state. (The hermetic CI
+      // stack has no NVD/JVN access, so there it ends "failed" with
+      // reasons; online it ends "completed". Either way it must not hang
+      // in "running" or report "unknown".)
+      let last: { status?: string; vulnerabilities?: { total?: number } } = {};
+      await expect
+        .poll(
+          async () => {
+            const res = await request.get(`${API_BASE_URL}${started.status_url}`);
+            expect(res.status()).toBe(200);
+            last = await res.json();
+            return last.status;
+          },
+          { timeout: 45000, intervals: [1000] },
+        )
+        .toMatch(/^(completed|failed)$/);
+      // The already-linked vulnerabilities survive a (failed) rescan.
+      expect(last.vulnerabilities?.total).toBe(FIXTURE_CVES.length);
 
-    // Navigate to project vulnerabilities
-    await page.goto(`/en/projects/${projectId}`);
-    await page.getByRole('button', { name: /Vulnerabilities/i }).click();
-
-    // The scan may find vulnerabilities for lodash 4.17.20
-    // Check that the vulnerabilities section is displayed
-    await expect(page.getByRole('heading', { name: 'Vulnerabilities' })).toBeVisible();
+      await openVulnerabilitiesTab(page, own.projectId);
+      await expect(page.getByRole('heading', { name: en.Vulnerabilities.title })).toBeVisible();
+      await expect(page.getByRole('button', { name: vulnTabName })).toHaveText(
+        new RegExp(`\\(${FIXTURE_CVES.length}\\)$`),
+      );
+    } finally {
+      await deleteProject(request, own.projectId);
+    }
   });
 
-  // M11-2 #77: re-enabled — assertion is gated on the test project
-  // having vulnerabilities. The seed populates the tenant-level CVE
-  // rows (CVE-2021-44228 etc.) but the test project itself is
-  // fresh, so the body's `if (vulnerabilities && vulnerabilities.length > 0)`
-  // soft-gate either renders the seeded matches OR auto-skips.
-  test('should display vulnerability details', async ({ page, request }) => {
-    // Get vulnerabilities for the project
-    const vulnResponse = await request.get(
-      `${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`
-    );
-    const vulnerabilities = await vulnResponse.json();
+  test('should display vulnerability details', async ({ page }) => {
+    await openVulnerabilitiesTab(page, fixture.projectId);
 
-    await page.goto(`/en/projects/${projectId}`);
-    await page.getByRole('button', { name: /Vulnerabilities/i }).click();
-
-    if (vulnerabilities && vulnerabilities.length > 0) {
-      // Verify vulnerability information is displayed.
-      //
-      // M13-3 F175 #89: scope the CVE-ID assertion through the canonical
-      // `data-testid="vuln-cve-id"` selector on the vuln entry header
-      // span. A single vuln entry's DOM contains two text nodes that
-      // both match the CVE-ID — the header span AND the
-      // RemediationPanel collapsible button label (intentional UX, see
-      // apps/web/src/components/vulnerability/remediation-panel.tsx:114
-      // and the comment block at the page.tsx span). Without the
-      // data-testid scope, `page.getByText(firstVuln.cve_id)` resolves
-      // to two elements per entry and Playwright's strict mode
-      // (`toBeVisible()`) trips with "resolved to 2 elements". This is
-      // the root cause of the pre-existing flaky that re-surfaced after
-      // M11 close (M12 push) and is logged in STATUS.md as hypothesis A
-      // (CVE × component cartesian) — investigation in M13-3 showed
-      // hypothesis A is false (backend dedupes per F29 via WHERE EXISTS
-      // and the seed maps CVE-2020-8203 to a single component anyway),
-      // so the actual fix is page-side selector scope, not vuln-list
-      // dedupe.
-      const firstVuln = vulnerabilities[0];
-      const cveLocator = page.getByTestId('vuln-cve-id').filter({ hasText: firstVuln.cve_id });
+    for (const c of FIXTURE_CVES) {
+      const v = fixture.vuln(c.cveId);
+      // M13-3 F175 #89: the CVE id also appears in the RemediationPanel
+      // trigger, so scope through the canonical header span.
+      const cveLocator = page.getByTestId('vuln-cve-id').filter({ hasText: c.cveId });
       await expect(cveLocator).toHaveCount(1);
-      await expect(cveLocator).toBeVisible({ timeout: 5000 });
+      await expect(cveLocator).toBeVisible();
 
-      // Severity + CVSS rendering — these may legitimately appear more
-      // than once across the vuln list (e.g. multiple HIGH vulns), so
-      // anchor through the entry's `data-vuln-cve-id` attribute (exact
-      // match) and assert on `.first()` to keep the spec robust against
-      // future seed expansions. The attribute is exposed on the entry
-      // wrapper specifically for spec scoping — using it instead of
-      // `hasText: firstVuln.cve_id` removes the risk that a future
-      // CVE-ID which is a substring of another (e.g. CVE-2024-1 vs
-      // CVE-2024-12) silently double-matches and trips strict-mode
-      // (F181, M13-3 #89).
-      const entryLocator = page.locator(`[data-vuln-cve-id="${firstVuln.cve_id}"]`);
-      await expect(entryLocator.getByText(firstVuln.severity).first()).toBeVisible();
-      await expect(entryLocator.getByText(`CVSS: ${firstVuln.cvss_score}`).first()).toBeVisible();
+      // M13-3 F181 #89: exact attribute match on the entry wrapper.
+      const entry = page.locator(`[data-vuln-cve-id="${c.cveId}"]`);
+      await expect(entry).toHaveCount(1);
+      await expect(entry.getByTestId('vuln-cve-id').locator('xpath=following-sibling::*[1]')).toHaveText(c.severity);
+      await expect(entry.getByText(`CVSS: ${v.cvss_score}`)).toBeVisible();
+      expect(typeof v.description).toBe('string');
+      await expect(entry.getByText(v.description as string)).toBeVisible();
     }
   });
 
-  test('should display vulnerability severity badges correctly', async ({ page, request }) => {
-    // Get vulnerabilities from API first to know what to expect
-    const vulnResponse = await request.get(
-      `${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`
-    );
-    const vulnerabilities = await vulnResponse.json();
+  test('should display vulnerability severity badges correctly', async ({ page }) => {
+    await openVulnerabilitiesTab(page, fixture.projectId);
 
-    await page.goto(`/en/projects/${projectId}`);
-    await page.getByRole('button', { name: /Vulnerabilities/i }).click();
-    await page.waitForTimeout(1000);
-
-    if (vulnerabilities && vulnerabilities.length > 0) {
-      // Count vulnerabilities by severity
-      const severityCounts = {
-        CRITICAL: vulnerabilities.filter((v: { severity: string }) => v.severity === 'CRITICAL').length,
-        HIGH: vulnerabilities.filter((v: { severity: string }) => v.severity === 'HIGH').length,
-        MEDIUM: vulnerabilities.filter((v: { severity: string }) => v.severity === 'MEDIUM').length,
-        LOW: vulnerabilities.filter((v: { severity: string }) => v.severity === 'LOW').length,
-      };
-
-      // Verify badges are shown for each severity that has vulnerabilities
-      if (severityCounts.CRITICAL > 0) {
-        await expect(page.getByText('CRITICAL', { exact: true }).first()).toBeVisible();
+    for (const c of FIXTURE_CVES) {
+      const entry = page.locator(`[data-vuln-cve-id="${c.cveId}"]`);
+      // The severity badge is the element right after the header CVE id
+      // (the RemediationPanel repeats the severity further down, so a
+      // plain getByText would be satisfied by that copy alone).
+      const headerBadge = entry.getByTestId('vuln-cve-id').locator('xpath=following-sibling::*[1]');
+      await expect(headerBadge).toHaveText(c.severity);
+      // KEV badge only on the KEV-listed CVEs.
+      const kev = entry.getByText(en.KEV.badge, { exact: true });
+      if (c.inKev) {
+        await expect(kev).toBeVisible();
+      } else {
+        await expect(kev).toHaveCount(0);
       }
-      if (severityCounts.HIGH > 0) {
-        await expect(page.getByText('HIGH', { exact: true }).first()).toBeVisible();
-      }
-      if (severityCounts.MEDIUM > 0) {
-        await expect(page.getByText('MEDIUM', { exact: true }).first()).toBeVisible();
-      }
-      if (severityCounts.LOW > 0) {
-        await expect(page.getByText('LOW', { exact: true }).first()).toBeVisible();
-      }
-
-      // Verify total count matches
-      const totalFromAPI = vulnerabilities.length;
-      // The Vulnerabilities tab shows count in format "Vulnerabilities (N)"
-      const vulnTab = page.getByRole('button', { name: /Vulnerabilities/i });
-      const tabText = await vulnTab.textContent();
-      if (tabText) {
-        const match = tabText.match(/\((\d+)\)/);
-        if (match) {
-          const displayedCount = parseInt(match[1], 10);
-          expect(displayedCount).toBe(totalFromAPI);
-        }
-      }
-    } else {
-      // If no vulnerabilities, verify empty state message or zero count
-      const noVulnMessage = page.getByText(/no vulnerabilities|脆弱性なし|0 件/i);
-      const emptyState = await noVulnMessage.isVisible().catch(() => false);
-      const zeroInTab = await page.getByRole('button', { name: /Vulnerabilities \(0\)/i }).isVisible().catch(() => false);
-      expect(emptyState || zeroInTab).toBeTruthy();
     }
+
+    // Tab counter shows the server total.
+    await expect(page.getByRole('button', { name: vulnTabName })).toHaveText(
+      `${en.Vulnerabilities.title} (${FIXTURE_CVES.length})`,
+    );
   });
 
-  test('should filter vulnerabilities by severity', async ({ page, request }) => {
-    const vulnResponse = await request.get(
-      `${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`
-    );
-    const vulnerabilities = await vulnResponse.json();
+  // The old "filter vulnerabilities by severity" test looked for a
+  // severity combobox / filter buttons that this tab has never rendered
+  // and asserted nothing; it was removed. The tab's real list control is
+  // the CVSS ⇄ EPSS sort toggle, tested below.
 
-    if (!vulnerabilities || vulnerabilities.length === 0) {
-      test.skip();
-      return;
-    }
+  test('should sort vulnerabilities by CVSS score and toggle to EPSS', async ({ page, request }) => {
+    const byCvss = await apiOrder(request, fixture.projectId, 'cvss');
+    const byEpss = await apiOrder(request, fixture.projectId, 'epss');
+    // Precondition for a discriminating test: CVSS order is descending
+    // and the two orders differ (the fixture CVEs have no EPSS score, so
+    // EPSS sort falls back to the id tie-break).
+    const scores = byCvss.map((v) => v.cvss_score ?? -1);
+    expect(scores).toEqual([...scores].sort((a, b) => b - a));
+    expect(byEpss.map((v) => v.cve_id)).not.toEqual(byCvss.map((v) => v.cve_id));
 
-    await page.goto(`/en/projects/${projectId}`);
-    await page.getByRole('button', { name: /Vulnerabilities/i }).click();
-    await page.waitForTimeout(1000);
+    await openVulnerabilitiesTab(page, fixture.projectId);
+    const sortGroup = page.getByRole('group', { name: en.Vulnerabilities.sortLabel });
+    const cvssButton = sortGroup.getByRole('button', { name: en.Vulnerabilities.sortByCvss, exact: true });
+    const epssButton = sortGroup.getByRole('button', { name: en.Vulnerabilities.sortByEpss, exact: true });
+    const entries = page.getByTestId('vuln-entry');
+    const renderedOrder = () =>
+      entries.evaluateAll((els) => els.map((e) => e.getAttribute('data-vuln-cve-id')));
 
-    // Look for severity filter dropdown or buttons
-    const severityFilter = page.getByRole('combobox').filter({ hasText: /severity|重大度/i });
-    const severityButtons = page.locator('button').filter({ hasText: /CRITICAL|HIGH|MEDIUM|LOW/i });
+    // Default: CVSS, highest first.
+    await expect(cvssButton).toHaveAttribute('aria-pressed', 'true');
+    await expect(epssButton).toHaveAttribute('aria-pressed', 'false');
+    await expect.poll(renderedOrder).toEqual(byCvss.map((v) => v.cve_id));
 
-    if (await severityFilter.isVisible()) {
-      // Filter by CRITICAL
-      await severityFilter.click();
-      const criticalOption = page.getByRole('option', { name: /CRITICAL/i });
-      if (await criticalOption.isVisible()) {
-        await criticalOption.click();
-        await page.waitForTimeout(500);
+    await epssButton.click();
+    await expect(epssButton).toHaveAttribute('aria-pressed', 'true');
+    await expect(cvssButton).toHaveAttribute('aria-pressed', 'false');
+    await expect.poll(renderedOrder).toEqual(byEpss.map((v) => v.cve_id));
 
-        // Verify only CRITICAL vulnerabilities are shown
-        const visibleBadges = page.getByText('CRITICAL', { exact: true });
-        const highBadges = page.getByText('HIGH', { exact: true });
-
-        if (await visibleBadges.first().isVisible().catch(() => false)) {
-          // If CRITICAL is visible, HIGH should not be in the filtered list
-          const highCount = await highBadges.count();
-          // This is a weak assertion as filtering might show multiple severities
-        }
-      }
-    } else if (await severityButtons.first().isVisible()) {
-      // Click on a severity button to filter
-      await severityButtons.first().click();
-      await page.waitForTimeout(500);
-    }
+    await cvssButton.click();
+    await expect.poll(renderedOrder).toEqual(byCvss.map((v) => v.cve_id));
   });
 
-  test('should sort vulnerabilities by CVSS score', async ({ page, request }) => {
-    const vulnResponse = await request.get(
-      `${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`
+  test('should display CVE link that opens in new tab', async ({ page }) => {
+    test.fixme(
+      true,
+      'BUG: RemediationPanel fetches the relative /api/v1/remediation/:cve on the web origin (404), so it only shows "Failed to fetch remediation information" and never renders the NVD/OSV links',
     );
-    const vulnerabilities = await vulnResponse.json();
+    await openVulnerabilitiesTab(page, fixture.projectId);
 
-    if (!vulnerabilities || vulnerabilities.length < 2) {
-      test.skip();
-      return;
-    }
+    const cveId = FIXTURE_CVES[0].cveId;
+    const entry = page.locator(`[data-vuln-cve-id="${cveId}"]`);
+    // The RemediationPanel trigger is the button labelled with the CVE id.
+    await entry.getByRole('button', { name: new RegExp(cveId) }).click();
 
-    await page.goto(`/en/projects/${projectId}`);
-    await page.getByRole('button', { name: /Vulnerabilities/i }).click();
-    await page.waitForTimeout(1000);
-
-    // Look for sort options
-    const sortButton = page.getByRole('button', { name: /sort|ソート/i });
-    const cvssHeader = page.locator('th, button').filter({ hasText: /CVSS/i });
-
-    if (await cvssHeader.isVisible()) {
-      await cvssHeader.click();
-      await page.waitForTimeout(500);
-
-      // Get all CVSS scores displayed
-      const cvssTexts = page.locator('text=/CVSS: [0-9.]+/');
-      const count = await cvssTexts.count();
-
-      if (count >= 2) {
-        const firstScore = await cvssTexts.first().textContent();
-        const lastScore = await cvssTexts.last().textContent();
-
-        // Extract numeric values
-        const firstNum = parseFloat(firstScore?.match(/[0-9.]+/)?.[0] || '0');
-        const lastNum = parseFloat(lastScore?.match(/[0-9.]+/)?.[0] || '0');
-
-        // After sorting, scores should be in order (ascending or descending)
-        expect(firstNum !== lastNum || count === 1).toBeTruthy();
-      }
-    }
-  });
-
-  test('should display CVE link that opens in new tab', async ({ page, request }) => {
-    const vulnResponse = await request.get(
-      `${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`
-    );
-    const vulnerabilities = await vulnResponse.json();
-
-    if (!vulnerabilities || vulnerabilities.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto(`/en/projects/${projectId}`);
-    await page.getByRole('button', { name: /Vulnerabilities/i }).click();
-    await page.waitForTimeout(1000);
-
-    // Find CVE links
-    const cveLink = page.locator('a').filter({ hasText: /CVE-\d{4}-\d+/i }).first();
-
-    if (await cveLink.isVisible()) {
-      // Verify the link has proper attributes
-      const href = await cveLink.getAttribute('href');
-      expect(href).toBeTruthy();
-      expect(href).toMatch(/nvd\.nist\.gov|cve\.mitre\.org|CVE-/i);
-
-      // Check if it opens in new tab
-      const target = await cveLink.getAttribute('target');
-      expect(target).toBe('_blank');
-    }
+    const nvdLink = entry.getByRole('link', { name: 'NVD' });
+    await expect(nvdLink).toBeVisible({ timeout: 10000 });
+    await expect(entry.getByText(en.RemediationPanel.fetchFailed)).toHaveCount(0);
+    await expect(nvdLink).toHaveAttribute('href', `https://nvd.nist.gov/vuln/detail/${cveId}`);
+    await expect(nvdLink).toHaveAttribute('target', '_blank');
+    await expect(nvdLink).toHaveAttribute('rel', /noopener/);
   });
 });

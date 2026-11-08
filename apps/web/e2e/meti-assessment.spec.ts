@@ -1,77 +1,93 @@
 /**
  * METI self-assessment page (issue #38, M3 Wave M3-5).
  *
- * These tests exercise the /projects/:id/meti page end-to-end. They
- * mirror e2e/cra-reports.spec.ts (M2-5) and e2e/triage.spec.ts (M1-6)
- * shape-for-shape: empty-state, filter UX, summary strip, override
- * flow. The M3-4 evaluator fan-out runs synchronously against the
- * project's SBOM / vulnerability / VEX / CRA history, and /refresh
- * always returns 32 rows (the full catalog — service/meti/
- * catalog_test.go pins exactly 32 criteria; the pre-F343 "27 rows"
- * here was a stale claim of the F336 species). For a fresh test
- * project the statuses are MIXED, not uniform — the pre-F353 claim
- * "all in needs_review with empty evidence" was factually wrong
- * (verified 2026-07-02 against service/meti/criteria/*): most criteria
- * fall back to `needs_review`, but the evaluator scores absence as
- * failure on several (zero SBOMs / zero VEX drafts → `not_achieved`;
- * e.g. sbom_creation.go guards the no-SBOM case first at 8+ sites),
- * the EOL check returns `not_applicable` for an empty component set,
- * and the two tenant-scoped audit-log-presence checks in
- * sbom_operation.go score `achieved` because creating the project
- * itself already wrote audit_logs rows. Evidence is `[]` on most rows
- * but NOT all — several evaluators persist the zero counts that drove
- * the verdict (sboms_count / vulnerabilities_count /
- * audit_logs_count). That mix is enough to assert the
- * matrix renders AND — via the public /refresh + PUT/DELETE override
- * endpoints — to apply and clear a real override with a REST readback
- * (see the two override specs below; their conditional skips only
- * guard sessions without write auth). What it is NOT enough for is
- * pinning an evaluator-driven status flip on a KNOWN criterion, which
- * requires seeded evaluator preconditions the fresh test project
- * lacks.
+ * These tests exercise the /projects/:id/meti page end-to-end against
+ * projects they create themselves. The M3-4 evaluator fan-out runs
+ * synchronously on POST /meti/assessment/refresh and always persists the
+ * full 32-criterion catalog (service/meti/catalog_test.go pins 32). For a
+ * fresh project the statuses are MIXED (mostly needs_review, plus
+ * achieved / not_achieved / not_applicable — see service/meti/criteria/*),
+ * so the tests read the rows back from the API and assert the page against
+ * them rather than against hard-coded statuses.
  *
- * TODO(e2e): verified 2026-07-02 (M23-2 F343): there is still no
- * "seed a meti_assessment" admin endpoint nor a stubbed evaluator
- * harness. (The pre-F343 note here asked to "replace the conditional
- * skips" once one lands, but the refresh → override-form → submit →
- * REST-readback flow it prescribed has since landed through the
- * public API — only with override_status=not_applicable against the
- * mixed-status matrix described above.) When a seed path lands, extend the
- * override specs to pin an `achieved` → `not_achieved` flip on a
- * known criterion id.
+ * The CI stack is self-hosted anonymous mode: /refresh and PUT/DELETE
+ * /override are writable, so every setup step is an `expect`, never a
+ * skip. Each test gets its own project, so neither ordering nor retries
+ * can leak state between them (the empty-state test needs a never-
+ * refreshed project; the override tests need an un-overridden row).
+ *
+ * Still not covered: the meti_assessment_override_cleared audit row
+ * (GET /api/v1/audit-logs is plan-gated), and an evaluator-driven status
+ * flip on a known criterion (needs seeded evaluator preconditions).
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect, type APIRequestContext, type Locator, type Page } from "@playwright/test";
+import en from "../messages/en.json";
+import { API_BASE_URL, createProject, deleteProject, uniqueName } from "./fixtures/vuln-project";
 
-const API_BASE_URL =
-    process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || "http://localhost:8080";
+const tPage = en.METIAssessment.Page;
+const tCard = en.METIAssessment.CriterionCard;
+const tStatus = en.METIAssessment.Status as Record<string, string>;
+const PHASES = ["env_setup", "sbom_creation", "sbom_operation"] as const;
+const CATALOG_SIZE = 32;
+
+interface MetiRow {
+    criterion_id: string;
+    criterion_phase: string;
+    status: string;
+    override_status?: string | null;
+    override_note?: string | null;
+}
+
+async function listRows(request: APIRequestContext, projectId: string, query = ""): Promise<MetiRow[]> {
+    const res = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment${query}`);
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body?.assessments), "assessments array").toBe(true);
+    return body.assessments as MetiRow[];
+}
+
+async function refresh(request: APIRequestContext, projectId: string): Promise<MetiRow[]> {
+    const res = await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment/refresh`);
+    expect(res.status(), "POST /meti/assessment/refresh").toBe(200);
+    const body = await res.json();
+    expect(body.refreshed).toBe(CATALOG_SIZE);
+    return listRows(request, projectId);
+}
+
+function card(page: Page, criterionId: string): Locator {
+    // data-criterion-id lives on the card root itself (M12-1 #82), so use a
+    // compound attribute selector rather than filter({ has }).
+    return page.locator(`[data-testid="meti-criterion-card"][data-criterion-id="${criterionId}"]`);
+}
+
+/** A row whose evaluator verdict is not `status`, so overriding to it is a visible flip. */
+function rowNotIn(rows: MetiRow[], status: string): MetiRow {
+    const row = rows.find((r) => r.status !== status && !r.override_status);
+    expect(row, `a non-overridden row whose status is not ${status}`).toBeTruthy();
+    return row as MetiRow;
+}
 
 test.describe("METI Self-Assessment (M3-5)", () => {
-    let projectId: string;
+    const created: string[] = [];
 
-    test.beforeAll(async ({ request }) => {
-        const projectResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-            data: {
-                name: `METI Assessment Test Project ${Date.now()}`,
-                description: "Project for METI self-assessment E2E tests",
-            },
-        });
-        const project = await projectResponse.json();
-        projectId = project.id;
-    });
+    async function newProject(request: APIRequestContext): Promise<string> {
+        const { id } = await createProject(request, uniqueName("METI Assessment Test Project"));
+        created.push(id);
+        return id;
+    }
 
     test.afterAll(async ({ request }) => {
-        if (projectId) {
-            await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
-        }
+        for (const id of created) await deleteProject(request, id);
     });
 
-    test("should render the METI assessment page shell", async ({ page }) => {
+    test("should render the METI assessment page shell", async ({ page, request }) => {
+        const projectId = await newProject(request);
         await page.goto(`/en/projects/${projectId}/meti`);
-        await page.waitForLoadState("networkidle");
 
         await expect(page.getByTestId("meti-assessment-page")).toBeVisible({ timeout: 10000 });
-        await expect(page.getByTestId("meti-refresh")).toBeVisible();
+        await expect(page.getByRole("heading", { name: tPage.title, level: 1 })).toBeVisible();
+        await expect(page.getByTestId("meti-refresh")).toHaveText(tPage.refresh);
         // Filter card and all three filter selects mount on first render.
         await expect(page.getByTestId("meti-filters")).toBeVisible();
         await expect(page.getByTestId("filter-phase")).toBeVisible();
@@ -79,275 +95,197 @@ test.describe("METI Self-Assessment (M3-5)", () => {
         await expect(page.getByTestId("filter-has-override")).toBeVisible();
     });
 
-    test("should show empty state before /refresh has been run", async ({ page, request }) => {
-        // A brand-new project has no meti_assessments rows until the
-        // operator runs /refresh. The empty-state card explains that
-        // and exposes the [data-testid="meti-empty-state"] anchor.
-        const res = await request.get(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment`,
+    test("should show empty state before /refresh has been run, and the matrix after Re-evaluate", async ({
+        page,
+        request,
+    }) => {
+        const projectId = await newProject(request);
+        expect(await listRows(request, projectId)).toHaveLength(0);
+
+        await page.goto(`/en/projects/${projectId}/meti`);
+        const empty = page.getByTestId("meti-empty-state");
+        await expect(empty).toBeVisible({ timeout: 10000 });
+        await expect(empty).toContainText(tPage.emptyTitle);
+        await expect(page.getByTestId("meti-summary")).toHaveCount(0);
+
+        // The page's own Re-evaluate button runs the evaluator.
+        await page.getByTestId("meti-refresh").click();
+        await expect(page.getByTestId("meti-criterion-card")).toHaveCount(CATALOG_SIZE, { timeout: 15000 });
+        await expect(empty).toHaveCount(0);
+        await expect(page.getByTestId("meti-flash-errors")).toContainText(
+            tPage.refreshSuccess.replace("{count}", String(CATALOG_SIZE)).split("{version}")[0],
         );
-        const body = await res.json().catch(() => ({ assessments: [] }));
-        const assessments = Array.isArray(body?.assessments) ? body.assessments : [];
-
-        if (assessments.length === 0) {
-            await page.goto(`/en/projects/${projectId}/meti`);
-            await page.waitForLoadState("networkidle");
-
-            await expect(page.getByTestId("meti-empty-state")).toBeVisible({ timeout: 10000 });
-            // English-locale empty title.
-            await expect(page.getByText(/No assessment yet/i)).toBeVisible();
-        } else {
-            test.skip();
-        }
+        expect(await listRows(request, projectId)).toHaveLength(CATALOG_SIZE);
     });
 
-    test("should filter by phase without crashing the page shell", async ({ page }) => {
-        await page.goto(`/en/projects/${projectId}/meti`);
-        await page.waitForLoadState("networkidle");
+    test("should filter by phase", async ({ page, request }) => {
+        const projectId = await newProject(request);
+        const rows = await refresh(request, projectId);
+        const envSetup = rows.filter((r) => r.criterion_phase === "env_setup");
+        expect(envSetup.length).toBeGreaterThan(0);
+        expect(envSetup.length).toBeLessThan(rows.length);
 
-        // Changing the phase filter triggers a fresh list call via
-        // useEffect / useCallback. Assert the select accepts the change
-        // and the page does not crash. TODO(e2e): tighten by POSTing
-        // /refresh inline first (as the accordion / override specs
-        // below already do) and asserting the listed rows are
-        // phase-bounded; without a refresh a fresh project has zero
-        // meti_assessments rows to filter (verified 2026-07-02, F343).
+        await page.goto(`/en/projects/${projectId}/meti`);
+        const cards = page.getByTestId("meti-criterion-card");
+        await expect(cards).toHaveCount(rows.length, { timeout: 10000 });
+
         const select = page.getByTestId("filter-phase");
         await select.selectOption("env_setup");
         await expect(select).toHaveValue("env_setup");
 
-        await expect(page.getByTestId("meti-assessment-page")).toBeVisible();
+        // Only env_setup rows remain, and all of them.
+        await expect(cards).toHaveCount(envSetup.length);
+        await expect(page.locator('[data-testid="meti-criterion-card"]:not([data-phase="env_setup"])')).toHaveCount(0);
+        await expect(page.getByTestId("meti-list-sbom_creation")).toHaveCount(0);
+
+        await select.selectOption("");
+        await expect(cards).toHaveCount(rows.length);
     });
 
     test("should render the per-phase accordion after /refresh", async ({ page, request }) => {
-        // /refresh runs the evaluator fan-out and persists all 32 rows
-        // with MIXED statuses (mostly needs_review, plus not_achieved /
-        // not_applicable / achieved — see the top-of-file F353 note;
-        // the pre-F353 "every criterion lands in needs_review" claim
-        // was wrong). The assertions below only require the accordion
-        // to mount with one item per phase and the summary strip to
-        // render, which any status mix satisfies.
-        const refreshRes = await request.post(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment/refresh`,
-        );
-        // The refresh endpoint requires write auth via the route group
-        // (RequireWrite) so in CI without an API key it may 401. Skip
-        // the assertion in that case — the empty-state test already
-        // covers the read path.
-        if (refreshRes.status() !== 200) {
-            test.skip();
-            return;
-        }
+        const projectId = await newProject(request);
+        const rows = await refresh(request, projectId);
 
         await page.goto(`/en/projects/${projectId}/meti`);
-        await page.waitForLoadState("networkidle");
-
         await expect(page.getByTestId("meti-phase-accordion")).toBeVisible({ timeout: 10000 });
-        await expect(page.getByTestId("meti-phase-env_setup")).toBeVisible();
-        await expect(page.getByTestId("meti-phase-sbom_creation")).toBeVisible();
-        await expect(page.getByTestId("meti-phase-sbom_operation")).toBeVisible();
 
-        await expect(page.getByTestId("meti-summary")).toBeVisible();
+        for (const phase of PHASES) {
+            const item = page.getByTestId(`meti-phase-${phase}`);
+            await expect(item).toBeVisible();
+            await expect(item).toContainText(en.METIAssessment.Phase[phase]);
+            const expected = rows.filter((r) => r.criterion_phase === phase).length;
+            await expect(item.getByTestId("meti-criterion-card")).toHaveCount(expected);
+        }
+
+        // Summary strip counts match the API rows (no overrides yet).
+        const summary = page.getByTestId("meti-summary");
+        const count = (s: string) => rows.filter((r) => r.status === s).length;
+        await expect(summary).toContainText(tPage.summaryAchieved.replace("{count}", String(count("achieved"))));
+        await expect(summary).toContainText(tPage.summaryNotAchieved.replace("{count}", String(count("not_achieved"))));
+        await expect(summary).toContainText(tPage.summaryNeedsReview.replace("{count}", String(count("needs_review"))));
+        await expect(summary).toContainText(tPage.summaryOverridden.replace("{count}", "0"));
         await expect(page.getByTestId("meti-improvement-toggle")).toBeVisible();
+
+        // Each card shows its evaluator verdict.
+        const sample = rows[0];
+        await expect(card(page, sample.criterion_id)).toHaveAttribute("data-effective-status", sample.status);
+        await expect(card(page, sample.criterion_id)).toContainText(tStatus[sample.status]);
     });
 
-    // M12-1 #82: root-cause audited. The M11-2 11s hang was the
-    // selector — `.filter({ has: page.locator('[data-criterion-id=…]') })`
-    // requires the matching element to be a DESCENDANT of the card,
-    // but `data-criterion-id` lives on the Card itself (see
-    // apps/web/src/components/meti/criterion-card.tsx L310-311). Use
-    // a compound attribute selector instead so the card matches itself.
-    // The `/refresh` POST is gated by RequireWrite (Owner/Admin/Member)
-    // and self-hosted mock auth sets Role=Owner, so it should 200 in
-    // CI; the inline status-200 guard stays as belt-and-suspenders.
     test("should open the override form on a criterion card", async ({ page, request }) => {
-        // Requires at least one meti_assessment row that has NOT been
-        // overridden yet. The override-trigger button is disabled when
-        // override_status is already set, so we filter on
-        // has_override=false. If the project has no rows, /refresh
-        // first; if that fails (401 in CI without an API key) skip.
-        const listRes = await request.get(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment?has_override=false`,
-        );
-        const listBody = await listRes.json().catch(() => ({ assessments: [] }));
-        let rows = Array.isArray(listBody?.assessments) ? listBody.assessments : [];
-
-        if (rows.length === 0) {
-            const refreshRes = await request.post(
-                `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment/refresh`,
-            );
-            if (refreshRes.status() !== 200) {
-                test.skip();
-                return;
-            }
-            const refreshBody = await refreshRes.json().catch(() => ({ assessments: [] }));
-            rows = Array.isArray(refreshBody?.assessments) ? refreshBody.assessments : [];
-        }
-
-        if (rows.length === 0) {
-            test.skip();
-            return;
-        }
-
-        const target = rows[0];
+        const projectId = await newProject(request);
+        // A row whose verdict is not the form's fallback, so the
+        // "starts at the evaluator verdict" check is discriminating.
+        const target = rowNotIn(await refresh(request, projectId), "needs_review");
 
         await page.goto(`/en/projects/${projectId}/meti`);
-        await page.waitForLoadState("networkidle");
+        const c = card(page, target.criterion_id);
+        await expect(c).toBeVisible({ timeout: 10000 });
 
-        // M12-1 #82: compound attribute selector — `data-criterion-id`
-        // is on the Card root, not a descendant, so `.filter({ has })`
-        // would never match. Combine both attributes in one locator.
-        const card = page
-            .locator(`[data-testid="meti-criterion-card"][data-criterion-id="${target.criterion_id}"]`)
-            .first();
-        await expect(card).toBeVisible({ timeout: 10000 });
-
-        await card.getByTestId("meti-override-trigger").click();
-        await expect(card.getByTestId("meti-override-form")).toBeVisible();
-        await expect(card.getByTestId("meti-override-status-select")).toBeVisible();
-        await expect(card.getByTestId("meti-override-submit")).toBeVisible();
-        await expect(card.getByTestId("meti-override-cancel")).toBeVisible();
+        await c.getByTestId("meti-override-trigger").click();
+        await expect(c.getByTestId("meti-override-form")).toBeVisible();
+        // The status select starts at the evaluator verdict.
+        await expect(c.getByTestId("meti-override-status-select")).toHaveValue(target.status);
+        await expect(c.getByTestId("meti-override-submit")).toHaveText(tCard.overrideSubmit);
+        await expect(c.getByTestId("meti-override-cancel")).toBeVisible();
 
         // Cancel returns to view mode without mutating state.
-        await card.getByTestId("meti-override-cancel").click();
-        await expect(card.getByTestId("meti-override-form")).toHaveCount(0);
+        await c.getByTestId("meti-override-cancel").click();
+        await expect(c.getByTestId("meti-override-form")).toHaveCount(0);
+        await expect(c).toHaveAttribute("data-overridden", "false");
+        const persisted = (await listRows(request, projectId)).find((r) => r.criterion_id === target.criterion_id);
+        expect(persisted?.override_status ?? "").toBe("");
     });
 
-    // M12-1 #82: same selector fix as override-form spec.
+    // Used to skip every run: the override form calls the note
+    // "(optional)" and the test left it blank, but PUT /override requires
+    // a 1..4096-char note, so the save 400'd, the card never flipped and
+    // the `count() === 0 → skip` guard hid it. The operator flow with a
+    // reason is tested here; the blank-note path is the fixme'd bug below.
     test("should apply a manual override and surface override badge", async ({ page, request }) => {
-        // Acceptance criterion: override → effective status flips and
-        // the override badge is visible. Requires a non-overridden row
-        // AND a write-capable session — same gating as the prior test.
-        const listRes = await request.get(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment?has_override=false`,
-        );
-        const listBody = await listRes.json().catch(() => ({ assessments: [] }));
-        let rows = Array.isArray(listBody?.assessments) ? listBody.assessments : [];
-
-        if (rows.length === 0) {
-            const refreshRes = await request.post(
-                `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment/refresh`,
-            );
-            if (refreshRes.status() !== 200) {
-                test.skip();
-                return;
-            }
-            const refreshBody = await refreshRes.json().catch(() => ({ assessments: [] }));
-            rows = Array.isArray(refreshBody?.assessments) ? refreshBody.assessments : [];
-        }
-
-        if (rows.length === 0) {
-            test.skip();
-            return;
-        }
-
-        const target = rows[0];
+        const projectId = await newProject(request);
+        const target = rowNotIn(await refresh(request, projectId), "not_applicable");
+        const note = "E2E override: vendor attestation reviewed";
 
         await page.goto(`/en/projects/${projectId}/meti`);
-        await page.waitForLoadState("networkidle");
+        const c = card(page, target.criterion_id);
+        await expect(c).toHaveAttribute("data-overridden", "false", { timeout: 10000 });
 
-        // M12-1 #82: compound attribute selector (see override-form spec).
-        const card = page
-            .locator(`[data-testid="meti-criterion-card"][data-criterion-id="${target.criterion_id}"]`)
-            .first();
-        await expect(card).toBeVisible({ timeout: 10000 });
+        await c.getByTestId("meti-override-trigger").click();
+        await c.getByTestId("meti-override-status-select").selectOption("not_applicable");
+        await c.getByLabel(tCard.overrideFormNoteLabel).fill(note);
+        await c.getByTestId("meti-override-submit").click();
 
-        await card.getByTestId("meti-override-trigger").click();
-        await card.getByTestId("meti-override-status-select").selectOption("not_applicable");
-        await card.getByTestId("meti-override-submit").click();
+        await expect(c).toHaveAttribute("data-overridden", "true", { timeout: 10000 });
+        await expect(c).toHaveAttribute("data-effective-status", "not_applicable");
+        await expect(c).toHaveAttribute("data-status", target.status);
+        await expect(c.getByTestId("meti-override-form")).toHaveCount(0);
+        await expect(c.getByText(tCard.overrideBadge, { exact: true })).toBeVisible();
+        await expect(c).toContainText(note);
+        await expect(page.getByTestId("meti-summary")).toContainText(tPage.summaryOverridden.replace("{count}", "1"));
+        await expect(page.getByTestId("meti-flash-errors")).toHaveCount(0);
 
-        // Wait for the optimistic UI update + background re-fetch.
-        await page.waitForTimeout(2000);
+        // Persisted, per the REST source of truth.
+        const persisted = (await listRows(request, projectId)).find((r) => r.criterion_id === target.criterion_id);
+        expect(persisted?.override_status).toBe("not_applicable");
+        expect(persisted?.override_note).toBe(note);
+    });
 
-        // The same criterion id should now carry data-overridden="true"
-        // when the override has been persisted. If the page-level
-        // session lacks write auth the PUT lands as 403 and the badge
-        // does not appear; skip in that case since we cannot assert
-        // the success outcome. M12-1 #82: compound attribute selector.
-        const overriddenCard = page
-            .locator(`[data-testid="meti-criterion-card"][data-criterion-id="${target.criterion_id}"][data-overridden="true"]`);
-
-        const overriddenCount = await overriddenCard.count();
-        if (overriddenCount === 0) {
-            test.skip();
-            return;
-        }
-
-        await expect(overriddenCard.first()).toBeVisible();
-
-        // Confirm persisted via REST as the source of truth.
-        const finalRes = await request.get(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment`,
+    test("should save an override whose optional reason is left blank", async ({ page, request }) => {
+        test.fixme(
+            true,
+            'BUG: the override form labels the note "Override reason (optional)" and its zod schema allows blank, but PUT /meti/assessment/:criterion/override answers 400 "override_note is required" — the save always fails with "Manual override failed"',
         );
-        const finalBody = await finalRes.json().catch(() => ({ assessments: [] }));
-        const finalRows = Array.isArray(finalBody?.assessments) ? finalBody.assessments : [];
-        const persisted = finalRows.find((r: { criterion_id: string }) => r.criterion_id === target.criterion_id);
+        const projectId = await newProject(request);
+        const target = rowNotIn(await refresh(request, projectId), "not_applicable");
+
+        await page.goto(`/en/projects/${projectId}/meti`);
+        const c = card(page, target.criterion_id);
+        await c.getByTestId("meti-override-trigger").click();
+        await c.getByTestId("meti-override-status-select").selectOption("not_applicable");
+        await c.getByTestId("meti-override-submit").click();
+
+        await expect(c).toHaveAttribute("data-overridden", "true", { timeout: 10000 });
+        await expect(page.getByTestId("meti-flash-errors")).toHaveCount(0);
+        const persisted = (await listRows(request, projectId)).find((r) => r.criterion_id === target.criterion_id);
         expect(persisted?.override_status).toBe("not_applicable");
     });
 
-    test("should toggle improvement-actions-only filter without crashing", async ({ page }) => {
+    test("should toggle improvement-actions-only filter", async ({ page, request }) => {
+        const projectId = await newProject(request);
+        const rows = await refresh(request, projectId);
+        const actionsRes = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/meti/improvement-actions`);
+        expect(actionsRes.status()).toBe(200);
+        const actions = ((await actionsRes.json()).actions ?? []) as Array<{ criterion_id: string }>;
+        // Discriminating only if the toggle hides some rows but not all.
+        expect(actions.length).toBeGreaterThan(0);
+        expect(actions.length).toBeLessThan(rows.length);
+
         await page.goto(`/en/projects/${projectId}/meti`);
-        await page.waitForLoadState("networkidle");
+        const cards = page.getByTestId("meti-criterion-card");
+        await expect(cards).toHaveCount(rows.length, { timeout: 10000 });
+        await expect(page.getByTestId("meti-improvement-toggle-label")).toContainText(
+            tPage.improvementCount.replace("{count}", String(actions.length)),
+        );
 
-        // The improvement toggle is only mounted once the summary
-        // strip mounts (assessments.length > 0). Conditionally check
-        // for it — empty-state projects skip this assertion.
         const toggle = page.getByTestId("meti-improvement-toggle");
-        const count = await toggle.count();
-        if (count === 0) {
-            test.skip();
-            return;
-        }
-
         await toggle.check();
         await expect(toggle).toBeChecked();
-        await expect(page.getByTestId("meti-assessment-page")).toBeVisible();
+        await expect(cards).toHaveCount(actions.length);
+        const shown = await cards.evaluateAll((els) => els.map((e) => e.getAttribute("data-criterion-id")).sort());
+        expect(shown).toEqual(actions.map((a) => a.criterion_id).sort());
 
         await toggle.uncheck();
         await expect(toggle).not.toBeChecked();
+        await expect(cards).toHaveCount(rows.length);
     });
 
-    // M3 Codex review #F35 — clear-override flow. The spec seeds its
-    // own override row inline (public PUT /override) and then walks
-    // the clear flow to a REST readback of the cleared
-    // override_status. Like the "apply a manual override" test above,
-    // it is gated on /refresh returning at least one criterion and the
-    // PUT /override surface being writable in the current test
-    // session. When either gate is missing we test.skip() rather than
-    // asserting.
-    //
-    // TODO(e2e): verified 2026-07-02 (M23-2 F343): the pre-F343 note
-    // here waited on a "seed an overridden meti_assessment" admin
-    // endpoint, but the seed-override → clear-form → note → cleared
-    // readback flow it prescribed has since landed below through the
-    // public API. Still missing: confirming the
-    // meti_assessment_override_cleared audit row (handler/meti.go
-    // emits it on DELETE). GET /api/v1/audit-logs exists but is
-    // feature-gated to Pro+ plans (CheckFeature("audit_logs") in
-    // cmd/server/main.go), so the audit assertion needs a plan-aware
-    // guard (or a Pro-seeded tenant) before it can be added here.
-    // M12-1 #82: same selector fix as override-form spec.
+    // M3 Codex review #F35 — clear-override flow. The spec seeds its own
+    // override row through the public PUT /override and walks the clear
+    // form to a REST readback of the cleared override_status.
     test("should expose the clear-override flow on an overridden row", async ({ page, request }) => {
-        const refreshRes = await request.post(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment/refresh`,
-        );
-        if (!refreshRes.ok()) {
-            test.skip();
-            return;
-        }
-
-        // Pull rows with no override yet — we override one inline so
-        // the clear-override trigger becomes visible.
-        const listRes = await request.get(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment?has_override=false`,
-        );
-        const listBody = await listRes.json().catch(() => ({ assessments: [] }));
-        const rows = Array.isArray(listBody?.assessments) ? listBody.assessments : [];
-        if (rows.length === 0) {
-            test.skip();
-            return;
-        }
-        const target = rows[0];
+        const projectId = await newProject(request);
+        const target = rowNotIn(await refresh(request, projectId), "not_applicable");
 
         const overrideRes = await request.put(
             `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment/${encodeURIComponent(target.criterion_id)}/override`,
@@ -358,65 +296,38 @@ test.describe("METI Self-Assessment (M3-5)", () => {
                 },
             },
         );
-        if (!overrideRes.ok()) {
-            // PUT may 403 in sessions without write auth; skip in that
-            // case since the clear flow can't be exercised without a
-            // pre-existing override on this row.
-            test.skip();
-            return;
-        }
+        expect(overrideRes.status(), await overrideRes.text()).toBe(200);
 
         await page.goto(`/en/projects/${projectId}/meti`);
-        await page.waitForLoadState("networkidle");
+        const c = card(page, target.criterion_id);
+        await expect(c).toHaveAttribute("data-overridden", "true", { timeout: 10000 });
+        await expect(c).toHaveAttribute("data-effective-status", "not_applicable");
 
-        // M12-1 #82: compound attribute selector (see override-form spec).
-        const card = page
-            .locator(`[data-testid="meti-criterion-card"][data-criterion-id="${target.criterion_id}"]`)
-            .first();
-        await expect(card).toBeVisible({ timeout: 10000 });
-
-        // Clear-override trigger should be visible on the overridden
-        // row. The override trigger is no longer disabled (M3 #F35).
-        const clearTrigger = card.getByTestId("meti-clear-override-trigger");
-        await expect(clearTrigger).toBeVisible();
+        const clearTrigger = c.getByTestId("meti-clear-override-trigger");
+        await expect(clearTrigger).toHaveText(tCard.clearOverrideButton);
         await clearTrigger.click();
 
-        const form = card.getByTestId("meti-clear-override-form");
-        await expect(form).toBeVisible();
-        await expect(card.getByTestId("meti-clear-override-confirm")).toBeVisible();
+        await expect(c.getByTestId("meti-clear-override-form")).toBeVisible();
+        await expect(c.getByTestId("meti-clear-override-confirm")).toHaveText(tCard.clearOverrideConfirm);
 
-        // Submit should be disabled until a non-whitespace note is typed.
-        const submit = card.getByTestId("meti-clear-override-submit");
+        // Submit stays disabled until a non-whitespace note is typed.
+        const submit = c.getByTestId("meti-clear-override-submit");
         await expect(submit).toBeDisabled();
-        await card.getByTestId("meti-clear-override-note").fill(
+        await c.getByTestId("meti-clear-override-note").fill("   ");
+        await expect(submit).toBeDisabled();
+        await c.getByTestId("meti-clear-override-note").fill(
             "E2E clear: re-evaluated, the original override was wrong",
         );
         await expect(submit).toBeEnabled();
         await submit.click();
 
-        await page.waitForTimeout(2000);
+        await expect(c).toHaveAttribute("data-overridden", "false", { timeout: 10000 });
+        await expect(c).toHaveAttribute("data-effective-status", target.status);
+        await expect(c.getByTestId("meti-clear-override-trigger")).toHaveCount(0);
+        await expect(c.getByText(tCard.overrideBadge, { exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("meti-flash-errors")).toHaveCount(0);
 
-        // After the clear, the same criterion id should carry
-        // data-overridden="false". If the session lacks write auth
-        // the DELETE 403's and the badge stays — skip in that case.
-        // M12-1 #82: compound attribute selector.
-        const clearedCard = page
-            .locator(`[data-testid="meti-criterion-card"][data-criterion-id="${target.criterion_id}"][data-overridden="false"]`);
-        if ((await clearedCard.count()) === 0) {
-            test.skip();
-            return;
-        }
-        await expect(clearedCard.first()).toBeVisible();
-
-        // Confirm persisted via REST as the source of truth.
-        const finalRes = await request.get(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment`,
-        );
-        const finalBody = await finalRes.json().catch(() => ({ assessments: [] }));
-        const finalRows = Array.isArray(finalBody?.assessments) ? finalBody.assessments : [];
-        const persisted = finalRows.find(
-            (r: { criterion_id: string }) => r.criterion_id === target.criterion_id,
-        );
+        const persisted = (await listRows(request, projectId)).find((r) => r.criterion_id === target.criterion_id);
         expect(persisted?.override_status ?? "").toBe("");
     });
 });
