@@ -1,165 +1,120 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+import en from '../messages/en.json';
+import { API_BASE_URL, createProject, deleteProject, uniqueName } from './fixtures/vuln-project';
 
-import { API_BASE_URL, createProject, deleteProject } from './fixtures/vuln-project';
+// The projects list page (src/app/[locale]/(dashboard)/projects/page.tsx)
+// catches a failed GET /projects and renders its normal "No projects yet"
+// empty state: there is no error or retry UI. The two failure-path tests
+// below keep the honest assertions (an error is shown, the misleading empty
+// state is not) behind a fixme until the page grows an error state.
+const LOAD_FAILURE_BUG =
+    'BUG: projects list shows the "No projects yet" empty state when GET /api/v1/projects fails (network error or HTTP 500); no error message or retry is rendered';
+
+async function expectLoadFailureShown(page: Page) {
+    await expect(page.getByRole('heading', { level: 1, name: en.Projects.title })).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText(/failed to load|could not load|error/i)).toBeVisible();
+    await expect(page.getByText(en.Projects.noProjects)).toHaveCount(0);
+}
 
 test.describe('Error Handling', () => {
     test('should display 404 page for non-existent project', async ({ page }) => {
-        // Navigate to a non-existent project
-        const fakeProjectId = 'non-existent-project-id-12345';
-        await page.goto(`/en/projects/${fakeProjectId}`);
-        await page.waitForTimeout(1000);
-
-        // Should show 404 page or error message
-        const notFoundHeading = page.getByRole('heading', { name: /404|Not Found|見つかりません/i });
-        const notFoundText = page.getByText(/not found|does not exist|見つかりません|存在しません/i);
-        const errorPage = page.locator('[data-testid="error-page"], .error-page');
-
-        const has404Heading = await notFoundHeading.isVisible().catch(() => false);
-        const has404Text = await notFoundText.isVisible().catch(() => false);
-        const hasErrorPage = await errorPage.isVisible().catch(() => false);
-
-        // One of these should be visible
-        expect(has404Heading || has404Text || hasErrorPage).toBeTruthy();
+        await page.goto('/en/projects/non-existent-project-id-12345');
+        await expect(page.locator('main')).toHaveText(en.Common.projectNotFound, { timeout: 15000 });
     });
 
     test('should display 404 page for invalid URL path', async ({ page }) => {
-        await page.goto('/en/invalid-page-path-xyz');
-        await page.waitForTimeout(1000);
-
-        // Should show 404 page
-        const notFoundIndicator = page.getByText(/404|not found|見つかりません|page does not exist/i);
-        await expect(notFoundIndicator.first()).toBeVisible();
+        const response = await page.goto('/en/invalid-page-path-xyz');
+        expect(response?.status()).toBe(404);
+        await expect(page.getByRole('heading', { level: 1, name: '404' })).toBeVisible();
+        await expect(page.getByRole('heading', { level: 2, name: 'This page could not be found.' })).toBeVisible();
     });
 
     test('should handle network error gracefully', async ({ page }) => {
-        // Block all API requests to simulate network failure
-        await page.route(`${API_BASE_URL}/**`, route => route.abort());
-
+        test.fixme(true, LOAD_FAILURE_BUG);
+        await page.route(`${API_BASE_URL}/api/v1/projects`, (route) => route.abort());
         await page.goto('/en/projects');
-        await page.waitForTimeout(2000);
-
-        // Should show error state or retry option
-        const errorMessage = page.getByText(/error|failed|エラー|失敗|could not load|retry/i);
-        const retryButton = page.getByRole('button', { name: /Retry|再試行|Try Again/i });
-
-        const hasError = await errorMessage.isVisible().catch(() => false);
-        const hasRetry = await retryButton.isVisible().catch(() => false);
-
-        // Either error message or page still renders (with empty state)
-        expect(hasError || hasRetry || await page.locator('main').isVisible()).toBeTruthy();
+        await expectLoadFailureShown(page);
     });
 
-    test('should handle API timeout gracefully', async ({ page }) => {
-        // Delay API responses to simulate timeout
-        await page.route(`${API_BASE_URL}/api/v1/projects`, async route => {
-            await new Promise(resolve => setTimeout(resolve, 30000)); // 30 second delay
+    test('should show a loading state while the projects request is pending', async ({ page }) => {
+        // Hold GET /projects until the loading state has been checked.
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => { release = resolve; });
+        await page.route(`${API_BASE_URL}/api/v1/projects`, async (route) => {
+            await held;
             await route.continue();
         });
 
-        // Navigate with a timeout
-        await page.goto('/en/projects', { timeout: 5000 }).catch(() => {});
-        await page.waitForTimeout(2000);
+        await page.goto('/en/projects');
+        await expect(page.getByText(en.Common.loading, { exact: true })).toBeVisible({ timeout: 15000 });
+        await expect(page.getByRole('heading', { level: 1, name: en.Projects.title })).toHaveCount(0);
 
-        // Page should show loading state or timeout error
-        const loadingIndicator = page.getByText(/loading|読み込み中|please wait/i);
-        const timeoutError = page.getByText(/timeout|timed out|タイムアウト/i);
-        const pageContent = page.locator('main');
-
-        const isLoading = await loadingIndicator.isVisible().catch(() => false);
-        const hasTimeout = await timeoutError.isVisible().catch(() => false);
-        const hasContent = await pageContent.isVisible().catch(() => false);
-
-        expect(isLoading || hasTimeout || hasContent).toBeTruthy();
+        release();
+        await expect(page.getByRole('heading', { level: 1, name: en.Projects.title })).toBeVisible({ timeout: 15000 });
+        await expect(page.getByText(en.Common.loading, { exact: true })).toHaveCount(0);
     });
 
     test('should handle project deletion of already deleted project', async ({ page, request }) => {
-        // Create and immediately delete a project
-        const projectName = `Deleted Project ${Date.now()}`;
-        const project = await createProject(request, projectName, 'Will be deleted');
+        const project = await createProject(request, uniqueName('Deleted Project'), 'Will be deleted');
+        await deleteProject(request, project.id); // asserts GET -> 404
 
-        // Delete via API
-        const deleted = await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
-        expect(deleted.ok(), `DELETE returned ${deleted.status()}`).toBe(true);
-
-        // Try to access the deleted project
         await page.goto(`/en/projects/${project.id}`);
-        await page.waitForTimeout(1000);
-
-        // Should show not found or error
-        const notFoundText = page.getByText(/not found|does not exist|見つかりません|deleted/i);
-        await expect(notFoundText.first()).toBeVisible();
+        await expect(page.locator('main')).toHaveText(en.Common.projectNotFound, { timeout: 15000 });
     });
 
     test('should show validation error for invalid SBOM upload', async ({ page, request }) => {
-        // Create a project
-        const projectName = `Invalid SBOM Test ${Date.now()}`;
-        const project = await createProject(request, projectName, 'For invalid SBOM test');
+        const project = await createProject(request, uniqueName('Invalid SBOM Test'), 'For invalid SBOM test');
+        try {
+            await page.goto(`/en/projects/${project.id}`);
+            await expect(page.getByRole('heading', { level: 1, name: project.name })).toBeVisible({ timeout: 15000 });
 
-        // Try to upload invalid SBOM
-        const invalidSbom = {
-            invalid: 'not a valid sbom',
-            random: 'data',
-        };
+            // Upload a JSON file that is not an SBOM through the Upload tab.
+            let alertText: string | null = null;
+            page.once('dialog', async (dialog) => {
+                alertText = `${dialog.type()}: ${dialog.message()}`;
+                await dialog.accept();
+            });
+            const upload = page.waitForResponse(
+                (r) => r.request().method() === 'POST' && r.url().endsWith(`/api/v1/projects/${project.id}/sbom`),
+            );
+            await page.locator('input[type="file"]').setInputFiles({
+                name: 'not-an-sbom.json',
+                mimeType: 'application/json',
+                buffer: Buffer.from(JSON.stringify({ invalid: 'not a valid sbom', random: 'data' })),
+            });
 
-        const uploadResponse = await request.post(
-            `${API_BASE_URL}/api/v1/projects/${project.id}/sbom`,
-            {
-                data: JSON.stringify(invalidSbom),
-                headers: { 'Content-Type': 'application/json' },
-            }
-        );
+            const response = await upload;
+            expect(response.status()).toBe(400);
+            expect((await response.json()).error).toBe('failed to parse SBOM: unknown SBOM format');
+            await expect.poll(() => alertText).toBe(`alert: ${en.ProjectDetail.uploadFailed}`);
 
-        // API should reject invalid SBOM
-        expect(uploadResponse.status()).toBeGreaterThanOrEqual(400);
-
-        // Navigate to project and verify error is shown if any
-        await page.goto(`/en/projects/${project.id}`);
-        await page.waitForLoadState('networkidle');
-
-        // Project should still be accessible
-        await expect(page.getByText('Back to Projects')).toBeVisible();
-
-        // Cleanup
-        await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
+            // Nothing was stored.
+            const sboms = await request.get(`${API_BASE_URL}/api/v1/projects/${project.id}/sboms`);
+            expect(sboms.status()).toBe(200);
+            expect((await sboms.json()) ?? []).toEqual([]);
+        } finally {
+            await deleteProject(request, project.id);
+        }
     });
 
     test('should handle empty SBOM components gracefully', async ({ page, request }) => {
-        const projectName = `Empty SBOM Test ${Date.now()}`;
-        const project = await createProject(request, projectName, 'For empty SBOM test');
+        const project = await createProject(request, uniqueName('Empty SBOM Test'), 'For empty SBOM test');
+        try {
+            const upload = await request.post(`${API_BASE_URL}/api/v1/projects/${project.id}/sbom`, {
+                data: JSON.stringify({ bomFormat: 'CycloneDX', specVersion: '1.4', version: 1, components: [] }),
+                headers: { 'Content-Type': 'application/json' },
+            });
+            expect(upload.status(), await upload.text()).toBe(201);
 
-        // Upload SBOM with no components
-        const emptySbom = {
-            bomFormat: 'CycloneDX',
-            specVersion: '1.4',
-            version: 1,
-            components: [],
-        };
-
-        const upload = await request.post(`${API_BASE_URL}/api/v1/projects/${project.id}/sbom`, {
-            data: JSON.stringify(emptySbom),
-            headers: { 'Content-Type': 'application/json' },
-        });
-        expect(upload.ok(), `empty SBOM upload returned ${upload.status()}`).toBe(true);
-
-        // Navigate to project
-        await page.goto(`/en/projects/${project.id}`);
-        await page.waitForLoadState('networkidle');
-
-        // Click on Components tab
-        await page.getByRole('button', { name: /Components/i }).click();
-        await page.waitForTimeout(1000);
-
-        // Should show empty state message
-        const emptyMessage = page.getByText(/no components|コンポーネントなし|0 件|empty/i);
-        const zeroCount = page.getByRole('button', { name: /Components \(0\)/i });
-
-        const hasEmptyMessage = await emptyMessage.isVisible().catch(() => false);
-        const hasZeroCount = await zeroCount.isVisible().catch(() => false);
-
-        expect(hasEmptyMessage || hasZeroCount).toBeTruthy();
-
-        // Cleanup
-        await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
+            await page.goto(`/en/projects/${project.id}`);
+            const componentsTab = page.getByRole('button', { name: `${en.Components.title} (0)`, exact: true });
+            await expect(componentsTab).toBeVisible({ timeout: 15000 });
+            await componentsTab.click();
+            await expect(page.getByText(en.ProjectDetail.noComponents, { exact: true })).toBeVisible();
+            await expect(page.locator('main table')).toHaveCount(0);
+        } finally {
+            await deleteProject(request, project.id);
+        }
     });
 
     // (Removed: "should display error for unauthorized access". It was a
@@ -170,27 +125,16 @@ test.describe('Error Handling', () => {
     // auth.spec.ts.)
 
     test('should handle API error responses gracefully', async ({ page }) => {
-        // Intercept API and return error response
-        await page.route(`${API_BASE_URL}/api/v1/projects`, route =>
+        test.fixme(true, LOAD_FAILURE_BUG);
+        await page.route(`${API_BASE_URL}/api/v1/projects`, (route) =>
             route.fulfill({
                 status: 500,
                 contentType: 'application/json',
                 body: JSON.stringify({ error: 'Internal Server Error' }),
-            })
+            }),
         );
-
         await page.goto('/en/projects');
-        await page.waitForTimeout(2000);
-
-        // Should show error message
-        const errorMessage = page.getByText(/error|failed|問題|エラー|sorry|申し訳/i);
-        const mainContent = page.locator('main');
-
-        const hasError = await errorMessage.isVisible().catch(() => false);
-        const hasContent = await mainContent.isVisible().catch(() => false);
-
-        // Error message or at least page content should be visible
-        expect(hasError || hasContent).toBeTruthy();
+        await expectLoadFailureShown(page);
     });
 
     // Duplicate project names: the API deliberately allows them within a
@@ -233,67 +177,33 @@ test.describe('Error Handling', () => {
         }
     });
 
-    test('should handle session expiration gracefully', async ({ page }) => {
-        // Navigate to a page
-        await page.goto('/en/dashboard');
-        await page.waitForLoadState('networkidle');
+    // (Removed: "should handle session expiration gracefully". The CI
+    // stack has no session: anonymous self-hosted mode serves every request
+    // as the seeded admin, so clearing cookies changes nothing and the test
+    // could only ever take its "still has access" branch.)
 
-        // Simulate session expiration by clearing cookies
-        await page.context().clearCookies();
-
-        // Try to perform an action that requires authentication
-        await page.goto('/en/projects');
-        await page.waitForTimeout(1000);
-
-        // Should redirect to login or show session expired message
-        const loginPage = page.getByText(/sign in|login|ログイン/i);
-        const sessionExpired = page.getByText(/session expired|セッション切れ|再ログイン/i);
-        const projectsPage = page.getByRole('heading', { name: /Projects/i });
-
-        const needsLogin = await loginPage.isVisible().catch(() => false);
-        const hasSessionExpired = await sessionExpired.isVisible().catch(() => false);
-        const hasAccess = await projectsPage.isVisible().catch(() => false);
-
-        // One of these should be true
-        expect(needsLogin || hasSessionExpired || hasAccess).toBeTruthy();
-    });
-
-    test('should handle large file upload error', async ({ page, request }) => {
-        const projectName = `Large File Test ${Date.now()}`;
-        const project = await createProject(request, projectName, 'For large file test');
-
-        // Create a very large SBOM (simulated with many components)
-        const components = [];
-        for (let i = 0; i < 10000; i++) {
-            components.push({
+    test('should accept a 10,000-component SBOM upload', async ({ request }) => {
+        const project = await createProject(request, uniqueName('Large File Test'), 'For large file test');
+        try {
+            const components = Array.from({ length: 10000 }, (_, i) => ({
                 type: 'library',
                 name: `component-${i}`,
                 version: '1.0.0',
                 licenses: [{ license: { id: 'MIT' } }],
-            });
-        }
-
-        const largeSbom = {
-            bomFormat: 'CycloneDX',
-            specVersion: '1.4',
-            version: 1,
-            components,
-        };
-
-        // Try to upload large SBOM
-        const uploadResponse = await request.post(
-            `${API_BASE_URL}/api/v1/projects/${project.id}/sbom`,
-            {
-                data: JSON.stringify(largeSbom),
+            }));
+            const uploadResponse = await request.post(`${API_BASE_URL}/api/v1/projects/${project.id}/sbom`, {
+                data: JSON.stringify({ bomFormat: 'CycloneDX', specVersion: '1.4', version: 1, components }),
                 headers: { 'Content-Type': 'application/json' },
                 timeout: 60000,
-            }
-        );
+            });
 
-        // Should either succeed or return appropriate error
-        expect([200, 201, 400, 413, 500]).toContain(uploadResponse.status());
-
-        // Cleanup
-        await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
+            // ~1 MB is well within the upload limit: stored in full.
+            expect(uploadResponse.status(), await uploadResponse.text()).toBe(201);
+            const stored = await request.get(`${API_BASE_URL}/api/v1/projects/${project.id}/components`);
+            expect(stored.status()).toBe(200);
+            expect(((await stored.json()) as unknown[]).length).toBe(10000);
+        } finally {
+            await deleteProject(request, project.id);
+        }
     });
 });

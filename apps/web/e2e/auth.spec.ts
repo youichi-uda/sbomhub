@@ -1,17 +1,20 @@
 import { test, expect } from '@playwright/test';
+import en from '../messages/en.json';
 import ja from '../messages/ja.json';
+
+const L = en.Landing;
 
 const jaNav = ja.Navigation;
 const jaProjects = ja.Projects;
 
 test.describe('Authentication Flow', () => {
     test('should allow access to public pages without auth', async ({ page }) => {
-        // Public pages should be accessible
         await page.goto('/en');
-        await page.waitForLoadState('networkidle');
 
-        // Home page should load
-        await expect(page.locator('body')).toBeVisible();
+        // The landing page renders (no redirect) with its hero and sunset banner.
+        await expect(page).toHaveURL(/\/en$/);
+        await expect(page.getByRole('heading', { level: 1, name: L.hero.title.replace(/\n/g, ' ') })).toBeVisible();
+        await expect(page.getByText(L.sunsetBanner, { exact: false })).toBeVisible();
     });
 
     test('should access legal page', async ({ page }) => {
@@ -40,33 +43,22 @@ test.describe('Authentication Flow', () => {
 
     test('should have sign in link in header', async ({ page }) => {
         await page.goto('/en');
-        await page.waitForLoadState('networkidle');
 
-        // Look for sign in button or link in header
-        const signInButton = page.getByRole('link', { name: /Sign In|Login|ログイン|サインイン/i });
-        const signInLink = page.locator('a[href*="sign-in"]');
-
-        const hasButton = await signInButton.isVisible().catch(() => false);
-        const hasLink = await signInLink.first().isVisible().catch(() => false);
-
-        // Either sign-in is visible or we're in a logged-in state (dev mode)
-        await expect(page.locator('body')).toBeVisible();
+        // Self-hosted landing page: the header and the footer both link to
+        // the locale's sign-in route.
+        const headerLink = page.locator('header').getByRole('link', { name: L.nav.signIn, exact: true });
+        await expect(headerLink).toBeVisible();
+        await expect(headerLink).toHaveAttribute('href', '/en/sign-in');
+        await expect(page.locator('footer').getByRole('link', { name: L.nav.signIn, exact: true }))
+            .toHaveAttribute('href', '/en/sign-in');
     });
 
-    test('should redirect to sign-in page when accessing protected route', async ({ page }) => {
-        // Try to access projects (protected route)
+    test('should not redirect protected routes to sign-in in anonymous mode', async ({ page }) => {
+        // The CI stack is self-hosted with no Clerk key: the dashboard is
+        // open to the anonymous (seeded admin) user.
         await page.goto('/en/projects');
-
-        // In development, might be accessible without auth
-        // In production, would redirect to sign-in
-        await page.waitForLoadState('networkidle');
-
-        // Check if we're on projects page or sign-in page
-        const isProjectsPage = await page.getByRole('heading', { name: /Projects|プロジェクト/i }).isVisible().catch(() => false);
-        const isSignInPage = await page.locator('[class*="sign-in"], [class*="clerk"]').first().isVisible().catch(() => false);
-
-        // Either we're on projects (dev mode) or redirected to sign-in
-        expect(isProjectsPage || isSignInPage || await page.locator('body').isVisible()).toBeTruthy();
+        await expect(page).toHaveURL(/\/en\/projects$/);
+        await expect(page.getByRole('heading', { level: 1, name: en.Projects.title })).toBeVisible({ timeout: 15000 });
     });
 
     test('should display header with navigation', async ({ page }) => {
@@ -83,19 +75,11 @@ test.describe('Authentication Flow', () => {
     });
 
     test('should have language switcher', async ({ page }) => {
-        await page.goto('/en');
-        await page.waitForLoadState('networkidle');
-
-        // Look for language switcher
-        const enButton = page.getByRole('button', { name: /EN|English/i });
-        const jaButton = page.getByRole('button', { name: /JA|日本語/i });
-        const langSelect = page.locator('select[name*="lang"], select[name*="locale"]');
-
-        const hasEnButton = await enButton.isVisible().catch(() => false);
-        const hasJaButton = await jaButton.isVisible().catch(() => false);
-        const hasLangSelect = await langSelect.isVisible().catch(() => false);
-
-        expect(hasEnButton || hasJaButton || hasLangSelect).toBeTruthy();
+        // The dashboard header shows the current locale on its toggle.
+        await page.goto('/en/dashboard');
+        await expect(page.getByRole('banner').getByRole('button', { name: 'EN', exact: true })).toBeVisible({ timeout: 15000 });
+        await page.goto('/ja/dashboard');
+        await expect(page.getByRole('banner').getByRole('button', { name: 'JA', exact: true })).toBeVisible({ timeout: 15000 });
     });
 
     // M11-2 #77: re-enabled. The lang switcher (Header.toggleLocale)
@@ -133,11 +117,12 @@ test.describe('Authentication Flow', () => {
     });
 
     test('should access public SBOM link without auth', async ({ page }) => {
-        // Try accessing a public link page structure
+        // An unknown token is served by the public page itself (no sign-in
+        // redirect), which shows the access form with the denial message.
         await page.goto('/en/public/test-token-12345');
-        await page.waitForLoadState('networkidle');
-
-        // Page should load (may show 404 or invalid link, but shouldn't require auth)
-        await expect(page.locator('body')).toBeVisible();
+        await expect(page).toHaveURL(/\/en\/public\/test-token-12345$/);
+        await expect(page.getByText('Public SBOM Access')).toBeVisible({ timeout: 15000 });
+        await expect(page.getByText('Access denied. Password may be required.')).toBeVisible();
+        await expect(page.getByRole('button', { name: 'Access' })).toBeDisabled();
     });
 });

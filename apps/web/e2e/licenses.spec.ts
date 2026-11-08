@@ -73,16 +73,29 @@ test.describe('License Policy Management', () => {
         await expect(licensesTab).toBeVisible({ timeout: 5000 });
     });
 
-    test('should show license policies list', async ({ page }) => {
-        await page.goto(`/en/projects/${projectId}`);
-        await page.waitForLoadState('networkidle');
+    test('should show license policies list', async ({ page, request }) => {
+        // A policy of this spec's own, so the list has a known row.
+        const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/licenses`, {
+            data: { license_id: 'ISC', license_name: 'ISC License', policy_type: 'review', reason: 'E2E list check' },
+        });
+        expect(createResponse.ok(), `policy create returned ${createResponse.status()}`).toBe(true);
+        const policy = await createResponse.json();
+        try {
+            await page.goto(`/en/projects/${projectId}`);
+            await page.getByRole('button', { name: /Licenses?|License|ライセンス/i }).click();
 
-        // Click on Licenses tab — accept singular/plural EN forms.
-        await page.getByRole('button', { name: /Licenses?|License|ライセンス/i }).click();
-        await page.waitForTimeout(500);
-
-        // Should show policies section
-        await expect(page.locator('body')).toBeVisible();
+            await expect(page.getByText(en.ProjectDetail.licensePolicies, { exact: true })).toBeVisible({ timeout: 10000 });
+            await expect(page.getByRole('button', { name: 'Add Policy' })).toBeVisible();
+            const row = page
+                .locator('div.border.rounded-lg:not(.bg-card)')
+                .filter({ hasText: '(ISC)' })
+                .filter({ has: page.getByRole('button', { name: en.Common.delete, exact: true }) });
+            await expect(row).toHaveCount(1);
+            await expect(row).toContainText('ISC License');
+            await expect(row.getByText('review', { exact: true })).toBeVisible();
+        } finally {
+            await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}/licenses/${policy.id}`);
+        }
     });
 
     test('should create allowed license policy', async ({ page }) => {
