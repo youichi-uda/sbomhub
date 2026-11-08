@@ -128,6 +128,7 @@ export default function ProjectDiffPage() {
   // Detail mode: fetch the diff for the (from, to) pair.
   useEffect(() => {
     if (!detailMode) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- leaving detail mode (URL-driven) must clear the previously fetched diff.
       setDetail(null);
       return;
     }

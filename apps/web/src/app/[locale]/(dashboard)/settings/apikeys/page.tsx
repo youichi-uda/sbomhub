@@ -52,10 +52,6 @@ export default function APIKeysPage() {
   const [permissions, setPermissions] = useState("write");
   const [expiresInDays, setExpiresInDays] = useState<string>("");
 
-  useEffect(() => {
-    loadKeys();
-  }, []);
-
   const loadKeys = async () => {
     try {
       const data = await api.apiKeys.list();
@@ -66,6 +62,11 @@ export default function APIKeysPage() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
+    loadKeys();
+  }, []);
 
   const resetForm = () => {
     setName("");

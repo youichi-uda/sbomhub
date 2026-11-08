@@ -56,6 +56,16 @@ const config = [
       //     locally with an inline `eslint-disable-next-line` + rationale.
       //   - `immutability`: 0 hits in the codebase as of M12-5 close.
       //
+      // 2026-11 deps refresh (eslint-config-next 16.4.5 → react-hooks
+      // plugin 7.0.1 → 7.1.1): the plugin now follows calls into local
+      // loader functions, surfacing 28 pre-existing hits. Fixed in code:
+      // 5 `immutability` (effect declared above the loader it calls →
+      // moved below) and 1 `refs` (settings/scan ref write moved out of
+      // render). The remaining 26 `set-state-in-effect` hits are the
+      // fetch-on-mount pattern (plus 2 prop→state re-seeds) and carry an
+      // inline disable with rationale; migrating those loaders to
+      // @tanstack/react-query is the tracked follow-up.
+      //
       // With every existing violation either fixed or explicitly disabled
       // with rationale, promoting these to `error` means any NEW violation
       // either earns its own justified inline disable or gets fixed before

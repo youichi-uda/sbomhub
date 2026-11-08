@@ -28,10 +28,6 @@ export default function IPASettingsPage() {
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<{ new: number; updated: number } | null>(null);
 
-  useEffect(() => {
-    loadSettings();
-  }, []);
-
   const loadSettings = async () => {
     try {
       const data = await api.ipa.getSettings();
@@ -42,6 +38,11 @@ export default function IPASettingsPage() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
+    loadSettings();
+  }, []);
 
   const handleSave = async () => {
     if (!settings) return;

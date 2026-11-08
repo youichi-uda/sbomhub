@@ -19,10 +19,6 @@ export default function ProjectsPage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
 
-  useEffect(() => {
-    loadProjects();
-  }, []);
-
   async function loadProjects() {
     try {
       const data = await api.projects.list();
@@ -34,6 +30,11 @@ export default function ProjectsPage() {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
+    loadProjects();
+  }, []);
 
   async function handleCreate() {
     try {

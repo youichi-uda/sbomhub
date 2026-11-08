@@ -36,6 +36,7 @@ export default function ReportSettingsPage() {
     }, [t]);
 
     useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
         loadSettings();
     }, [loadSettings]);
 

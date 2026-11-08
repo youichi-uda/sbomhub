@@ -41,7 +41,12 @@ export default function ScanSettingsPage() {
     // and re-fire the load* effect into a loop.
     const api = useApi();
     const apiRef = useRef(api);
-    apiRef.current = api;
+    // Sync the ref in an effect rather than during render (react-hooks/refs,
+    // eslint-plugin-react-hooks 7.1). Declared before the load* effect below,
+    // so it runs first on every commit; the initial value is already `api`.
+    useEffect(() => {
+        apiRef.current = api;
+    }, [api]);
 
     const WEEKDAYS = locale === 'ja'
         ? ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日']

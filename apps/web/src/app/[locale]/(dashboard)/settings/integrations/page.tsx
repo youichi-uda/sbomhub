@@ -126,10 +126,6 @@ export default function IntegrationsPage() {
     });
   };
 
-  useEffect(() => {
-    loadConnections();
-  }, []);
-
   const loadConnections = async () => {
     try {
       const data = await api.integrations.list();
@@ -140,6 +136,11 @@ export default function IntegrationsPage() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
+    loadConnections();
+  }, []);
 
   const resetForm = () => {
     setTrackerType("jira");

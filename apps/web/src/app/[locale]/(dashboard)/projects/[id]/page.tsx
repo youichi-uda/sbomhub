@@ -224,6 +224,7 @@ export default function ProjectDetailPage() {
   }, [projectId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
     loadProject();
     loadComponents();
     loadVulnerabilities();
@@ -239,6 +240,7 @@ export default function ProjectDetailPage() {
   }, [loadProject, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadSbomId, loadNotificationSettings, loadApiKeys]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
     if (activeTab === "components") loadComponents();
     if (activeTab === "vulnerabilities") loadVulnerabilities();
     if (activeTab === "vex") loadVexStatements();
@@ -1304,6 +1306,7 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
 
   useEffect(() => {
     if (settings) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- re-seeds the editable form fields when the server-fetched settings prop arrives.
       setSlackWebhookUrl(settings.slack_webhook_url || "");
       setDiscordWebhookUrl(settings.discord_webhook_url || "");
       setEmailAddresses(settings.email_addresses || "");
