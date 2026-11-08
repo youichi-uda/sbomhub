@@ -2,6 +2,12 @@ import { test, expect } from '@playwright/test';
 import * as ts from 'typescript';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
+import {
+    analyzeVacuous,
+    describeVacuous,
+    VACUOUS_MUST_BE_CLEAN,
+    VACUOUS_MUST_REPORT,
+} from './meta/vacuous-guards';
 
 /**
  * Meta-gate: a conditional skip must never silently disarm a CI gate.
@@ -1598,5 +1604,56 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
         expect(bad.map(describeViolation).join('\n\n'), 'checked-scope skip(s) not CI-proof').toBe(
             '',
         );
+    });
+});
+
+// ---------------------------------------------------------------------
+// Vacuous guards — a test that cannot fail
+// ---------------------------------------------------------------------
+// The skip gate above stops a GROUP being silently skipped. This half stops
+// a single test silently asserting nothing: `if (await x.isVisible()) {
+// expect… }` passes when the selector stops matching (lucide-react 1.x did
+// exactly that to six tests, two of which were hiding real breakage). Rules,
+// limits and the `// vacuous-guard-ok: <reason>` escape hatch are in the
+// header of ./meta/vacuous-guards.ts. It lives here, not in its own spec, so
+// frontend-ci's hermetic step (which runs only this file) runs it too.
+test.describe('e2e vacuous guards (hermetic meta-gate)', () => {
+    test('analyzer verdicts', () => {
+        for (const [name, rule, source] of VACUOUS_MUST_REPORT) {
+            const hits = analyzeVacuous(`${name}.spec.ts`, source).filter((v) => !v.allowed);
+            expect(hits.map((v) => v.rule), `MUST BE REPORTED as ${rule}: ${name}`).toContain(rule);
+        }
+        for (const [name, source] of VACUOUS_MUST_BE_CLEAN) {
+            const hits = analyzeVacuous(`${name}.spec.ts`, source).filter((v) => !v.allowed);
+            expect(hits.map(describeVacuous), `MUST BE CLEAN: ${name}`).toEqual([]);
+        }
+        // The allowlist fixture is seen AND excused, not merely missed.
+        const allowed = VACUOUS_MUST_BE_CLEAN.find(([n]) => n === 'allowlisted with a reason');
+        expect(allowed, 'the allowlist fixture must exist').toBeDefined();
+        const allowedSites = analyzeVacuous('allowed.spec.ts', (allowed as readonly [string, string])[1]);
+        expect(allowedSites.map((v) => `${v.rule}:${v.allowed}`)).toEqual(['V1:true']);
+        expect(VACUOUS_MUST_REPORT.length).toBeGreaterThan(5);
+        expect(VACUOUS_MUST_BE_CLEAN.length).toBeGreaterThan(5);
+    });
+
+    test('no e2e test guards its assertions behind a probe', () => {
+        const e2eRoot = dirname(test.info().file);
+        const files = scannedFiles(e2eRoot).filter(
+            // The analyzer module's fixtures are strings, but its own name
+            // is excluded so its documentation can quote the shapes freely.
+            (f) => !f.endsWith(join('meta', 'vacuous-guards.ts')),
+        );
+        expect(files).toContain(test.info().file);
+        const sites = files.flatMap((f) => analyzeVacuous(relative(e2eRoot, f), readFileSync(f, 'utf8')));
+        const bad = sites.filter((v) => !v.allowed);
+        expect(
+            bad.map(describeVacuous).join('\n'),
+            'assertion(s) that pass silently when the UI they probe is missing. Assert ' +
+                'unconditionally, create the data via the API, or add `// vacuous-guard-ok: <reason>`',
+        ).toBe('');
+        // Keep the allowlist visible in the run log.
+        for (const v of sites.filter((s) => s.allowed)) {
+            console.log(`allowlisted: ${describeVacuous(v)} — ${v.reason}`);
+        }
     });
 });
