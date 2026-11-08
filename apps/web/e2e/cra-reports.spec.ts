@@ -1,204 +1,257 @@
 /**
  * AI CRA reports page (issue #32, M2 Wave M2-5).
  *
- * These tests exercise the /projects/:id/cra-reports page end-to-end.
- * They mirror e2e/triage.spec.ts (M1-6) one-to-one because the page
- * shape is intentionally the same — empty-state, AI-disabled banner,
- * approve flow — only the wire shape (snake_case CRAReport vs
- * PascalCase VEXDraft) and the source dependency (an approved VEX
- * draft must exist first) differ.
+ * These tests exercise the /projects/:id/cra-reports page end-to-end
+ * against reports they create through the real API (see triage.spec.ts
+ * for the same reasoning):
  *
- * The approve flow remains a *skeleton* because the M2-4 runner needs
- * (a) BYOK credentials AND (b) a pre-existing approved vex_draft for
- * the same (project, cve_id). CI has neither, so the assertions are
- * conditional on listReports returning a row, which we cannot
- * guarantee from a black-box test.
- *
- * TODO(e2e): verified 2026-07-02 (M23-2 F343): the public API still has
- * no "seed a cra_report" endpoint (cmd/server/main.go registers only
- * run / list / get / decision / reanalyse under /cra-reports) and the
- * LLM factory has no stubbed test provider (factory.go switch arms:
- * openai / anthropic / gemini / azure_openai / ollama only), so the
- * skips below remain environment-conditional. When either lands,
- * replace them with assertions that
- *   1. POST a report (or run the M2-4 runner with a stubbed provider),
- *   2. click [data-testid="cra-approve"],
- *   3. poll GET /api/v1/projects/:id/cra-reports until the approved
- *      report's decision flips to "approved".
+ *   - The CI stack has no LLM configured. With BYOK unset the CRA runner
+ *     forks in-band (cra/runner.go runAIDisabled): POST
+ *     /projects/:id/cra-reports/run answers 201 and persists a pending
+ *     `draft` report built from the template, carrying `ai_disabled`
+ *     evidence. So real cra_reports rows exist without an LLM.
+ *   - The runner's precondition is an APPROVED vex_draft for the same
+ *     (project, cve). The spec gets one the same way: POST /triage/run
+ *     (BYOK-unset -> ai_disabled draft) then PUT .../decision approved.
+ *   - The AIDisabledBanner only mounts on a 503 "AI ... disabled" error
+ *     (APIError.isAIDisabled), which no endpoint produces any more, so its
+ *     render contract is pinned by intercepting the list call.
+ * Everything runs on projects this spec creates; the seed project is
+ * never touched.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect, type APIRequestContext } from "@playwright/test";
+import en from "../messages/en.json";
+import {
+    API_BASE_URL,
+    createProject,
+    createVulnerableProject,
+    deleteProject,
+    uniqueName,
+    type VulnerableProject,
+} from "./fixtures/vuln-project";
 
-const API_BASE_URL =
-    process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || "http://localhost:8080";
+type ReportType = "early_warning" | "detailed_notification" | "final_report";
+
+interface CRAReport {
+    id: string;
+    cve_id: string;
+    report_type: ReportType;
+    lang: string;
+    state: string;
+    decision: string;
+    source_vex_draft_id: string | null;
+    evidence: Array<{ kind: string; ref?: string }>;
+}
+
+/** Gives (project, cve) an approved VEX draft — the CRA runner's precondition. */
+async function approveVexDraft(request: APIRequestContext, project: VulnerableProject, cveId: string): Promise<string> {
+    const run = await request.post(`${API_BASE_URL}/api/v1/projects/${project.projectId}/triage/run`, {
+        data: { cve_id: cveId, vulnerability_id: project.vuln(cveId).id },
+    });
+    expect(run.status(), `triage/run ${cveId}: ${await run.text()}`).toBe(201);
+    const draftId = (await run.json()).draft.ID as string;
+    const decide = await request.put(
+        `${API_BASE_URL}/api/v1/projects/${project.projectId}/vex-drafts/${draftId}/decision`,
+        { data: { decision: "approved" } },
+    );
+    expect(decide.status(), `approve vex draft: ${await decide.text()}`).toBe(200);
+    return draftId;
+}
+
+async function runCRA(
+    request: APIRequestContext,
+    project: VulnerableProject,
+    cveId: string,
+    reportType: ReportType,
+    lang: "en" | "ja" = "en",
+): Promise<CRAReport> {
+    const res = await request.post(`${API_BASE_URL}/api/v1/projects/${project.projectId}/cra-reports/run`, {
+        data: { cve_id: cveId, vulnerability_id: project.vuln(cveId).id, report_type: reportType, lang },
+    });
+    expect(res.status(), `cra-reports/run ${cveId} ${reportType}/${lang}: ${await res.text()}`).toBe(201);
+    const body = await res.json();
+    expect(body.ai_disabled).toBe(true);
+    return body.report as CRAReport;
+}
+
+function cardFor(page: import("@playwright/test").Page, report: Pick<CRAReport, "cve_id" | "report_type" | "lang">) {
+    return page.locator(
+        `[data-testid="cra-report-card"][data-cve-id="${report.cve_id}"]` +
+            `[data-report-type="${report.report_type}"][data-lang="${report.lang}"]`,
+    );
+}
 
 test.describe("AI CRA Reports (M2-5)", () => {
-    let projectId: string;
+    test.describe("empty project", () => {
+        let projectId: string | null = null;
 
-    test.beforeAll(async ({ request }) => {
-        const projectResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-            data: {
-                name: `CRA Reports Test Project ${Date.now()}`,
-                description: "Project for AI CRA reports E2E tests",
-            },
+        test.beforeAll(async ({ request }) => {
+            projectId = (await createProject(request, uniqueName("CRA Reports Empty Project"))).id;
         });
-        const project = await projectResponse.json();
-        projectId = project.id;
-    });
 
-    test.afterAll(async ({ request }) => {
-        if (projectId) {
-            await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
-        }
-    });
+        test.afterAll(async ({ request }) => {
+            await deleteProject(request, projectId);
+        });
 
-    test("should render the CRA reports page shell", async ({ page }) => {
-        await page.goto(`/en/projects/${projectId}/cra-reports`);
-        await page.waitForLoadState("networkidle");
-
-        await expect(page.getByTestId("cra-reports-page")).toBeVisible({ timeout: 10000 });
-        await expect(page.getByTestId("cra-reports-refresh")).toBeVisible();
-        // Filter card and all four filter selects mount on first render.
-        await expect(page.getByTestId("cra-reports-filters")).toBeVisible();
-        await expect(page.getByTestId("filter-report-type")).toBeVisible();
-        await expect(page.getByTestId("filter-lang")).toBeVisible();
-        await expect(page.getByTestId("filter-state")).toBeVisible();
-        await expect(page.getByTestId("filter-decision")).toBeVisible();
-    });
-
-    test("should show empty state when no CRA reports exist", async ({ page, request }) => {
-        const res = await request.get(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/cra-reports`,
-        );
-        const body = await res.json().catch(() => ({ reports: [] }));
-        const reports = Array.isArray(body?.reports) ? body.reports : [];
-
-        if (reports.length === 0) {
+        test("should render the CRA reports page shell", async ({ page }) => {
             await page.goto(`/en/projects/${projectId}/cra-reports`);
-            await page.waitForLoadState("networkidle");
-            // English locale empty title (see apps/web/messages/en.json).
-            await expect(page.getByText(/No CRA reports/i)).toBeVisible({ timeout: 10000 });
-        } else {
-            test.skip();
-        }
+
+            await expect(page.getByTestId("cra-reports-page")).toBeVisible({ timeout: 10000 });
+            await expect(page.getByRole("heading", { name: en.CRAReports.Page.title })).toBeVisible();
+            await expect(page.getByTestId("cra-reports-refresh")).toBeVisible();
+            // Filter card and all four filter selects mount on first render.
+            await expect(page.getByTestId("cra-reports-filters")).toBeVisible();
+            await expect(page.getByTestId("filter-report-type")).toBeVisible();
+            await expect(page.getByTestId("filter-lang")).toBeVisible();
+            await expect(page.getByTestId("filter-state")).toBeVisible();
+            await expect(page.getByTestId("filter-decision")).toBeVisible();
+        });
+
+        test("should show empty state when no CRA reports exist", async ({ page, request }) => {
+            const res = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/cra-reports`);
+            expect(res.status()).toBe(200);
+            expect((await res.json()).reports ?? []).toEqual([]);
+
+            await page.goto(`/en/projects/${projectId}/cra-reports`);
+            await expect(page.getByText(en.CRAReports.Page.emptyTitle, { exact: true })).toBeVisible({ timeout: 10000 });
+            await expect(page.getByTestId("cra-report-card")).toHaveCount(0);
+        });
+
+        test("should surface the AI-disabled banner when the backend reports BYOK unset", async ({ page }) => {
+            const reason = "SBOMHUB_LLM_PROVIDER is not set";
+            await page.route(/\/api\/v1\/projects\/[^/]+\/cra-reports(\?|$)/, (route) =>
+                route.fulfill({
+                    status: 503,
+                    contentType: "application/json",
+                    body: JSON.stringify({ error: "AI features are disabled", reason }),
+                }),
+            );
+
+            await page.goto(`/en/projects/${projectId}/cra-reports`);
+            await expect(page.getByTestId("cra-reports-page")).toBeVisible({ timeout: 10000 });
+
+            const banner = page.getByRole("alert").filter({ hasText: en.Triage.AIDisabledBanner.title });
+            await expect(banner).toBeVisible();
+            await expect(banner).toContainText(`${en.Triage.AIDisabledBanner.reasonLabel}: ${reason}`);
+            await expect(banner.getByRole("link", { name: en.Triage.AIDisabledBanner.ctaLabel })).toHaveAttribute(
+                "href",
+                "/en/settings/llm",
+            );
+            await expect(page.getByTestId("cra-reports-flash-errors")).toHaveCount(0);
+        });
     });
 
-    test("should surface AI-disabled banner when BYOK is unset", async ({ page, request }) => {
-        // Pre-F354 premise ("in CI BYOK is unset, so the backend returns
-        // 503 + llm.DisabledError on the run endpoint") is stale: with
-        // BYOK unset the LLM factory returns *llm.DisabledProvider as a
-        // VALUE, not an error (service/llm/factory.go), and the CRA
-        // runner forks in-band (cra/runner.go runAIDisabled), persisting
-        // an ai_disabled report and returning HTTP 201 — this path never
-        // produces the *llm.DisabledError that mapCRARunnerError's 503
-        // arm needs. Moreover the all-zero vulnerability_id below fails
-        // Stage 1 first (resolveAuthoritativeCVEID cannot resolve a
-        // nonexistent vulnerability -> generic 4xx/5xx via
-        // mapCRARunnerError's default branch), before the provider fork
-        // is even reached. The list endpoint still does not hit the LLM,
-        // so the page renders without the banner either way — matching
-        // the M1-6 triage page test.
-        //
-        // TODO(e2e): verified 2026-07-02 (M23-2 F354): the 503 gate below
-        // is therefore dead — the skip always fires, and the coverage the
-        // pre-F354 comment described does not exist. Gate logic is
-        // deliberately left untouched (this spec runs live in CI via
-        // .github/workflows/web-e2e.yml web-e2e-full; comment-only fix).
-        // Real coverage needs seeded valid prerequisites (vulnerability +
-        // approved VEX draft), then asserting the in-band contract:
-        // POST /cra-reports/run -> 201 ai_disabled report.
-        const runRes = await request.post(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/cra-reports/run`,
-            {
-                data: {
-                    cve_id: "CVE-0000-0001",
-                    vulnerability_id: "00000000-0000-0000-0000-000000000000",
-                    report_type: "early_warning",
-                    lang: "en",
-                },
-            },
-        );
-        if (runRes.status() !== 503) {
-            test.skip();
-            return;
-        }
+    test.describe("with reports from the BYOK-unset runner", () => {
+        let project: VulnerableProject;
+        let sourceDraftId: string;
+        let earlyWarning: CRAReport;
+        let finalReport: CRAReport;
 
-        await page.goto(`/en/projects/${projectId}/cra-reports`);
-        await page.waitForLoadState("networkidle");
+        test.beforeAll(async ({ request }) => {
+            project = await createVulnerableProject(request, "CRA Reports Test Project");
+            sourceDraftId = await approveVexDraft(request, project, "CVE-2021-44228");
+            earlyWarning = await runCRA(request, project, "CVE-2021-44228", "early_warning");
+            finalReport = await runCRA(request, project, "CVE-2021-44228", "final_report");
+        });
 
-        // listReports returns 200 with an empty array in this
-        // environment so the banner is not yet mounted from a list
-        // failure. Same skeleton contract as the triage e2e.
-        // TODO(e2e): banner-mount coverage independent of LLM provider
-        // state needs a component-level unit test. Verified 2026-07-02
-        // (M23-2 F343): apps/web still has no unit-test runner —
-        // package.json carries @playwright/test only (no vitest / jest
-        // / @testing-library/react) — so adding @testing-library/react
-        // (or an equivalent runner) is a prerequisite.
-        await expect(page.getByTestId("cra-reports-page")).toBeVisible();
-    });
+        test.afterAll(async ({ request }) => {
+            await deleteProject(request, project?.projectId);
+        });
 
-    test("should filter by report_type", async ({ page }) => {
-        await page.goto(`/en/projects/${projectId}/cra-reports`);
-        await page.waitForLoadState("networkidle");
+        test("should refuse to draft without an approved VEX draft", async ({ request }) => {
+            // CVE-2021-23337 has no approved VEX draft in this project.
+            const cveId = "CVE-2021-23337";
+            const res = await request.post(`${API_BASE_URL}/api/v1/projects/${project.projectId}/cra-reports/run`, {
+                data: { cve_id: cveId, vulnerability_id: project.vuln(cveId).id, report_type: "early_warning", lang: "en" },
+            });
+            expect(res.status()).toBe(409);
+            expect((await res.json()).error).toMatch(/no approved vex_draft/);
+        });
 
-        // Changing a filter triggers a fresh list call via useEffect/
-        // useCallback. We only assert the select accepts the change
-        // and the page does not crash; assertion of filtered rows
-        // requires a seeded report (see the top-of-file TODO(e2e)).
-        const select = page.getByTestId("filter-report-type");
-        await select.selectOption("early_warning");
-        await expect(select).toHaveValue("early_warning");
+        test("should render an ai_disabled draft report with its source VEX draft", async ({ page }) => {
+            // In-band BYOK-unset contract on the persisted row.
+            expect(earlyWarning.state).toBe("draft");
+            expect(earlyWarning.decision).toBe("pending");
+            expect(earlyWarning.source_vex_draft_id).toBe(sourceDraftId);
+            expect(earlyWarning.evidence.map((e) => e.kind)).toContain("ai_disabled");
 
-        // Page shell remains mounted after the filter change.
-        await expect(page.getByTestId("cra-reports-page")).toBeVisible();
-    });
+            await page.goto(`/en/projects/${project.projectId}/cra-reports`);
+            const card = cardFor(page, earlyWarning);
+            await expect(card).toBeVisible({ timeout: 10000 });
+            await expect(card).toHaveAttribute("data-state", "draft");
+            await expect(card).toHaveAttribute("data-decision", "pending");
+            await expect(card).toContainText(en.CRAReports.ReportType.early_warning);
+            await expect(card.getByTestId("cra-report-draft")).toContainText("CRA Article 14 Early Warning");
+            await expect(card.getByTestId("cra-evidence-list")).toContainText("AI CRA drafting skipped");
+            await expect(card.getByTestId("cra-source-vex-link")).toHaveAttribute(
+                "href",
+                `/en/projects/${project.projectId}/triage`,
+            );
+            await expect(card.getByTestId("cra-approve")).toBeEnabled();
+            await expect(page.getByRole("alert").filter({ hasText: en.Triage.AIDisabledBanner.title })).toHaveCount(0);
+        });
 
-    test("should approve a report and remove it from the pending queue", async ({ page, request }) => {
-        // Acceptance criterion: approve → 該当 row が消えること.
-        // Requires a seeded cra_reports row, which the public API
-        // cannot create directly (only the M2-4 runner backed by an
-        // LLM provider can). When a test harness or admin seed
-        // endpoint lands, replace this skip with a real assertion
-        // that:
-        //   1. POSTs a cra_report (or runs cra/run with stubbed provider),
-        //   2. clicks [data-testid="cra-approve"],
-        //   3. polls GET /api/v1/projects/:id/cra-reports until the
-        //      target row's decision flips to "approved" (or the row
-        //      drops out of decision=pending list).
-        const res = await request.get(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/cra-reports?decision=pending`,
-        );
-        const body = await res.json().catch(() => ({ reports: [] }));
-        const reports = Array.isArray(body?.reports) ? body.reports : [];
+        test("should filter by report_type", async ({ page }) => {
+            await page.goto(`/en/projects/${project.projectId}/cra-reports`);
+            const ew = cardFor(page, earlyWarning);
+            const fin = cardFor(page, finalReport);
+            await expect(ew).toBeVisible({ timeout: 10000 });
+            await expect(fin).toBeVisible();
 
-        if (reports.length === 0) {
-            test.skip();
-            return;
-        }
+            const select = page.getByTestId("filter-report-type");
+            await select.selectOption("early_warning");
+            await expect(select).toHaveValue("early_warning");
+            await expect(fin).toHaveCount(0);
+            await expect(ew).toBeVisible();
+            await expect(page.locator('[data-testid="cra-report-card"]:not([data-report-type="early_warning"])')).toHaveCount(0);
 
-        const report = reports[0];
+            await select.selectOption("final_report");
+            await expect(ew).toHaveCount(0);
+            await expect(fin).toBeVisible();
 
-        await page.goto(`/en/projects/${projectId}/cra-reports`);
-        await page.waitForLoadState("networkidle");
+            await select.selectOption("");
+            await expect(ew).toBeVisible();
+            await expect(fin).toBeVisible();
+        });
 
-        const card = page
-            .getByTestId("cra-report-card")
-            .filter({ has: page.locator(`[data-cve-id="${report.cve_id}"]`) })
-            .first();
-        await expect(card).toBeVisible({ timeout: 10000 });
+        test("should draft a 72h detailed notification", async ({ request }) => {
+            test.fixme(true, "BUG: cra_reports.report_type is VARCHAR(20) but 'detailed_notification' is 21 chars, so every detailed_notification run fails with 500 (pq 22001)");
+            const report = await runCRA(request, project, "CVE-2021-44228", "detailed_notification");
+            expect(report.report_type).toBe("detailed_notification");
+            expect(report.state).toBe("draft");
+        });
 
-        await card.getByTestId("cra-approve").click();
-        await page.waitForTimeout(1500);
+        test("should approve a report and remove it from the pending queue", async ({ page, request }) => {
+            // Acceptance criterion: approve → 該当 row が消えること.
+            // Its own CVE, so the other tests' cards are unaffected.
+            await approveVexDraft(request, project, "CVE-2021-45046");
+            const report = await runCRA(request, project, "CVE-2021-45046", "early_warning");
 
-        // Optimistic update: card should disappear from the pending list.
-        await expect(card).toHaveCount(0);
+            await page.goto(`/en/projects/${project.projectId}/cra-reports`);
+            // Show only the pending queue (the default "Any" view would bring
+            // the approved row straight back on the refetch).
+            await page.getByTestId("filter-decision").selectOption("pending");
+            const card = cardFor(page, report);
+            await expect(card).toBeVisible({ timeout: 10000 });
 
-        // Persisted decision should be "approved" on the next GET.
-        const finalRes = await request.get(
-            `${API_BASE_URL}/api/v1/projects/${projectId}/cra-reports/${report.id}`,
-        );
-        const finalBody = await finalRes.json().catch(() => null);
-        expect(finalBody?.decision).toBe("approved");
+            await card.getByTestId("cra-approve").click();
+            await expect(card).toHaveCount(0);
+
+            await expect
+                .poll(async () => {
+                    const res = await request.get(
+                        `${API_BASE_URL}/api/v1/projects/${project.projectId}/cra-reports/${report.id}`,
+                    );
+                    return res.ok() ? (await res.json()).decision : `HTTP ${res.status()}`;
+                })
+                .toBe("approved");
+
+            // The approved row lives on under the "approved" filter.
+            await page.getByTestId("filter-decision").selectOption("approved");
+            await expect(card).toBeVisible();
+            await expect(card).toHaveAttribute("data-decision", "approved");
+            await expect(card.getByTestId("cra-approve")).toBeDisabled();
+        });
     });
 });

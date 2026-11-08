@@ -1,324 +1,338 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import en from '../messages/en.json';
+import {
+    API_BASE_URL,
+    FIXTURE_CVES,
+    createProject,
+    createVulnerableProject,
+    deleteProject,
+    uniqueName,
+    type VulnerableProject,
+} from './fixtures/vuln-project';
 
-const API_BASE_URL =
-    process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
+// Every test that needs vulnerabilities / statements creates its own
+// project (createVulnerableProject: 4 fixture CVEs), so counts are exact
+// and independent of test order and retries.
+
+interface VexRow {
+    id: string;
+    vulnerability_cve_id: string;
+    status: string;
+    justification?: string;
+    impact_statement?: string;
+    action_statement?: string;
+}
+
+async function createVex(
+    request: APIRequestContext,
+    project: VulnerableProject,
+    cveId: string,
+    data: Record<string, string>,
+): Promise<string> {
+    const res = await request.post(`${API_BASE_URL}/api/v1/projects/${project.projectId}/vex`, {
+        data: { vulnerability_id: project.vuln(cveId).id, ...data },
+    });
+    expect(res.status(), `VEX create for ${cveId}: ${await res.text()}`).toBe(201);
+    return (await res.json()).id as string;
+}
+
+async function listVex(request: APIRequestContext, projectId: string): Promise<VexRow[]> {
+    const res = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`);
+    expect(res.status()).toBe(200);
+    return ((await res.json()) ?? []) as VexRow[];
+}
+
+const vexTab = (page: Page, count: number) =>
+    page.getByRole('button', { name: `VEX (${count})`, exact: true });
+
+/** The "VEX Statements" card on the VEX tab. */
+const vexPanel = (page: Page) =>
+    page.locator('div.bg-card').filter({ has: page.getByRole('heading', { name: en.ProjectDetail.vexStatements }) });
+
+/** One statement row in the VEX panel, keyed by CVE id. */
+const vexRow = (page: Page, cveId: string) =>
+    vexPanel(page).locator('div.border.rounded-lg').filter({ hasText: cveId });
+
+/** Opens the VEXForm for `cveId` from its entry on the Vulnerabilities tab. */
+async function openVexForm(page: Page, cveId: string) {
+    await page
+        .getByRole('button', { name: `${en.Vulnerabilities.title} (${FIXTURE_CVES.length})` })
+        .click();
+    await page
+        .locator(`[data-vuln-cve-id="${cveId}"]`)
+        .getByRole('button', { name: en.ProjectDetail.addVex, exact: true })
+        .click();
+    const form = page.locator('form').filter({
+        has: page.getByRole('heading', { name: en.VexForm.createFor.replace('{cveId}', cveId) }),
+    });
+    await expect(form).toBeVisible();
+    return form;
+}
 
 test.describe('VEX Statement Management', () => {
+    // Plain project (no SBOM) shared by the read-only / route-mocked tests.
     let projectId: string;
-    let vulnerabilityId: string;
 
     test.beforeAll(async ({ request }) => {
-        // Create a test project
-        const projectResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-            data: {
-                name: `VEX Test Project ${Date.now()}`,
-                description: 'Project for VEX E2E tests',
-            },
-        });
-        const project = await projectResponse.json();
-        projectId = project.id;
-
-        // Upload SBOM with component that might have vulnerabilities
-        const sbom = {
-            bomFormat: 'CycloneDX',
-            specVersion: '1.4',
-            version: 1,
-            components: [
-                {
-                    type: 'library',
-                    name: 'log4j-core',
-                    version: '2.14.0',
-                    purl: 'pkg:maven/org.apache.logging.log4j/log4j-core@2.14.0',
-                    licenses: [{ license: { id: 'Apache-2.0' } }],
-                },
-            ],
-        };
-
-        await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/sbom`, {
-            data: JSON.stringify(sbom),
-            headers: { 'Content-Type': 'application/json' },
-        });
-
-        // Get vulnerabilities for this project
-        const vulnResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`);
-        const vulns = await vulnResponse.json();
-        if (vulns && vulns.length > 0) {
-            vulnerabilityId = vulns[0].id;
-        }
+        projectId = (await createProject(request, uniqueName('VEX Test Project'))).id;
     });
 
     test.afterAll(async ({ request }) => {
-        if (projectId) {
-            await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
-        }
+        await deleteProject(request, projectId);
     });
 
     test('should display VEX tab in project detail', async ({ page }) => {
         await page.goto(`/en/projects/${projectId}`);
-
-        // Wait for page to load
-        await page.waitForLoadState('networkidle');
-
-        // Look for VEX tab - use more specific locator to match tab button with count
-        const vexTab = page.getByRole('button', { name: /^VEX \(\d+\)$/i });
-        await expect(vexTab).toBeVisible({ timeout: 5000 });
+        await expect(vexTab(page, 0)).toBeVisible({ timeout: 10000 });
     });
 
-    test('should show VEX statements list with count', async ({ page, request }) => {
-        // Get VEX statements count from API
-        const vexResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`);
-        const vexStatements = await vexResponse.json();
-        const expectedCount = Array.isArray(vexStatements) ? vexStatements.length : 0;
+    test('should show the empty state for a project without statements', async ({ page, request }) => {
+        expect(await listVex(request, projectId)).toEqual([]);
 
         await page.goto(`/en/projects/${projectId}`);
-        await page.waitForLoadState('networkidle');
-
-        // Click on VEX tab
-        const vexTab = page.getByRole('button', { name: /^VEX \(\d+\)$/i });
-        await vexTab.click();
-        await page.waitForTimeout(1000);
-
-        // Verify the tab shows correct count
-        const tabText = await vexTab.textContent();
-        if (tabText) {
-            const match = tabText.match(/\((\d+)\)/);
-            if (match) {
-                const displayedCount = parseInt(match[1], 10);
-                expect(displayedCount).toBe(expectedCount);
-            }
-        }
-
-        // If there are VEX statements, verify they are displayed
-        if (expectedCount > 0) {
-            // VEX statements should show status
-            const statusIndicator = page.getByText(/not_affected|affected|under_investigation|fixed/i);
-            await expect(statusIndicator.first()).toBeVisible();
-        } else {
-            // Empty state should be shown
-            const emptyMessage = page.getByText(/no VEX|VEXなし|empty/i);
-            const hasEmptyMessage = await emptyMessage.isVisible().catch(() => false);
-            // Empty state or just no items - both are valid
-            expect(hasEmptyMessage || true).toBeTruthy();
-        }
+        await vexTab(page, 0).click();
+        await expect(vexPanel(page)).toBeVisible();
+        await expect(vexPanel(page).getByText(en.ProjectDetail.noVexStatements)).toBeVisible();
     });
 
-    test('should create VEX statement via dialog', async ({ page, request }) => {
-        // First ensure we have vulnerabilities
-        const vulnResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`);
-        const vulns = await vulnResponse.json();
+    test.describe('with fixture vulnerabilities', () => {
+        // Fresh project per test: these tests create / delete statements.
+        let project: VulnerableProject;
 
-        if (!vulns || vulns.length === 0) {
-            test.skip();
-            return;
-        }
+        test.beforeEach(async ({ request }) => {
+            project = await createVulnerableProject(request, 'VEX Statements Project');
+        });
 
-        await page.goto(`/en/projects/${projectId}`);
-        await page.waitForLoadState('networkidle');
+        test.afterEach(async ({ request }) => {
+            await deleteProject(request, project?.projectId);
+        });
 
-        // Click on VEX tab - use specific locator for tab button with count
-        await page.getByRole('button', { name: /^VEX \(\d+\)$/i }).click();
-        await page.waitForTimeout(500);
+        test('should show VEX statements list with count', async ({ page, request }) => {
+            await createVex(request, project, 'CVE-2021-23337', {
+                status: 'not_affected',
+                justification: 'vulnerable_code_not_in_execute_path',
+                impact_statement: 'Only the template helper is bundled.',
+            });
 
-        // Click add VEX button or look for vulnerability with "Add VEX" action
-        const addButton = page.getByRole('button', { name: /Add VEX|VEX追加/i });
-        if (await addButton.isVisible()) {
-            await addButton.click();
+            await page.goto(`/en/projects/${project.projectId}`);
+            await vexTab(page, 1).click();
 
-            // Fill in VEX form
-            const statusSelect = page.locator('select:not([data-testid="evidence-pack-format"])').first();
-            if (await statusSelect.isVisible()) {
-                await statusSelect.selectOption('not_affected');
-            }
+            const row = vexRow(page, 'CVE-2021-23337');
+            await expect(row).toHaveCount(1);
+            await expect(row).toContainText('not affected');
+            await expect(row).toContainText('HIGH');
+            await expect(row).toContainText(`${en.ProjectDetail.justification}: vulnerable code not in execute path`);
+            await expect(row).toContainText(`${en.ProjectDetail.impact}: Only the template helper is bundled.`);
+            await expect(vexPanel(page).locator('div.border.rounded-lg')).toHaveCount(1);
+        });
 
-            // Select justification if available
-            const justificationSelect = page.locator('select:not([data-testid="evidence-pack-format"])').nth(1);
-            if (await justificationSelect.isVisible()) {
-                await justificationSelect.selectOption('component_not_present');
-            }
+        test('should create VEX statement via dialog', async ({ page, request }) => {
+            const cveId = 'CVE-2021-44228';
+            await page.goto(`/en/projects/${project.projectId}`);
+            await expect(vexTab(page, 0)).toBeVisible({ timeout: 10000 });
 
-            // Add impact statement
-            const impactInput = page.getByPlaceholder(/impact|影響/i);
-            if (await impactInput.isVisible()) {
-                await impactInput.fill('This component is not used in production.');
-            }
+            const form = await openVexForm(page, cveId);
+            const selects = form.getByRole('combobox');
+            // Justification is only asked for not_affected.
+            await expect(selects).toHaveCount(1);
+            await selects.first().selectOption('not_affected');
+            await expect(selects).toHaveCount(2);
+            await selects.nth(1).selectOption('component_not_present');
+            await form.getByPlaceholder(en.VexForm.impactPlaceholder).fill('This component is not used in production.');
+            await form.getByRole('button', { name: en.VexForm.createVexStatement }).click();
 
-            // Submit
-            await page.getByRole('button', { name: /Save|Submit|保存/i }).click();
+            await expect(form).toHaveCount(0);
+            await expect(vexTab(page, 1)).toBeVisible();
+            const row = vexRow(page, cveId);
+            await expect(row).toContainText('not affected');
+            await expect(row).toContainText(`${en.ProjectDetail.justification}: component not present`);
+            await expect(row).toContainText('This component is not used in production.');
 
-            await page.waitForTimeout(1000);
-        }
-    });
+            const rows = await listVex(request, project.projectId);
+            expect(rows).toHaveLength(1);
+            expect(rows[0]).toMatchObject({
+                vulnerability_cve_id: cveId,
+                status: 'not_affected',
+                justification: 'component_not_present',
+                impact_statement: 'This component is not used in production.',
+            });
+        });
 
-    test('should export VEX document', async ({ page }) => {
-        await page.goto(`/en/projects/${projectId}`);
-        await page.waitForLoadState('networkidle');
+        test('should export VEX document', async ({ page, request }) => {
+            await createVex(request, project, 'CVE-2021-44228', {
+                status: 'affected',
+                impact_statement: 'Exploitable via the logging endpoint.',
+            });
 
-        // Click on VEX tab - use specific locator for tab button with count
-        await page.getByRole('button', { name: /^VEX \(\d+\)$/i }).click();
-        await page.waitForTimeout(500);
+            await page.goto(`/en/projects/${project.projectId}`);
+            await vexTab(page, 1).click();
 
-        // Look for export button
-        const exportButton = page.getByRole('button', { name: /Export|エクスポート/i });
-        const exportLink = page.getByRole('link', { name: /Export|エクスポート/i });
+            const exportLink = vexPanel(page).getByRole('link', { name: en.ProjectDetail.exportVex });
+            await expect(exportLink).toBeVisible();
+            await expect(exportLink).toHaveAttribute('download', 'vex.json');
+            const href = await exportLink.getAttribute('href');
+            // Absolute URL on the build-time NEXT_PUBLIC_API_URL host.
+            const exportPath = new URL(href!).pathname;
+            expect(exportPath).toBe(`/api/v1/projects/${project.projectId}/vex/export`);
 
-        if (await exportButton.isVisible()) {
-            // Just verify the button exists - clicking may trigger download
-            await expect(exportButton).toBeEnabled();
-        } else if (await exportLink.isVisible()) {
-            await expect(exportLink).toHaveAttribute('href', /vex\/export/);
-        }
-    });
+            // The link serves a CycloneDX VEX carrying the statement.
+            const res = await request.get(`${API_BASE_URL}${exportPath}`);
+            expect(res.status()).toBe(200);
+            const doc = await res.json();
+            expect(doc.bomFormat).toBe('CycloneDX');
+            expect(doc.vulnerabilities).toEqual([
+                expect.objectContaining({
+                    id: 'CVE-2021-44228',
+                    analysis: expect.objectContaining({
+                        state: 'exploitable',
+                        detail: 'Exploitable via the logging endpoint.',
+                    }),
+                }),
+            ]);
+        });
 
-    test('should delete VEX statement and update count', async ({ page, request }) => {
-        // First create a VEX statement via API to ensure we have one
-        const vulnResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`);
-        const vulns = await vulnResponse.json();
+        test('should delete VEX statement and update count', async ({ page, request }) => {
+            await createVex(request, project, 'CVE-2021-44228', { status: 'under_investigation' });
+            await createVex(request, project, 'CVE-2020-8203', { status: 'fixed' });
 
-        if (!vulns || vulns.length === 0) {
-            test.skip();
-            return;
-        }
+            await page.goto(`/en/projects/${project.projectId}`);
+            await vexTab(page, 2).click();
 
-        // Create VEX via API
-        const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`, {
-            data: {
-                vulnerability_id: vulns[0].id,
+            const row = vexRow(page, 'CVE-2021-44228');
+            await expect(row).toBeVisible();
+
+            // Cancelling the native confirm keeps the statement.
+            page.once('dialog', (dialog) => dialog.dismiss());
+            await row.getByRole('button', { name: en.Common.delete, exact: true }).click();
+            await expect(vexTab(page, 2)).toBeVisible();
+            expect(await listVex(request, project.projectId)).toHaveLength(2);
+
+            // Accepting it deletes exactly that statement.
+            let confirmMessage: string | null = null;
+            page.once('dialog', async (dialog) => {
+                confirmMessage = `${dialog.type()}: ${dialog.message()}`;
+                await dialog.accept();
+            });
+            await row.getByRole('button', { name: en.Common.delete, exact: true }).click();
+            await expect.poll(() => confirmMessage).toBe(`confirm: ${en.ProjectDetail.deleteVexConfirm}`);
+
+            await expect(vexTab(page, 1)).toBeVisible();
+            await expect(row).toHaveCount(0);
+            await expect(vexRow(page, 'CVE-2020-8203')).toBeVisible();
+            const remaining = await listVex(request, project.projectId);
+            expect(remaining.map((r) => r.vulnerability_cve_id)).toEqual(['CVE-2020-8203']);
+        });
+
+        test('should create VEX statement and verify in list', async ({ page, request }) => {
+            // Second statement through the form: the default status
+            // (under_investigation) needs no justification, and the count
+            // goes from 1 to 2.
+            await createVex(request, project, 'CVE-2021-23337', {
+                status: 'not_affected',
+                justification: 'component_not_present',
+            });
+            const cveId = 'CVE-2021-45046';
+
+            await page.goto(`/en/projects/${project.projectId}`);
+            await expect(vexTab(page, 1)).toBeVisible({ timeout: 10000 });
+
+            const form = await openVexForm(page, cveId);
+            await expect(form.getByRole('combobox')).toHaveCount(1);
+            await expect(form.getByRole('combobox')).toHaveValue('under_investigation');
+            await form.getByPlaceholder(en.VexForm.actionPlaceholder).fill('Upgrading to 2.17.1 next sprint.');
+            await form.getByRole('button', { name: en.VexForm.createVexStatement }).click();
+
+            await expect(vexTab(page, 2)).toBeVisible();
+            await expect(vexRow(page, cveId)).toContainText('under investigation');
+            await expect(vexRow(page, 'CVE-2021-23337')).toContainText('not affected');
+
+            const created = (await listVex(request, project.projectId)).find((r) => r.vulnerability_cve_id === cveId);
+            expect(created).toMatchObject({
                 status: 'under_investigation',
-            },
+                action_statement: 'Upgrading to 2.17.1 next sprint.',
+            });
         });
-        expect(createResponse.ok(), `VEX create returned ${createResponse.status()}`).toBe(true);
 
-        await page.goto(`/en/projects/${projectId}`);
-        await page.waitForLoadState('networkidle');
+        test('should display VEX status correctly for each statement', async ({ page, request }) => {
+            const expected: Array<[string, string, string]> = [
+                ['CVE-2021-44228', 'affected', 'affected'],
+                ['CVE-2021-45046', 'fixed', 'fixed'],
+                ['CVE-2021-23337', 'under_investigation', 'under investigation'],
+                ['CVE-2020-8203', 'not_affected', 'not affected'],
+            ];
+            for (const [cveId, status] of expected) {
+                await createVex(request, project, cveId, {
+                    status,
+                    ...(status === 'not_affected' ? { justification: 'component_not_present' } : {}),
+                });
+            }
 
-        // Get initial VEX count from tab, once the statements have loaded
-        // (the tab reads "VEX (0)" until then).
-        const vexTab = page.getByRole('button', { name: /^VEX \(\d+\)$/i });
-        await expect(vexTab).not.toHaveText(/\(0\)/, { timeout: 10000 });
-        const initialTabText = await vexTab.textContent();
-        const initialMatch = initialTabText?.match(/\((\d+)\)/);
-        const initialCount = initialMatch ? parseInt(initialMatch[1], 10) : 0;
+            await page.goto(`/en/projects/${project.projectId}`);
+            await vexTab(page, expected.length).click();
 
-        await vexTab.click();
-        await page.waitForTimeout(1000);
-
-        // The statement's row is a bordered box (the enclosing Card is also
-        // bordered, hence :not(.bg-card)) with a text "Delete" button
-        // (no trash icon; this used to look for svg.lucide-trash-2 /
-        // svg.lucide-x, which this panel never renders, so the body below was
-        // skipped behind an `if (isVisible)` guard and asserted nothing).
-        const deleteButtons = page
-            .locator('div.border.rounded-lg:not(.bg-card)')
-            .getByRole('button', { name: en.Common.delete, exact: true });
-        await expect(deleteButtons.first()).toBeVisible({ timeout: 10000 });
-        expect(initialCount).toBeGreaterThan(0);
-
-        // Deletion is confirmed through a native window.confirm().
-        let confirmMessage: string | null = null;
-        page.once('dialog', async (dialog) => {
-            confirmMessage = `${dialog.type()}: ${dialog.message()}`;
-            await dialog.accept();
+            for (const [cveId, , label] of expected) {
+                const row = vexRow(page, cveId);
+                await expect(row).toHaveCount(1);
+                // The status badge is the element right after the CVE id.
+                await expect(row.getByText(label, { exact: true })).toBeVisible();
+            }
         });
-        await deleteButtons.first().click();
-        await expect.poll(() => confirmMessage).toBe(`confirm: ${en.ProjectDetail.deleteVexConfirm}`);
 
-        // Verify count decreased
-        await expect(vexTab).toHaveText(new RegExp(`\\(${initialCount - 1}\\)`));
+        test('should render a real cross-project VEX suggestion (M26 F376)', async ({ page, request }) => {
+            // Cross-project VEX suggestion aggregation (issue #131): a decision
+            // made in another project of the tenant on the same vulnerability
+            // surfaces on this project's triage page with its provenance.
+            // `project` is the target; a second project is the source.
+            const source = await createVulnerableProject(request, 'VEX Suggestion Source');
+            try {
+                const cveId = 'CVE-2020-8203';
+                const statementId = await createVex(request, source, cveId, {
+                    status: 'not_affected',
+                    justification: 'vulnerable_code_not_present',
+                    impact_statement: 'Suggestion source statement.',
+                });
+
+                // API: the suggestion for our CVE carries the source provenance.
+                const res = await request.get(`${API_BASE_URL}/api/v1/projects/${project.projectId}/vex/suggestions`);
+                expect(res.status()).toBe(200);
+                const suggestions: Array<{ cve_id: string; source: { statement_id: string; project_name: string } }> =
+                    (await res.json()).suggestions;
+                const ours = suggestions.filter((s) => s.source.statement_id === statementId);
+                expect(ours).toHaveLength(1);
+                expect(ours[0].cve_id).toBe(cveId);
+                expect(ours[0].source.project_name).toBe(source.projectName);
+
+                // UI: the card from our source project. (Other projects of the
+                // tenant may contribute more cards; scope to ours.)
+                await page.goto(`/en/projects/${project.projectId}/triage`);
+                await expect(page.getByTestId('triage-page')).toBeVisible({ timeout: 10000 });
+                await expect(page.getByTestId('cross-project-suggestions')).toBeVisible();
+                const card = page
+                    .locator(`[data-testid="cross-project-suggestion-card"][data-cve-id="${cveId}"]`)
+                    .filter({ hasText: source.projectName });
+                await expect(card).toHaveCount(1);
+                await expect(card).toHaveAttribute('data-match-type', /^(purl|vulnerability_only)$/);
+                await expect(card).toContainText('Not affected');
+                await expect(card).toContainText('vulnerable code not present');
+                await expect(card).toContainText('Suggestion source statement.');
+            } finally {
+                await deleteProject(request, source.projectId);
+            }
+        });
     });
 
-    test('should create VEX statement and verify in list', async ({ page, request }) => {
-        const vulnResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`);
-        const vulns = await vulnResponse.json();
+    test('should render no cross-project suggestions section for a project without vulnerabilities', async ({ page, request }) => {
+        // Empty-state companion: nothing can match a project with no
+        // vulnerabilities, so the API returns [] and the section (which
+        // renders null when empty) is absent while the page still renders.
+        const res = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vex/suggestions`);
+        expect(res.status()).toBe(200);
+        expect((await res.json()).suggestions).toEqual([]);
 
-        if (!vulns || vulns.length === 0) {
-            test.skip();
-            return;
-        }
-
-        await page.goto(`/en/projects/${projectId}`);
-        await page.waitForLoadState('networkidle');
-
-        // Get initial VEX count
-        const vexTab = page.getByRole('button', { name: /^VEX \(\d+\)$/i });
-        const initialTabText = await vexTab.textContent();
-        const initialMatch = initialTabText?.match(/\((\d+)\)/);
-        const initialCount = initialMatch ? parseInt(initialMatch[1], 10) : 0;
-
-        await vexTab.click();
-        await page.waitForTimeout(500);
-
-        // Look for add VEX button
-        const addButton = page.getByRole('button', { name: /Add VEX|VEX追加/i });
-        if (await addButton.isVisible()) {
-            await addButton.click();
-
-            // Fill in VEX form
-            const statusSelect = page.locator('select:not([data-testid="evidence-pack-format"])').first();
-            if (await statusSelect.isVisible()) {
-                await statusSelect.selectOption('not_affected');
-            }
-
-            // Select justification if available
-            const justificationSelect = page.locator('select:not([data-testid="evidence-pack-format"])').nth(1);
-            if (await justificationSelect.isVisible()) {
-                await justificationSelect.selectOption('component_not_present');
-            }
-
-            // Add impact statement
-            const impactInput = page.getByPlaceholder(/impact|影響/i);
-            if (await impactInput.isVisible()) {
-                await impactInput.fill('This component is not used in production.');
-            }
-
-            // Submit
-            await page.getByRole('button', { name: /Save|Submit|保存/i }).click();
-            await page.waitForTimeout(2000);
-
-            // Verify count increased
-            const updatedTabText = await vexTab.textContent();
-            const updatedMatch = updatedTabText?.match(/\((\d+)\)/);
-            const updatedCount = updatedMatch ? parseInt(updatedMatch[1], 10) : 0;
-
-            expect(updatedCount).toBeGreaterThan(initialCount);
-
-            // Verify the new VEX status is visible
-            await expect(page.getByText(/not_affected/i).first()).toBeVisible();
-        }
-    });
-
-    test('should render cross-project VEX suggestions section without crashing (M26 F376)', async ({ page }) => {
-        // Cross-project VEX suggestion aggregation (issue #131, read-only
-        // Phase 1). The web-e2e seed does NOT provision a second project in
-        // the same tenant with an approved vex_statement that matches this
-        // project's vulnerabilities, so in this environment the suggestions
-        // API returns an empty list and the section renders nothing (the
-        // component returns null when empty). The real aggregation behaviour
-        // — tenant-scoped cross-project matching, tenant-boundary isolation,
-        // self / already-triaged exclusion, purl vs vulnerability_only match
-        // typing — is verified by the Wave A backend integration test
-        // (apps/api, `-tags=integration`, real-PG), NOT here.
-        //
-        // Soft-guard style (consistent with the rest of this file): assert the
-        // triage page renders regardless of suggestions, then, IF seed data
-        // ever surfaces a suggestion, assert the section shape (provenance +
-        // match-type badge). This keeps the test meaningful once cross-project
-        // seed data lands without failing in the seedless CI env today.
         await page.goto(`/en/projects/${projectId}/triage`);
-        await page.waitForLoadState('networkidle');
-
-        // The triage page must render even when suggestions are empty / the
-        // aggregation endpoint is not yet deployed.
         await expect(page.getByTestId('triage-page')).toBeVisible({ timeout: 10000 });
-
-        const section = page.getByTestId('cross-project-suggestions');
-        if (await section.isVisible().catch(() => false)) {
-            // Section header count + at least one suggestion card carrying its
-            // source-project provenance and a purl / CVE-only match label.
-            const card = page.getByTestId('cross-project-suggestion-card').first();
-            await expect(card).toBeVisible();
-            await expect(card).toHaveAttribute('data-match-type', /^(purl|vulnerability_only)$/);
-        }
+        await expect(page.getByText(en.Triage.Page.emptyTitle, { exact: true })).toBeVisible();
+        await expect(page.getByTestId('cross-project-suggestions')).toHaveCount(0);
     });
 
     test('should render a populated cross-project suggestion card (M26 F380)', async ({ page }) => {
@@ -601,27 +615,5 @@ test.describe('VEX Statement Management', () => {
 
         // Release both held applies so the page settles cleanly.
         releaseApplies();
-    });
-
-    test('should display VEX status correctly for each statement', async ({ page, request }) => {
-        const vexResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`);
-        const vexStatements = await vexResponse.json();
-
-        if (!vexStatements || vexStatements.length === 0) {
-            test.skip();
-            return;
-        }
-
-        await page.goto(`/en/projects/${projectId}`);
-        await page.waitForLoadState('networkidle');
-
-        await page.getByRole('button', { name: /^VEX \(\d+\)$/i }).click();
-        await page.waitForTimeout(1000);
-
-        // Verify each VEX statement status matches API data
-        for (const vex of vexStatements.slice(0, 3)) { // Check first 3 to avoid long tests
-            const statusText = page.getByText(new RegExp(vex.status, 'i'));
-            await expect(statusText.first()).toBeVisible();
-        }
     });
 });

@@ -1,145 +1,144 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type APIRequestContext } from '@playwright/test';
+import en from '../messages/en.json';
+import {
+  API_BASE_URL,
+  FIXTURE_CVES,
+  createVulnerableProject,
+  deleteProject,
+  type VulnerableProject,
+} from './fixtures/vuln-project';
 
-const API_BASE_URL =
-  process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
+// The CI stack runs in self-hosted anonymous mode (no auth), so every call
+// below must answer with its exact success status; there is no 401 branch.
 
-// These tests work in self-hosted mode without authentication
-// In SaaS mode (Clerk enabled), these endpoints require authentication
+const KEV_CVES = FIXTURE_CVES.filter((c) => c.inKev).map((c) => c.cveId).sort();
+const NON_KEV_CVES = FIXTURE_CVES.filter((c) => !c.inKev).map((c) => c.cveId);
+
+/**
+ * The catalog endpoints read kev_catalog, which only POST /kev/sync fills
+ * (the seed does not). Make sure it is populated so every catalog test is
+ * independent of test order; a failing sync FAILS the suite.
+ */
+async function ensureCatalogSynced(request: APIRequestContext): Promise<void> {
+  const statsRes = await request.get(`${API_BASE_URL}/api/v1/kev/stats`);
+  expect(statsRes.status()).toBe(200);
+  const stats = await statsRes.json();
+  if (stats.total_entries === 0) {
+    const syncRes = await request.post(`${API_BASE_URL}/api/v1/kev/sync`);
+    expect(syncRes.status(), `KEV sync: ${await syncRes.text()}`).toBe(200);
+  }
+}
+
 test.describe('KEV (Known Exploited Vulnerabilities)', () => {
   test.describe('KEV Catalog API', () => {
-    test('should sync KEV catalog', async ({ request }) => {
-      // Trigger KEV sync
-      const syncResponse = await request.post(`${API_BASE_URL}/api/v1/kev/sync`);
-
-      // Accept 200 (success) or 401 (auth required in SaaS mode)
-      expect([200, 401]).toContain(syncResponse.status());
-
-      if (syncResponse.ok()) {
-        const result = await syncResponse.json();
-        expect(result).toHaveProperty('total_processed');
-        expect(result.total_processed).toBeGreaterThanOrEqual(0);
-      }
+    test.beforeAll(async ({ request }) => {
+      await ensureCatalogSynced(request);
     });
 
-    test('should get KEV stats', async ({ request }) => {
+    test('should sync KEV catalog', async ({ request }) => {
+      // NOTE: this fetches the live CISA feed (the CI runner has egress).
+      const syncResponse = await request.post(`${API_BASE_URL}/api/v1/kev/sync`);
+      expect(syncResponse.status(), await syncResponse.text()).toBe(200);
+
+      const result = await syncResponse.json();
+      expect(result.message).toBe('KEV catalog sync completed');
+      expect(result.total_processed).toBeGreaterThan(0);
+      expect(result.new_entries + result.updated_entries).toBe(result.total_processed);
+      expect(typeof result.catalog_version).toBe('string');
+      expect(result.catalog_version).not.toBe('');
+    });
+
+    test('should get KEV stats consistent with the catalog', async ({ request }) => {
       const statsResponse = await request.get(`${API_BASE_URL}/api/v1/kev/stats`);
+      expect(statsResponse.status()).toBe(200);
+      const stats = await statsResponse.json();
+      expect(stats.total_entries).toBeGreaterThan(0);
+      expect(stats.latest_sync_status.status).toBe('success');
 
-      // Accept 200 (success), 401 (auth required), or 500 (server error - may not be configured)
-      expect([200, 401, 500]).toContain(statsResponse.status());
-
-      if (statsResponse.ok()) {
-        const stats = await statsResponse.json();
-        expect(stats).toHaveProperty('total_entries');
-      }
+      const catalogResponse = await request.get(`${API_BASE_URL}/api/v1/kev/catalog?limit=1`);
+      expect(catalogResponse.status()).toBe(200);
+      const catalog = await catalogResponse.json();
+      expect(catalog.total).toBe(stats.total_entries);
     });
 
     test('should list KEV catalog entries', async ({ request }) => {
       const catalogResponse = await request.get(`${API_BASE_URL}/api/v1/kev/catalog?limit=10`);
+      expect(catalogResponse.status()).toBe(200);
 
-      // Accept 200 (success) or 401 (auth required in SaaS mode)
-      expect([200, 401]).toContain(catalogResponse.status());
-
-      if (catalogResponse.ok()) {
-        const catalog = await catalogResponse.json();
-        expect(catalog).toHaveProperty('entries');
-        expect(catalog).toHaveProperty('total');
-        expect(Array.isArray(catalog.entries)).toBeTruthy();
+      const catalog = await catalogResponse.json();
+      expect(catalog.limit).toBe(10);
+      expect(catalog.offset).toBe(0);
+      expect(Array.isArray(catalog.entries)).toBe(true);
+      expect(catalog.total).toBeGreaterThan(0);
+      expect(catalog.entries).toHaveLength(Math.min(10, catalog.total));
+      for (const entry of catalog.entries) {
+        expect(entry.cve_id).toMatch(/^CVE-\d{4}-\d{4,}$/);
       }
     });
 
     test('should check if CVE is in KEV', async ({ request }) => {
-      // Check a well-known CVE that should be in KEV (Log4Shell)
+      // Log4Shell is in the CISA catalog.
       const checkResponse = await request.get(`${API_BASE_URL}/api/v1/kev/CVE-2021-44228`);
+      expect(checkResponse.status()).toBe(200);
 
-      // Accept 200 (success) or 401 (auth required in SaaS mode)
-      expect([200, 401]).toContain(checkResponse.status());
-
-      if (checkResponse.ok()) {
-        const result = await checkResponse.json();
-        expect(result).toHaveProperty('cve_id');
-        expect(result).toHaveProperty('in_kev');
-        expect(result.cve_id).toBe('CVE-2021-44228');
-      }
+      const result = await checkResponse.json();
+      expect(result.cve_id).toBe('CVE-2021-44228');
+      expect(result.in_kev).toBe(true);
+      expect(result.entry.cve_id).toBe('CVE-2021-44228');
+      expect(result.entry.vendor_project).toBe('Apache');
     });
 
     test('should return false for non-KEV CVE', async ({ request }) => {
-      // Check a non-existent CVE
       const checkResponse = await request.get(`${API_BASE_URL}/api/v1/kev/CVE-9999-99999`);
+      expect(checkResponse.status()).toBe(200);
 
-      // Accept 200 (success) or 401 (auth required in SaaS mode)
-      expect([200, 401]).toContain(checkResponse.status());
-
-      if (checkResponse.ok()) {
-        const result = await checkResponse.json();
-        expect(result.in_kev).toBe(false);
-      }
+      const result = await checkResponse.json();
+      expect(result).toEqual({ cve_id: 'CVE-9999-99999', in_kev: false });
     });
   });
 
   test.describe('KEV in Project Context', () => {
-    let projectId: string | null = null;
+    let project: VulnerableProject;
 
     test.beforeAll(async ({ request }) => {
-      // Create a test project
-      const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-        data: {
-          name: `KEV Test Project ${Date.now()}`,
-          description: 'Project for KEV E2E tests',
-        },
-      });
-
-      // Skip project creation if auth is required
-      if (createResponse.status() === 401) {
-        return;
-      }
-
-      const project = await createResponse.json();
-      projectId = project.id;
-
-      // Upload SBOM with potentially vulnerable component
-      const sbom = {
-        bomFormat: 'CycloneDX',
-        specVersion: '1.4',
-        version: 1,
-        components: [
-          {
-            type: 'library',
-            name: 'log4j-core',
-            version: '2.14.1', // Known Log4Shell vulnerable version
-            purl: 'pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1',
-          },
-        ],
-      };
-
-      await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/sbom`, {
-        data: JSON.stringify(sbom),
-        headers: { 'Content-Type': 'application/json' },
-      });
+      // 4 fixture vulns: 2 CRITICAL in KEV, 2 HIGH not in KEV.
+      project = await createVulnerableProject(request, 'KEV Test Project');
     });
 
     test.afterAll(async ({ request }) => {
-      if (projectId) {
-        await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
-      }
+      await deleteProject(request, project?.projectId);
     });
 
     test('should get project KEV vulnerabilities', async ({ request }) => {
-      if (!projectId) {
-        // Project wasn't created (auth required in SaaS mode), skip test
-        test.skip();
-        return;
+      const kevResponse = await request.get(
+        `${API_BASE_URL}/api/v1/projects/${project.projectId}/kev`
+      );
+      expect(kevResponse.status()).toBe(200);
+
+      const result = await kevResponse.json();
+      expect(result.project_id).toBe(project.projectId);
+      expect(result.count).toBe(KEV_CVES.length);
+      expect(result.vulnerabilities.map((v: { cve_id: string }) => v.cve_id).sort()).toEqual(KEV_CVES);
+      for (const v of result.vulnerabilities) {
+        expect(v.in_kev).toBe(true);
       }
+    });
 
-      const kevResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/kev`);
+    test('should mark exactly the KEV vulnerabilities with the KEV badge', async ({ page }) => {
+      await page.goto(`/en/projects/${project.projectId}`);
+      await page
+        .getByRole('button', { name: `${en.Vulnerabilities.title} (${FIXTURE_CVES.length})` })
+        .click();
 
-      // Accept 200 (success), 401 (auth required), or 500 (server error - may not be configured)
-      expect([200, 401, 500]).toContain(kevResponse.status());
-
-      if (kevResponse.ok()) {
-        const result = await kevResponse.json();
-        expect(result).toHaveProperty('vulnerabilities');
-        expect(result).toHaveProperty('count');
-        expect(Array.isArray(result.vulnerabilities)).toBeTruthy();
+      for (const cveId of KEV_CVES) {
+        const entry = page.locator(`[data-vuln-cve-id="${cveId}"]`);
+        await expect(entry).toBeVisible({ timeout: 10000 });
+        await expect(entry.getByText(en.KEV.badge, { exact: true })).toBeVisible();
+      }
+      for (const cveId of NON_KEV_CVES) {
+        const entry = page.locator(`[data-vuln-cve-id="${cveId}"]`);
+        await expect(entry).toBeVisible();
+        await expect(entry.getByText(en.KEV.badge, { exact: true })).toHaveCount(0);
       }
     });
   });
