@@ -68,9 +68,12 @@ import (
 // The pass runs in the sync's own goroutine, AFTER the delta read of the same
 // tick, so the two never issue NVD requests at the same time. Its requests are
 // paced at twice the sync's interval (cveReconcilePaceFactor), leaving half of
-// NVD's published rate for the per-component scanners, and an invocation stops
-// between windows once cveReconcileTickBudget has elapsed, so the next delta
-// tick is delayed by at most that long.
+// NVD's published rate for the per-component scanners, and an invocation runs
+// under a cveReconcileTickBudget deadline — checked between windows and also
+// imposed on the window in flight (its requests and statements are cancelled)
+// — so the next delta tick is delayed by about that long at most. A window
+// interrupted by the deadline is re-read whole by the next invocation; the
+// largest measured window (~158 pages) takes well under an hour.
 
 const (
 	// cveReconcileStateKey is the system_settings row holding the pass state.
@@ -205,31 +208,54 @@ func (j *CVESyncJob) reconcileCatalogue(ctx context.Context, now time.Time) (rec
 		if windowEnd.After(passEnd) {
 			windowEnd = passEnd
 		}
-		err := j.walkModifiedWindow(ctx, windowStart, windowEnd, pace, func(page []CVEInfo) error {
-			st.PassPages++
-			st.PassRecords += len(page)
-			written, failed, perr := j.reconcilePage(ctx, page)
-			st.PassWritten += written
-			st.PassWriteFailures += len(failed)
-			for _, id := range failed {
-				if len(st.PassFailedSample) < cveReconcileFailureSample {
-					st.PassFailedSample = append(st.PassFailedSample, id)
-				}
-			}
+		// One window's counts are added to the pass only once the window has
+		// been read to the end (Codex M58 R1, Low). A window that fails is
+		// re-read from its first page next time, and the counts of the
+		// abandoned read would otherwise survive next to the counts of the
+		// retry — a row that failed once and then succeeded would still be
+		// reported as a write failure, and the sample would fill with
+		// duplicates.
+		var winPages, winRecords, winWritten int
+		var winFailed []string
+		// The budget also bounds the window in flight, not only the gap
+		// between windows (Codex M58 R1, Medium): a window whose writes queue
+		// on row locks, or a very slow NVD, would otherwise hold this goroutine
+		// — and with it the next daily delta read — for as long as it takes.
+		walkCtx, cancel := context.WithDeadline(ctx, deadline)
+		err := j.walkModifiedWindow(walkCtx, windowStart, windowEnd, pace, func(page []CVEInfo) error {
+			winPages++
+			winRecords += len(page)
+			written, failed, perr := j.reconcilePage(walkCtx, page)
+			winWritten += written
+			winFailed = append(winFailed, failed...)
 			return perr
 		})
+		cancel()
+		if err != nil && ctx.Err() == nil && time.Now().After(deadline) {
+			// The budget ran out inside this window. Not a failure: the cursor
+			// still points at it and the next invocation re-reads it whole.
+			slog.Warn("CVE reconcile: tick budget ran out inside a window; pausing, the next tick re-reads that window",
+				"window_start", windowStart.Format(time.RFC3339), "window_end", windowEnd.Format(time.RFC3339),
+				"budget", budget.String())
+			return reconcileOutcome{}, nil
+		}
 		if err != nil {
 			// The cursor still points at this window, so the next invocation
-			// re-reads it from its first page. Counters from its partial read
-			// are kept: they describe writes that happened.
-			if serr := j.saveReconcileState(ctx, st); serr != nil {
-				slog.Error("CVE reconcile: could not persist progress", "error", serr)
-			}
+			// re-reads it from its first page.
 			slog.Error("CVE reconcile: pass INCOMPLETE — a window could not be read; the next tick resumes at it",
 				"window_start", windowStart.Format(time.RFC3339), "window_end", windowEnd.Format(time.RFC3339),
 				"error", err)
 			return reconcileOutcome{}, fmt.Errorf("cve reconcile: window %s..%s: %w",
 				windowStart.Format(time.RFC3339), windowEnd.Format(time.RFC3339), err)
+		}
+		st.PassPages += winPages
+		st.PassRecords += winRecords
+		st.PassWritten += winWritten
+		st.PassWriteFailures += len(winFailed)
+		for _, id := range winFailed {
+			if len(st.PassFailedSample) < cveReconcileFailureSample {
+				st.PassFailedSample = append(st.PassFailedSample, id)
+			}
 		}
 		next := windowEnd
 		st.Cursor = &next

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -707,7 +708,10 @@ func (c *Config) NVDReconcileInterval() (time.Duration, error) {
 	var d time.Duration
 	if days, ok := strings.CutSuffix(v, "d"); ok {
 		n, err := strconv.Atoi(days)
-		if err != nil || n <= 0 {
+		// The upper bound refuses a count whose duration would overflow
+		// int64 nanoseconds and wrap to a small, plausible value (Codex M58
+		// R1, Low: 281474976710686d wrapped to exactly 30d).
+		if err != nil || n <= 0 || int64(n) > int64(math.MaxInt64)/int64(24*time.Hour) {
 			return 0, fmt.Errorf("SBOMHUB_NVD_RECONCILE_INTERVAL=%q: want a whole number of days like \"30d\", a duration like \"720h\", or \"off\"", c.NVDReconcileIntervalRaw)
 		}
 		d = time.Duration(n) * 24 * time.Hour

@@ -251,10 +251,12 @@ func TestM58Reconcile_ResumesAtTheWindowItStoppedIn(t *testing.T) {
 	}
 }
 
-// TestM58Reconcile_TheTickBudgetPausesBetweenWindows: one invocation stops
-// once its budget is spent, leaving the cursor for the next — which is what
-// keeps a slow pass from holding up the next delta read.
-func TestM58Reconcile_TheTickBudgetPausesBetweenWindows(t *testing.T) {
+// TestM58Reconcile_TheTickBudgetPausesWithoutFailing: an invocation whose
+// budget runs out — here before the first window completes, which is the
+// in-flight case Codex M58 R1 (Medium) asked to be bounded too — stops
+// without reporting a failure, keeps the pass in progress with the cursor at
+// the interrupted window, and the next invocation finishes it.
+func TestM58Reconcile_TheTickBudgetPausesWithoutFailing(t *testing.T) {
 	appURL, migURL := schedIntEnv(t)
 	appDB := schedOpenOrSkip(t, appURL)
 	migDB := schedOpenOrSkip(t, migURL)
@@ -268,11 +270,15 @@ func TestM58Reconcile_TheTickBudgetPausesBetweenWindows(t *testing.T) {
 	if err != nil || out.Finished {
 		t.Fatalf("outcome %+v err %v, want an unfinished pass and no error", out, err)
 	}
-	if n := fake.requestCount(); n != 1 {
-		t.Errorf("requests = %d, want exactly one window before the budget stopped it", n)
+	st := m58State(t, migDB)
+	if st.PassStartedAt == nil || st.LastStatus != "" || st.Cursor == nil || !st.Cursor.Equal(j.reconcileEpoch) {
+		t.Fatalf("state = %+v, want the pass in progress with the cursor still at the interrupted first window", st)
 	}
-	if st := m58State(t, migDB); st.PassStartedAt == nil || st.LastStatus != "" {
-		t.Errorf("state = %+v, want the pass still in progress", st)
+
+	j.reconcileBudget = 0 // default
+	out, err = j.reconcileCatalogue(context.Background(), time.Now().UTC())
+	if err != nil || !out.Finished {
+		t.Fatalf("the next invocation did not finish the paused pass: %+v %v", out, err)
 	}
 }
 
