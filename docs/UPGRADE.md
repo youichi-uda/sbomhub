@@ -1488,7 +1488,8 @@ Because a refused catalogue insert no longer discards the rest of a scheduled
 scan, the scheduled scan's log now records `failed` whenever any project's scan
 reported an error (it used to say `completed` and skip that project's count),
 and the findings that did commit are counted in `new_vulnerabilities` and
-notified. Before, a project whose NVD lookups all failed was also logged
+passed to the notification step (which, as before, lists at most 20 recent
+findings per project). Before, a project whose NVD lookups all failed was also logged
 `completed`; it is now `failed` too.
 
 ### 11.2 Correction to §9.4: the refresh did not run on real NVD data
