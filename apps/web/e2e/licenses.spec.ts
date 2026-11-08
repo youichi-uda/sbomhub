@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import en from '../messages/en.json';
 
 const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
@@ -181,7 +182,7 @@ test.describe('License Policy Management', () => {
 
     test('should delete license policy', async ({ page, request }) => {
         // First create a policy via API
-        await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/licenses`, {
+        const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/licenses`, {
             data: {
                 license_id: 'BSD-3-Clause',
                 license_name: 'BSD 3-Clause',
@@ -189,25 +190,37 @@ test.describe('License Policy Management', () => {
                 reason: 'Needs legal review',
             },
         });
+        expect(createResponse.ok(), `policy create returned ${createResponse.status()}`).toBe(true);
+        const policy = await createResponse.json();
+        expect(typeof policy.id).toBe('string');
 
         await page.goto(`/en/projects/${projectId}`);
-        await page.waitForLoadState('networkidle');
-
         await page.getByRole('button', { name: /Licenses?|License|ライセンス/i }).click();
-        await page.waitForTimeout(1000);
 
-        // Find delete button
-        const deleteButton = page.locator('button').filter({ has: page.locator('svg.lucide-trash-2') }).first();
-        if (await deleteButton.isVisible()) {
-            await deleteButton.click();
+        // The policy's row (bordered box carrying "(BSD-3-Clause)"; the
+        // enclosing Card is also bordered, hence :not(.bg-card)) and its
+        // text "Delete" button. This used to look for an svg.lucide-trash-2
+        // icon that this panel has never rendered, so the whole test body was
+        // skipped behind an `if (isVisible)` guard and asserted nothing.
+        const policyRow = page
+            .locator('div.border.rounded-lg:not(.bg-card)')
+            .filter({ hasText: '(BSD-3-Clause)' })
+            .filter({ has: page.getByRole('button', { name: en.Common.delete, exact: true }) });
+        await expect(policyRow).toHaveCount(1, { timeout: 10000 });
 
-            // Confirm if dialog appears
-            const confirmButton = page.getByRole('button', { name: /Delete|Confirm|削除/i });
-            if (await confirmButton.isVisible()) {
-                await confirmButton.click();
-            }
+        // Deletion is confirmed through a native window.confirm().
+        let confirmMessage: string | null = null;
+        page.once('dialog', async (dialog) => {
+            confirmMessage = `${dialog.type()}: ${dialog.message()}`;
+            await dialog.accept();
+        });
+        await policyRow.getByRole('button', { name: en.Common.delete, exact: true }).click();
+        await expect.poll(() => confirmMessage).toBe(`confirm: ${en.ProjectDetail.deleteLicenseConfirm}`);
 
-            await page.waitForTimeout(1000);
-        }
+        await expect(policyRow).toHaveCount(0);
+        const listResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/licenses`);
+        expect(listResponse.ok()).toBe(true);
+        const policies = ((await listResponse.json()) ?? []) as Array<{ id: string }>;
+        expect(policies.map((p) => p.id)).not.toContain(policy.id);
     });
 });

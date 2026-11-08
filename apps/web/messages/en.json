@@ -231,6 +231,7 @@
     "noProjects": "No projects yet",
     "noDescription": "No description",
     "deleteConfirm": "Delete this project?",
+    "deleteAriaLabel": "Delete project {name}",
     "namePlaceholder": "My Project",
     "descriptionPlaceholder": "Project description"
   },

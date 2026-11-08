@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import en from '../messages/en.json';
 
 const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
@@ -180,18 +181,21 @@ test.describe('VEX Statement Management', () => {
         }
 
         // Create VEX via API
-        await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`, {
+        const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`, {
             data: {
                 vulnerability_id: vulns[0].id,
                 status: 'under_investigation',
             },
         });
+        expect(createResponse.ok(), `VEX create returned ${createResponse.status()}`).toBe(true);
 
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        // Get initial VEX count from tab
+        // Get initial VEX count from tab, once the statements have loaded
+        // (the tab reads "VEX (0)" until then).
         const vexTab = page.getByRole('button', { name: /^VEX \(\d+\)$/i });
+        await expect(vexTab).not.toHaveText(/\(0\)/, { timeout: 10000 });
         const initialTabText = await vexTab.textContent();
         const initialMatch = initialTabText?.match(/\((\d+)\)/);
         const initialCount = initialMatch ? parseInt(initialMatch[1], 10) : 0;
@@ -199,26 +203,28 @@ test.describe('VEX Statement Management', () => {
         await vexTab.click();
         await page.waitForTimeout(1000);
 
-        // Find delete button
-        const deleteButton = page.locator('button').filter({ has: page.locator('svg.lucide-trash-2, svg.lucide-x') }).first();
-        if (await deleteButton.isVisible()) {
-            await deleteButton.click();
+        // The statement's row is a bordered box (the enclosing Card is also
+        // bordered, hence :not(.bg-card)) with a text "Delete" button
+        // (no trash icon; this used to look for svg.lucide-trash-2 /
+        // svg.lucide-x, which this panel never renders, so the body below was
+        // skipped behind an `if (isVisible)` guard and asserted nothing).
+        const deleteButtons = page
+            .locator('div.border.rounded-lg:not(.bg-card)')
+            .getByRole('button', { name: en.Common.delete, exact: true });
+        await expect(deleteButtons.first()).toBeVisible({ timeout: 10000 });
+        expect(initialCount).toBeGreaterThan(0);
 
-            // Confirm deletion if dialog appears
-            const confirmButton = page.getByRole('button', { name: /Delete|Confirm|削除/i });
-            if (await confirmButton.isVisible()) {
-                await confirmButton.click();
-            }
+        // Deletion is confirmed through a native window.confirm().
+        let confirmMessage: string | null = null;
+        page.once('dialog', async (dialog) => {
+            confirmMessage = `${dialog.type()}: ${dialog.message()}`;
+            await dialog.accept();
+        });
+        await deleteButtons.first().click();
+        await expect.poll(() => confirmMessage).toBe(`confirm: ${en.ProjectDetail.deleteVexConfirm}`);
 
-            await page.waitForTimeout(2000);
-
-            // Verify count decreased
-            const updatedTabText = await vexTab.textContent();
-            const updatedMatch = updatedTabText?.match(/\((\d+)\)/);
-            const updatedCount = updatedMatch ? parseInt(updatedMatch[1], 10) : 0;
-
-            expect(updatedCount).toBeLessThan(initialCount);
-        }
+        // Verify count decreased
+        await expect(vexTab).toHaveText(new RegExp(`\\(${initialCount - 1}\\)`));
     });
 
     test('should create VEX statement and verify in list', async ({ page, request }) => {

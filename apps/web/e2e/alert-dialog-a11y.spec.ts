@@ -27,33 +27,56 @@
 // because the smoke job runs against a production docker compose stack
 // with real Clerk middleware where the /settings/apikeys destructive
 // flow is not reachable without authenticated state.
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 
 const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
 
 test.describe('AlertDialog WAI-ARIA modal contract (F205)', () => {
     let seededKeyId: string | null = null;
+    let seededKeyName = '';
+
+    // The delete trigger of the seeded key: the only button in the Card whose
+    // title is the seeded key's name. Located by structure + accessible role
+    // rather than by the lucide icon class, which lucide-react renamed
+    // (0.x `lucide-trash2` -> 1.x `lucide-trash lucide-trash-2`) and which
+    // left this spec skipping every test without anyone noticing.
+    function seededTrigger(page: Page): Locator {
+        return page
+            .locator('div.bg-card')
+            .filter({ has: page.getByRole('heading', { name: seededKeyName, exact: true }) })
+            .getByRole('button');
+    }
+
+    async function openSeededDialog(page: Page): Promise<Locator> {
+        await page.goto('/en/settings/apikeys');
+        const trigger = seededTrigger(page);
+        // Exactly one: the seed is a precondition, not an optional extra, so
+        // a missing row fails the test instead of skipping it.
+        await expect(trigger).toHaveCount(1, { timeout: 15000 });
+        await trigger.click();
+        const dialog = page.locator('[role="dialog"]').first();
+        await expect(dialog).toBeVisible({ timeout: 5000 });
+        return dialog;
+    }
 
     test.beforeAll(async ({ request }) => {
-        // Seed at least one tenant-level API key so the /settings/apikeys
-        // page renders the per-row destructive AlertDialog. The post-mount
-        // list query may return existing keys from prior runs — that is
-        // fine; we only need one row to exist. We also do not clean up the
-        // seeded key in afterAll: the destructive flow under test deletes
-        // it as part of asserting the modal lifecycle, and if the test is
-        // skipped or fails before that point the stray test-key is
-        // tolerable (the page is idempotent across runs).
+        // Seed a tenant-level API key with a name unique to this run so the
+        // /settings/apikeys page renders a per-row destructive AlertDialog
+        // trigger we can find by that name. Keys left by prior runs are
+        // irrelevant: the tests only touch this row. A failed seed fails the
+        // suite here (it used to fall through to a silent skip). afterAll
+        // deletes the key; none of these tests confirms the deletion.
+        seededKeyName = `F205 A11y Seed ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const resp = await request.post(`${API_BASE_URL}/api/v1/apikeys`, {
             data: {
-                name: `F205 A11y Seed ${Date.now()}`,
+                name: seededKeyName,
                 permissions: 'read',
             },
         });
-        if (resp.ok()) {
-            const body = await resp.json();
-            seededKeyId = body?.id ?? null;
-        }
+        expect(resp.ok(), `seeding the API key returned ${resp.status()}`).toBe(true);
+        const body = await resp.json();
+        seededKeyId = body?.id ?? null;
     });
 
     test.afterAll(async ({ request }) => {
@@ -66,28 +89,11 @@ test.describe('AlertDialog WAI-ARIA modal contract (F205)', () => {
     });
 
     test('opens with role=dialog + aria-modal + aria-labelledby linkage', async ({ page }) => {
-        await page.goto('/en/settings/apikeys');
-        await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(1500);
-
-        // The page renders one trash-icon button per API key (rendered as
-        // a ghost variant icon button — see apps/web/src/app/[locale]/
-        // (dashboard)/settings/apikeys/page.tsx). Click the first one to
-        // trigger the AlertDialog. If the list is empty (seed failed in
-        // CI), skip — the contract is exercised via the integration
-        // surface below.
-        const trashTriggers = page.locator('button:has(svg.lucide-trash2)');
-        const triggerCount = await trashTriggers.count();
-        if (triggerCount === 0) {
-            test.skip(true, 'no API key rows rendered; seed prerequisite unmet');
-            return;
-        }
-        await trashTriggers.first().click();
-
-        // After click the AlertDialog mounts; assert the WAI-ARIA modal
-        // contract on the panel.
-        const dialog = page.locator('[role="dialog"]').first();
-        await expect(dialog).toBeVisible({ timeout: 5000 });
+        // Click the seeded key's trash-icon trigger (a ghost icon button — see
+        // apps/web/src/app/[locale]/(dashboard)/settings/apikeys/page.tsx) to
+        // mount the AlertDialog, then assert the WAI-ARIA modal contract on
+        // the panel.
+        const dialog = await openSeededDialog(page);
         await expect(dialog).toHaveAttribute('aria-modal', 'true');
 
         const labelledBy = await dialog.getAttribute('aria-labelledby');
@@ -104,19 +110,7 @@ test.describe('AlertDialog WAI-ARIA modal contract (F205)', () => {
     });
 
     test('Escape key dismisses the AlertDialog', async ({ page }) => {
-        await page.goto('/en/settings/apikeys');
-        await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(1500);
-
-        const trashTriggers = page.locator('button:has(svg.lucide-trash2)');
-        if ((await trashTriggers.count()) === 0) {
-            test.skip(true, 'no API key rows rendered; seed prerequisite unmet');
-            return;
-        }
-        await trashTriggers.first().click();
-
-        const dialog = page.locator('[role="dialog"]').first();
-        await expect(dialog).toBeVisible({ timeout: 5000 });
+        const dialog = await openSeededDialog(page);
 
         // Inherited from F192's document-level keydown on the Dialog
         // primitive: Escape must close the modal.
@@ -125,19 +119,7 @@ test.describe('AlertDialog WAI-ARIA modal contract (F205)', () => {
     });
 
     test('Tab cycling stays inside the AlertDialog panel', async ({ page }) => {
-        await page.goto('/en/settings/apikeys');
-        await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(1500);
-
-        const trashTriggers = page.locator('button:has(svg.lucide-trash2)');
-        if ((await trashTriggers.count()) === 0) {
-            test.skip(true, 'no API key rows rendered; seed prerequisite unmet');
-            return;
-        }
-        await trashTriggers.first().click();
-
-        const dialog = page.locator('[role="dialog"]').first();
-        await expect(dialog).toBeVisible({ timeout: 5000 });
+        await openSeededDialog(page);
 
         // Walk Tab a handful of times and assert focus never escapes the
         // dialog into the page body. The focus-trap implementation in

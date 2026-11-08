@@ -1,7 +1,61 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import en from '../messages/en.json';
 
 const API_BASE_URL =
   process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
+
+// The tests below drive /en/projects, so the native confirm() must carry the
+// English Projects.deleteConfirm text and the delete button the English
+// Projects.deleteAriaLabel accessible name.
+const DELETE_CONFIRM = en.Projects.deleteConfirm;
+
+type CreatedProject = { id: string; name: string };
+
+async function createProjectViaApi(request: APIRequestContext, name: string): Promise<CreatedProject> {
+  const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
+    data: { name, description: 'Project for the delete E2E tests' },
+  });
+  expect(response.ok(), `project create returned ${response.status()}`).toBe(true);
+  const body = await response.json();
+  expect(typeof body.id).toBe('string');
+  return { id: body.id, name };
+}
+
+// The project's Card: the one containing the title link with exactly this name.
+function projectCard(page: Page, name: string): Locator {
+  return page
+    .locator('div.bg-card')
+    .filter({ has: page.getByRole('link', { name, exact: true }) });
+}
+
+function projectDeleteButton(page: Page, name: string): Locator {
+  return projectCard(page, name).getByRole('button', {
+    name: en.Projects.deleteAriaLabel.replace('{name}', name),
+    exact: true,
+  });
+}
+
+// Registers a one-shot handler for the next native dialog and answers it.
+// The handler only records what it saw (an assertion thrown inside an event
+// handler would not fail the test); expectDeleteConfirm asserts on it.
+function handleNextDialog(page: Page, action: 'accept' | 'dismiss'): () => string | null {
+  let seen: string | null = null;
+  page.once('dialog', async (dialog) => {
+    seen = `${dialog.type()}: ${dialog.message()}`;
+    if (action === 'accept') {
+      await dialog.accept();
+    } else {
+      await dialog.dismiss();
+    }
+  });
+  return () => seen;
+}
+
+async function expectDeleteConfirm(seen: () => string | null): Promise<void> {
+  await expect
+    .poll(seen, { message: 'a native confirm() with the delete prompt must be shown' })
+    .toBe(`confirm: ${DELETE_CONFIRM}`);
+}
 
 test.describe('Projects', () => {
   test.beforeEach(async ({ page }) => {
@@ -153,67 +207,67 @@ test.describe('Projects', () => {
     }
   });
 
-  test('should show delete confirmation dialog and cancel', async ({ page }) => {
-    // Wait for projects to load
-    await page.waitForTimeout(1000);
+  test('should show delete confirmation dialog and cancel', async ({ page, request }) => {
+    const project = await createProjectViaApi(request, `Cancel Delete Project ${Date.now()}`);
+    try {
+      await page.reload();
 
-    // Find and click delete button on first project
-    const deleteButton = page.locator('button').filter({ has: page.locator('svg.lucide-trash-2') }).first();
-    if (await deleteButton.isVisible()) {
+      const deleteButton = projectDeleteButton(page, project.name);
+      await expect(deleteButton).toBeVisible({ timeout: 10000 });
+
+      // The page asks through a native window.confirm(), not an in-page
+      // dialog. Capture it, check it is the localized delete prompt, and
+      // dismiss it (= the user pressed Cancel).
+      const dialog = handleNextDialog(page, 'dismiss');
       await deleteButton.click();
+      await expectDeleteConfirm(dialog);
 
-      // Verify delete confirmation dialog appears with proper structure
-      await expect(page.getByText(/Are you sure/i)).toBeVisible();
-      await expect(page.getByRole('button', { name: /Cancel/i })).toBeVisible();
-      await expect(page.getByRole('button', { name: /Delete/i })).toBeVisible();
-
-      // Cancel deletion
-      await page.getByRole('button', { name: /Cancel/i }).click();
-
-      // Verify dialog is closed
-      await expect(page.getByText(/Are you sure/i)).not.toBeVisible();
+      // Cancel must not delete: still listed (after a reload, so this is
+      // the server's list rather than stale client state) and still in the API.
+      await expect(projectCard(page, project.name)).toHaveCount(1);
+      await page.reload();
+      await expect(projectCard(page, project.name)).toHaveCount(1);
+      const getResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${project.id}`);
+      expect(getResponse.status()).toBe(200);
+      expect((await getResponse.json()).id).toBe(project.id);
+    } finally {
+      await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`).catch(() => {});
     }
   });
 
   test('should delete project and remove from list', async ({ page, request }) => {
-    // First create a project to delete
-    const projectName = `Delete Test Project ${Date.now()}`;
-    const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
-      data: {
-        name: projectName,
-        description: 'Project to be deleted',
-      },
-    });
+    const project = await createProjectViaApi(request, `Delete Test Project ${Date.now()}`);
+    try {
+      await page.reload();
 
-    // Skip if API server is not available
-    if (!createResponse.ok()) {
-      test.skip();
-      return;
-    }
+      const card = projectCard(page, project.name);
+      await expect(card).toHaveCount(1, { timeout: 10000 });
+      const deleteButton = projectDeleteButton(page, project.name);
+      await expect(deleteButton).toBeVisible();
 
-    // Reload the page to see the new project
-    await page.reload();
-    await page.waitForTimeout(1000);
-
-    // Verify the project appears in the list
-    await expect(page.getByText(projectName)).toBeVisible({ timeout: 5000 });
-
-    // Find the delete button for this specific project
-    const projectRow = page.locator('*').filter({ hasText: projectName }).first();
-    const deleteButton = projectRow.locator('button').filter({ has: page.locator('svg.lucide-trash-2') });
-
-    if (await deleteButton.isVisible()) {
+      const dialog = handleNextDialog(page, 'accept');
+      const deleteRequest = page.waitForResponse(
+        (r) => r.request().method() === 'DELETE' && r.url().endsWith(`/api/v1/projects/${project.id}`),
+      );
       await deleteButton.click();
+      await expectDeleteConfirm(dialog);
+      expect((await deleteRequest).ok()).toBe(true);
 
-      // Confirm deletion
-      await expect(page.getByText(/Are you sure/i)).toBeVisible();
-      await page.getByRole('button', { name: /Delete/i }).last().click();
+      // Removed from the list, also after a reload from the server.
+      await expect(card).toHaveCount(0);
+      await page.reload();
+      await expect(page.getByRole('heading', { name: 'Projects', level: 1 })).toBeVisible();
+      await expect(projectCard(page, project.name)).toHaveCount(0);
 
-      // Wait for deletion to complete
-      await page.waitForTimeout(2000);
-
-      // Verify project is removed from list
-      await expect(page.getByText(projectName)).not.toBeVisible();
+      // And gone from the API.
+      const getResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${project.id}`);
+      expect(getResponse.status()).toBe(404);
+      const listResponse = await request.get(`${API_BASE_URL}/api/v1/projects`);
+      expect(listResponse.ok()).toBe(true);
+      const listed = ((await listResponse.json()) ?? []) as Array<{ id: string }>;
+      expect(listed.map((p) => p.id)).not.toContain(project.id);
+    } finally {
+      await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`).catch(() => {});
     }
   });
 

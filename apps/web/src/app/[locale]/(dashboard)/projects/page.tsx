@@ -115,6 +115,7 @@ export default function ProjectsPage() {
                     <Button
                       variant="destructive"
                       size="sm"
+                      aria-label={t("deleteAriaLabel", { name: project.name })}
                       onClick={() => handleDelete(project.id)}
                     >
                       <Trash2 className="h-4 w-4" />

@@ -231,6 +231,7 @@
     "noProjects": "プロジェクトがありません",
     "noDescription": "説明なし",
     "deleteConfirm": "このプロジェクトを削除しますか？",
+    "deleteAriaLabel": "プロジェクト「{name}」を削除",
     "namePlaceholder": "マイプロジェクト",
     "descriptionPlaceholder": "プロジェクトの説明"
   },
