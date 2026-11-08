@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Mode represents the application deployment mode
@@ -41,6 +43,11 @@ type Config struct {
 	// Mirrors the LLM "disabled provider" degrade shape. (The GHSA advisory
 	// client used for AI-triage grounding is not gated here — see carry-over.)
 	Offline bool
+
+	// NVDReconcileIntervalRaw is SBOMHUB_NVD_RECONCILE_INTERVAL as the operator
+	// spelled it (M58). Read it through NVDReconcileInterval, which applies the
+	// default and refuses an unusable value.
+	NVDReconcileIntervalRaw string
 
 	// Clerk authentication (SaaS mode)
 	ClerkSecretKey     string
@@ -230,6 +237,8 @@ func Load() *Config {
 		JVNURL:  getEnv("SBOMHUB_JVN_URL", ""),
 		OSVURL:  getEnv("SBOMHUB_OSV_URL", ""),
 		Offline: getEnvBool("SBOMHUB_OFFLINE", false),
+
+		NVDReconcileIntervalRaw: getEnv("SBOMHUB_NVD_RECONCILE_INTERVAL", ""),
 
 		// Clerk
 		ClerkSecretKey:     getEnv("CLERK_SECRET_KEY", ""),
@@ -662,4 +671,55 @@ func getEnvBool(key string, defaultValue bool) bool {
 	default:
 		return defaultValue
 	}
+}
+
+// DefaultNVDReconcileInterval is how often the full NVD catalogue re-read runs
+// when SBOMHUB_NVD_RECONCILE_INTERVAL is unset (M58).
+//
+// Monthly, not weekly: one pass is ~300 NVD requests and ~2.4 GB (measured
+// 2026-11-08, see scheduler/cve_reconcile.go), and what it corrects is
+// metadata NVD has NOT changed recently — anything changed recently is already
+// read by the daily delta sync. Weekly would be ~10 GB a month to re-confirm
+// records that by construction are not moving.
+const DefaultNVDReconcileInterval = 30 * 24 * time.Hour
+
+// minNVDReconcileInterval refuses intervals shorter than the delta sync's own
+// day: a pass takes up to an hour without an API key, and re-reading all of
+// NVD more often than the daily feed is a misconfiguration, not a policy.
+const minNVDReconcileInterval = 24 * time.Hour
+
+// NVDReconcileInterval returns the configured re-read interval, 0 when the
+// re-read is disabled, or an error for a value that cannot be used.
+//
+// Accepted: unset (DefaultNVDReconcileInterval); "off", "disabled", "false"
+// or "0" (disabled); a whole number of days ("30d"); or a Go duration
+// ("720h"). Anything else, or anything under 24h, is refused at startup rather
+// than silently replaced by the default — an operator who set a value meant
+// one.
+func (c *Config) NVDReconcileInterval() (time.Duration, error) {
+	v := strings.ToLower(strings.TrimSpace(c.NVDReconcileIntervalRaw))
+	switch v {
+	case "":
+		return DefaultNVDReconcileInterval, nil
+	case "off", "disabled", "false", "0":
+		return 0, nil
+	}
+	var d time.Duration
+	if days, ok := strings.CutSuffix(v, "d"); ok {
+		n, err := strconv.Atoi(days)
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("SBOMHUB_NVD_RECONCILE_INTERVAL=%q: want a whole number of days like \"30d\", a duration like \"720h\", or \"off\"", c.NVDReconcileIntervalRaw)
+		}
+		d = time.Duration(n) * 24 * time.Hour
+	} else {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			return 0, fmt.Errorf("SBOMHUB_NVD_RECONCILE_INTERVAL=%q: want a whole number of days like \"30d\", a duration like \"720h\", or \"off\"", c.NVDReconcileIntervalRaw)
+		}
+		d = parsed
+	}
+	if d < minNVDReconcileInterval {
+		return 0, fmt.Errorf("SBOMHUB_NVD_RECONCILE_INTERVAL=%q is shorter than 24h; use \"off\" to disable the re-read", c.NVDReconcileIntervalRaw)
+	}
+	return d, nil
 }

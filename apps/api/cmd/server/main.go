@@ -503,6 +503,13 @@ func main() {
 		slog.Error("Configuration validation failed", "error", err)
 		os.Exit(1)
 	}
+	// M58: refuse an unusable re-read interval before anything is wired,
+	// rather than replacing it with the default the operator did not choose.
+	nvdReconcileInterval, err := cfg.NVDReconcileInterval()
+	if err != nil {
+		slog.Error("Refusing to start", "error", err)
+		os.Exit(1)
+	}
 
 	// SECURITY (P0 #2 / Trust Rescue 9.1.1): Migrations and runtime use
 	// distinct DB roles. We open a short-lived migrator connection here, run
@@ -2191,9 +2198,15 @@ func main() {
 	// CVE sync job - runs daily to fetch new/updated CVEs and match against components.
 	// tenantRepo is required for the per-tenant matching loop against RLS-bound
 	// `components` (codex-r4 P1).
-	cveSyncJob := scheduler.NewCVESyncJob(db, tenantRepo, cfg.NVDAPIKey, 24*time.Hour, advisoryExcerptsRepo, cfg.NVDURL, cfg.Offline).WithOSVBaseURL(cfg.OSVURL)
+	cveSyncJob := scheduler.NewCVESyncJob(db, tenantRepo, cfg.NVDAPIKey, 24*time.Hour, advisoryExcerptsRepo, cfg.NVDURL, cfg.Offline).
+		WithOSVBaseURL(cfg.OSVURL).
+		WithCatalogueReconcile(nvdReconcileInterval)
 	go cveSyncJob.Start(ctx)
-	slog.Info("CVE sync job started", "interval", "24h")
+	reconcileDesc := "off"
+	if nvdReconcileInterval > 0 {
+		reconcileDesc = nvdReconcileInterval.String()
+	}
+	slog.Info("CVE sync job started", "interval", "24h", "full_catalogue_reread_interval", reconcileDesc)
 
 	// EPSS sync job - runs daily to sync FIRST.org EPSS scores (M36-B / F433).
 	// Populates the epss_score/percentile/updated_at columns migration 055

@@ -309,6 +309,13 @@ type CVESyncJob struct {
 	// than a branch inside each fetch, so the delta fetch and the full
 	// re-read pace from one value and tests can shorten it).
 	pageDelay time.Duration
+	// reconcileInterval enables the full catalogue re-read (M58,
+	// cve_reconcile.go); zero disables it. reconcileEpoch and reconcileBudget
+	// default to cveReconcileEpoch / cveReconcileTickBudget when zero and
+	// exist so tests can shrink a pass.
+	reconcileInterval time.Duration
+	reconcileEpoch    time.Time
+	reconcileBudget   time.Duration
 }
 
 // NewCVESyncJob creates a new CVE sync job.
@@ -383,12 +390,20 @@ func (j *CVESyncJob) Start(ctx context.Context) {
 	if err := j.Run(ctx); err != nil {
 		slog.Error("CVE sync failed on startup", "error", err)
 	}
+	// The full re-read (M58) runs in THIS goroutine, after the delta read, so
+	// the two never hold NVD requests in flight at the same time.
+	if err := j.reconcileIfDue(ctx); err != nil {
+		slog.Error("CVE catalogue re-read failed", "error", err)
+	}
 
 	for {
 		select {
 		case <-ticker.C:
 			if err := j.Run(ctx); err != nil {
 				slog.Error("CVE sync failed", "error", err)
+			}
+			if err := j.reconcileIfDue(ctx); err != nil {
+				slog.Error("CVE catalogue re-read failed", "error", err)
 			}
 		case <-ctx.Done():
 			slog.Info("CVE sync job stopped")
@@ -663,7 +678,7 @@ type CVEInfo struct {
 // reason other than the clock.
 func (j *CVESyncJob) fetchModifiedCVEs(ctx context.Context, since time.Time) ([]CVEInfo, error) {
 	var allCVEs []CVEInfo
-	err := j.walkModifiedWindow(ctx, since, time.Now(), func(page []CVEInfo) error {
+	err := j.walkModifiedWindow(ctx, since, time.Now(), j.pageDelay, func(page []CVEInfo) error {
 		allCVEs = append(allCVEs, page...)
 		return nil
 	})
@@ -674,7 +689,7 @@ func (j *CVESyncJob) fetchModifiedCVEs(ctx context.Context, since time.Time) ([]
 }
 
 // walkModifiedWindow pages through NVD's records modified in [start, end],
-// handing each page to fn as soon as it is read, pausing j.pageDelay between
+// handing each page to fn as soon as it is read, pausing `delay` between
 // requests. It stops at the first error from NVD, from page validation, or
 // from fn.
 //
@@ -694,7 +709,7 @@ func (j *CVESyncJob) fetchModifiedCVEs(ctx context.Context, since time.Time) ([]
 // complete. It is logged; what it can cost is a record shifted past the
 // cursor, which is re-offered by a later read (see cveSyncReplayOverlap and
 // reconcileCatalogue).
-func (j *CVESyncJob) walkModifiedWindow(ctx context.Context, start, end time.Time, fn func([]CVEInfo) error) error {
+func (j *CVESyncJob) walkModifiedWindow(ctx context.Context, start, end time.Time, delay time.Duration, fn func([]CVEInfo) error) error {
 	startIndex := 0
 	firstTotal := -1
 	for {
@@ -721,7 +736,7 @@ func (j *CVESyncJob) walkModifiedWindow(ctx context.Context, start, end time.Tim
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(j.pageDelay):
+		case <-time.After(delay):
 		}
 	}
 }
