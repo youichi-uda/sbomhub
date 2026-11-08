@@ -378,11 +378,14 @@ func cpeCandidates(cpes []string, compVersion, purl string) []cpeCandidate {
 		v, update, updateNA := strings.TrimSpace(compVersion), "", false
 		if cpeConcrete(n.Version) {
 			v = n.Version
-			if cpeConcrete(n.Update) {
-				update = n.Update
-			}
-			updateNA = n.Update == "-"
 		}
+		// The update attribute is the SBOM's assertion whatever the version
+		// attribute says: "widget:*:beta" + component version 2.0 is 2.0 +
+		// beta (Codex M60 R15 High).
+		if cpeConcrete(n.Update) {
+			update = n.Update
+		}
+		updateNA = n.Update == "-"
 		raw := v
 		v = normaliseCPEVersion(v, distro)
 		if !cpeConcrete(v) {
@@ -572,6 +575,11 @@ func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
 		}
 	}
 	if !hasBound {
+		if crit.Update == "-" && c.update != "" {
+			// "*:-" is every FINAL release; it does not prove anything about
+			// a candidate pinning an update (Codex M60 R15 Medium).
+			return cpeUndecidable
+		}
 		return cpeMatched // all versions: no comparison involved
 	}
 	if !c.plain() {
