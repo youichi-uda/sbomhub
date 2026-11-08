@@ -80,9 +80,11 @@ jobs:
         uses: pnpm/action-setup@v4
         with:
           # Pinned to match root package.json `packageManager` (M8 #67
-          # F154). pnpm 11.x corepack-installs on node:20-alpine and
-          # blows up with `ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite`,
-          # so the whole workspace stays on the pnpm 10.x line.
+          # F154). pnpm 11.x corepack-installed on the former
+          # node:20-alpine web image and blew up with
+          # `ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite`; the image is now
+          # node:22-alpine, but the workspace stays on pnpm 10.x until a
+          # deliberate pnpm 11 upgrade.
           version: 10.34.3
 
       - name: Set up Node.js

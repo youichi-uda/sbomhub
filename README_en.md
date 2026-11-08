@@ -164,7 +164,7 @@ Under the hood, the CLI auto-detects Syft, Trivy, or cdxgen. See
 
 ### From source
 
-**Prerequisites:** Go 1.22+ / Node.js 20+ / pnpm / PostgreSQL 15+ / Redis 7+
+**Prerequisites:** Go 1.26+ / Node.js 22.18+ / pnpm / PostgreSQL 15+ / Redis 7+
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d postgres redis

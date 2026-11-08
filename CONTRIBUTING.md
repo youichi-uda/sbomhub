@@ -11,7 +11,7 @@ SBOMHub is an AGPL-3.0 **AI compliance evidence layer** built on top of Dependen
 ### Prerequisites
 
 - Go 1.22+
-- Node.js 20+
+- Node.js 22.18+
 - pnpm 9+
 - Docker & Docker Compose
 - PostgreSQL 15+ (or use Docker)
@@ -205,7 +205,7 @@ SBOMHub は AGPL-3.0 の OSS で、CRA (EU Cyber Resilience Act 2026/9) 対応�
 ### 必要条件
 
 - Go 1.22+
-- Node.js 20+
+- Node.js 22.18+
 - pnpm 9+
 - Docker & Docker Compose
 - PostgreSQL 15+（またはDocker使用）

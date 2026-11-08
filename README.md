@@ -180,7 +180,7 @@ CLI は内部で Syft / Trivy / cdxgen のいずれかを自動検出して呼�
 
 ### ソースからビルド
 
-**前提条件:** Go 1.22+ / Node.js 20+ / pnpm / PostgreSQL 15+ / Redis 7+
+**前提条件:** Go 1.26+ / Node.js 22.18+ / pnpm / PostgreSQL 15+ / Redis 7+
 
 ```bash
 # データベースを起動

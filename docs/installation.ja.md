@@ -97,7 +97,7 @@ cd sbomhub
 ### 前提条件
 
 - Go 1.22+
-- Node.js 20+
+- Node.js 22.18+
 - pnpm 8+
 - PostgreSQL 15+
 - Redis 7+
