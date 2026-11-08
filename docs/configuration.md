@@ -29,6 +29,16 @@ SBOMHub can be configured through environment variables.
 
 Why a required declaration rather than an inferred mode: a Clerk deployment whose secret store injects nothing at all is byte-for-byte identical to a self-hosted one — no Clerk key, no webhook secret, no billing key — so there is nothing left to contradict, and any durable "anonymous is fine" artefact from an earlier phase would authorise serving with no authentication. Refusing such an artefact only when a Clerk key is present does not close that, because it says nothing about a first boot, a crash-loop, or a rollout where the key never arrived. A declaration lives in the deployment manifest rather than the secret store, so it survives the injection failure and turns it into a refusal to boot. Staleness then fails in the safe direction: a stale `clerk` is a boot failure, and no state a Clerk deployment can carry permits anonymous mode. Keep the declaration outside the secret store for that reason. The boolean `SBOMHUB_ALLOW_ANONYMOUS_AUTH` used by intermediate drafts of this guard was removed rather than kept as an alias; setting it is itself refused at startup, with a message pointing at `SBOMHUB_AUTH_MODE=anonymous`.
 
+### Client IP and Reverse Proxies
+
+The client IP is used for per-IP rate-limit buckets and recorded in the audit log (`audit_logs.ip_address`, MCP audit, CRA submission records) and in security log lines.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SBOMHUB_TRUSTED_PROXIES` | (empty) | Comma- or space-separated IP addresses and CIDRs of **your own** reverse-proxy hops. Empty: the TCP peer address is the client IP and `X-Forwarded-For` / `X-Real-IP` are ignored. Set: `X-Forwarded-For` is honoured only for hops that arrive from a listed address; loopback, link-local and private networks are **not** trusted implicitly. `X-Real-IP` is never used. A malformed entry refuses startup. The mode in effect is logged at startup. |
+
+If the API sits behind nginx, Traefik, a load balancer or a PaaS router and this is left empty, every client shares the proxy's address — one rate-limit bucket for everyone, and the proxy's IP in every audit record. Prefer exact proxy addresses over ranges: every host inside a listed range can make the API believe any client IP it likes. Have the outermost proxy overwrite (not append to) any client-supplied `X-Forwarded-For`. See [UPGRADE.md §10](./UPGRADE.md) for why this changed.
+
 ### NVD Integration
 
 | Variable | Default | Description |

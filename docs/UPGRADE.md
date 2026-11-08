@@ -1391,3 +1391,67 @@ scheme by naming a component `v2:...`.)
   had written.
 - **Components above the budget stay truncated** — `linux` and similar retrieve
   996 (NVD) / 500 (JVN) records and say so.
+
+## 10. Client IP behind a reverse proxy: set `SBOMHUB_TRUSTED_PROXIES` (echo v4.16.3)
+
+**Who must act:** anyone running the API behind nginx, Traefik, a load
+balancer, or a PaaS router (Railway, Render, Fly, …). A directly exposed API
+needs no change.
+
+### 10.1 What changed
+
+echo v4.16.3 fixes GHSA-246p-cpwv-v3jq / GHSA-99jh-6h7p-pp36. Before it, when no
+IP extractor was configured, `c.RealIP()` took the client IP from
+`X-Forwarded-For` / `X-Real-IP` **from any caller** — so any client could pick
+the IP recorded in the audit log and pick its own per-IP rate-limit bucket.
+From this release the client IP is the TCP peer address unless you name the
+proxies you trust.
+
+### 10.2 What you see if you do nothing
+
+Behind a proxy, every request appears to come from the proxy:
+
+- all clients share **one** per-IP rate-limit bucket (one noisy client can
+  throttle everybody);
+- every audit-log row, MCP audit row and CRA submission record carries the
+  proxy's IP.
+
+At startup the API logs which mode it is in, and in the direct mode it says to
+set `SBOMHUB_TRUSTED_PROXIES` if you are behind a proxy.
+
+### 10.3 What to do
+
+Add your proxy's address to `.env`:
+
+```bash
+# nginx on the same host
+SBOMHUB_TRUSTED_PROXIES=127.0.0.1,::1
+# a reverse-proxy container with a fixed address
+SBOMHUB_TRUSTED_PROXIES=172.18.0.10
+```
+
+- Prefer exact addresses. Every host inside a listed CIDR can make the API
+  believe any client IP. Use a range only for a network from which nothing but
+  the proxy can reach the API.
+- Loopback, link-local and private networks are **not** trusted implicitly —
+  only what you list.
+- `X-Real-IP` is never used; configure the proxy to send `X-Forwarded-For`, and
+  have the outermost proxy overwrite (not append to) any client-supplied value.
+- A malformed entry refuses startup rather than silently trusting nothing.
+
+`docker compose` passes the variable through from `.env` (`env_file`); no
+compose edit is needed. See [configuration.md](./configuration.md#client-ip-and-reverse-proxies).
+
+### 10.4 Other operator-visible dependency changes in the same release
+
+- **CycloneDX 1.7 uploads now parse.** The previous `cyclonedx-go` rejected
+  `specVersion: "1.7"` although format detection accepted it, so such uploads
+  failed.
+- **`lib/pq` 1.12 requires PostgreSQL 14+.** The bundled compose uses 15; check
+  an external database if you bring your own.
+- **Go toolchain go1.26.10** for the API image and the CLI (17–19 reachable
+  standard-library advisories fixed). Building the CLI from source now needs Go
+  1.26+.
+- **Next.js 16.4.5 / `@clerk/nextjs` 6.39.8** in the web image (unauthenticated
+  RCE in the image-optimisation API and a Clerk middleware route-protection
+  bypass were fixed upstream). Pull the new images.
