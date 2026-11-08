@@ -75,11 +75,15 @@ type ScanScope struct {
 	TenantID uuid.UUID
 }
 
-// WithScanScope returns ctx carrying the tenant scope scanners need. It also
-// strips any transaction ctx carries, so a scan started from inside a request
-// transaction cannot inherit it.
+// WithScanScope returns ctx carrying the tenant scope scanners need.
+//
+// It deliberately does NOT strip a transaction ctx carries (Codex M62 R1
+// Medium): stripping the marker would not end the transaction — the caller
+// would still be holding it open while the scanner talks to NVD — it would
+// only hide it from the ErrScanInTransaction check. A caller must leave its
+// transaction before building the scan context.
 func WithScanScope(ctx context.Context, db *sql.DB, tenantID uuid.UUID) context.Context {
-	return context.WithValue(database.WithoutTx(ctx), scanScopeKey{}, ScanScope{DB: db, TenantID: tenantID})
+	return context.WithValue(ctx, scanScopeKey{}, ScanScope{DB: db, TenantID: tenantID})
 }
 
 // CheckScanScope reports whether ctx is one a scanner accepts: a tenant scope
@@ -110,8 +114,21 @@ func scanScopeFrom(ctx context.Context) (ScanScope, error) {
 	return s, nil
 }
 
-// readTx runs fn in a short tenant transaction.
+// readTx runs fn in a short tenant transaction. If the scan's deadline (or
+// another cancellation) is what failed it, the error says so (Codex M62 R1
+// High): a read cut off by the deadline is reported as deadline_exceeded, not
+// as a generic scan error.
 func (s ScanScope) readTx(ctx context.Context, fn func(txCtx context.Context) error) error {
+	err := s.readTxRaw(ctx, fn)
+	if err != nil {
+		if cause := scanInterruption(ctx); cause != nil {
+			return fmt.Errorf("%w: %w", cause, err)
+		}
+	}
+	return err
+}
+
+func (s ScanScope) readTxRaw(ctx context.Context, fn func(txCtx context.Context) error) error {
 	return database.WithTxFunc(ctx, s.DB, func(txCtx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(txCtx, `SELECT set_config('app.current_tenant_id', $1, true)`, s.TenantID.String()); err != nil {
 			return fmt.Errorf("set tenant context: %w", err)

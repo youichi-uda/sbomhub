@@ -482,16 +482,17 @@ func (s *NVDService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 // non-nil — the counts are what the error is derived FROM, so discarding them
 // on failure would hide the most interesting cases.
 func (s *NVDService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.UUID) (NVDScanReport, error) {
-	if s.offline {
-		slog.Info("scan skipped: offline mode", "source", "nvd")
-		return NVDScanReport{}, nil
-	}
-
 	// M62: no transaction may be open while this sweep talks to NVD. The
 	// scope check refuses a tx-bearing context outright; see scan_scope.go.
+	// It runs before the offline short-circuit so the contract does not
+	// depend on the mode (Codex M62 R1 Low).
 	scope, err := scanScopeFrom(ctx)
 	if err != nil {
 		return NVDScanReport{}, err
+	}
+	if s.offline {
+		slog.Info("scan skipped: offline mode", "source", "nvd")
+		return NVDScanReport{}, nil
 	}
 
 	// Phase 1 — read, in a short tenant transaction.
@@ -587,8 +588,9 @@ func (s *NVDService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.U
 // # Interruption (M62)
 //
 // When ctx ends — the scan deadline or a cancellation — workers stop taking
-// items, an in-flight lookup returns what it may keep (a CPE or keyword walk
-// cut off by the DEADLINE keeps its validated pages as a truncated answer;
+// items, an in-flight lookup returns what it may keep (a CPE walk — not a
+// keyword walk — cut off by the DEADLINE keeps its validated pages as a
+// truncated answer;
 // see partialWalk) or an error, and the items never answered are counted in
 // Unscanned rather than FetchFailures: they did not fail, they were not
 // tried. Before M62 an interrupted sweep returned nil — "completed" — for the
@@ -669,6 +671,14 @@ func (s *NVDService) fetchComponents(ctx context.Context, components map[nvdComp
 					continue
 				}
 
+				if lookup.partialFailure && scanDeadlineFired(ctx) {
+					// The deadline cut this walk short. Every item may still
+					// have answered (Unscanned == 0), so this is what makes
+					// the report say the deadline fired (Codex M62 R1 High).
+					mu.Lock()
+					report.DeadlineExceeded = true
+					mu.Unlock()
+				}
 				if lookup.truncated {
 					// Per-component, at WARN, with the numbers: an operator
 					// reading only the aggregate cannot tell WHICH component's
@@ -733,6 +743,12 @@ func (s *NVDService) fetchComponents(ctx context.Context, components map[nvdComp
 			report.Cancelled = true
 		}
 	}
+	// What the deadline does NOT cover: the write phase (phase 3) runs on a
+	// detached context so that what was fetched in time is committed. A sweep
+	// that fetched everything before the deadline but whose write finished
+	// after it (e.g. waiting on the per-SBOM lock) is complete, and is
+	// reported complete: "failed" means the results are incomplete (UPGRADE
+	// §9.3), and these are not. The write is bounded by scanWriteTimeout.
 	return report
 }
 
@@ -807,8 +823,9 @@ func (r NVDScanReport) incompleteErr() error {
 			r.RefusedWrites, ErrScanWriteRefused))
 	}
 	if r.DeadlineExceeded {
-		errs = append(errs, fmt.Errorf("nvd: %d of %d component(s) were never looked up before the scan deadline; "+
-			"scan results are incomplete: %w", r.Unscanned, r.UniqueComponents, ErrScanDeadlineExceeded))
+		errs = append(errs, fmt.Errorf("nvd: the scan deadline fired with %d of %d component(s) never looked up "+
+			"(and any walk it cut short reported truncated); scan results are incomplete: %w",
+			r.Unscanned, r.UniqueComponents, ErrScanDeadlineExceeded))
 	}
 	if r.Cancelled {
 		errs = append(errs, fmt.Errorf("nvd: the scan was cancelled with %d of %d component(s) never looked up; "+

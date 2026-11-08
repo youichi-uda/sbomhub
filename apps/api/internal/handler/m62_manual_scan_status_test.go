@@ -131,3 +131,39 @@ func TestM62ScanStatusResponse_ReasonsAreAdditive(t *testing.T) {
 		t.Errorf("a failed status lacks `reasons`: %s", b)
 	}
 }
+
+// Codex M62 R1 High-2: two scans of one SBOM overlap. The FIRST one finishing
+// (completed) must not report "completed" while the second is still running.
+func TestM62ManualScan_SupersededRunDoesNotReportCompleted(t *testing.T) {
+	tracker := service.NewScanTracker()
+	first := &m62BlockingScanner{release: make(chan struct{})}
+	second := &m62BlockingScanner{release: make(chan struct{}),
+		err: fmt.Errorf("nvd: 1 of 2 component lookup(s) failed: %w", service.ErrScanFetchFailed)}
+	id := uuid.New()
+
+	genA := tracker.Begin(id)
+	doneA := make(chan struct{})
+	go func() {
+		defer close(doneA)
+		(&VulnerabilityHandler{nvdService: first}).WithScanTracking(tracker, time.Minute).
+			runScanRun(context.Background(), id, uuid.New(), "nvd", genA)
+	}()
+	genB := tracker.Begin(id)
+	doneB := make(chan struct{})
+	go func() {
+		defer close(doneB)
+		(&VulnerabilityHandler{nvdService: second}).WithScanTracking(tracker, time.Minute).
+			runScanRun(context.Background(), id, uuid.New(), "nvd", genB)
+	}()
+
+	close(first.release)
+	<-doneA
+	if st, _ := tracker.Get(id); st != service.ScanStateRunning {
+		t.Fatalf("after the superseded scan finished, state = %s, want running (the current scan is still going)", st)
+	}
+	close(second.release)
+	<-doneB
+	if st, _, reasons := tracker.GetDetail(id); st != service.ScanStateFailed || len(reasons) != 1 {
+		t.Errorf("current scan's outcome = %s %v, want failed [fetch_failed]", st, reasons)
+	}
+}

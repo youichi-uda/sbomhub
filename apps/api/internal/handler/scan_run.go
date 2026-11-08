@@ -108,14 +108,22 @@ func runSBOMScan(ctx context.Context, db *sql.DB, tenantID, sbomID uuid.UUID, de
 	return out
 }
 
-// recordScanOutcome moves the tracker to the scan's terminal state.
-func recordScanOutcome(tracker *service.ScanTracker, sbomID uuid.UUID, o scanOutcome) {
+// beginScanRun starts a tracked run (0 without a tracker).
+func beginScanRun(tracker *service.ScanTracker, sbomID uuid.UUID) uint64 {
+	if tracker == nil {
+		return 0
+	}
+	return tracker.Begin(sbomID)
+}
+
+// recordScanOutcome moves the tracker to run gen's terminal state, unless a
+// later run of the same SBOM has started since (then that run reports).
+func recordScanOutcome(tracker *service.ScanTracker, sbomID uuid.UUID, gen uint64, o scanOutcome) {
 	if tracker == nil {
 		return
 	}
-	if o.failed() {
-		tracker.MarkFailedWithReasons(sbomID, o.message(), o.reasons)
-		return
+	if !tracker.Finish(sbomID, gen, o.reasons, o.message()) {
+		slog.Info("scan: outcome not recorded; a newer scan of the same SBOM is current",
+			"sbom_id", sbomID, "failed", o.failed())
 	}
-	tracker.MarkCompleted(sbomID)
 }

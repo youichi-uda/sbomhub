@@ -225,3 +225,48 @@ func m62AddComponent(t *testing.T, migDB *sql.DB, seed m47Seed, name string) uui
 	}
 	return id
 }
+
+// Codex M62 R1 High-1, the decided half: the deadline bounds FETCHING. A scan
+// that fetched everything in time but whose write waited on the per-SBOM lock
+// past the deadline has complete, durable results and is reported completed
+// (failed means "incomplete", UPGRADE §9.3). Pinned so the choice is explicit.
+func TestM62Scan_WriteWaitingPastTheDeadlineIsStillComplete(t *testing.T) {
+	appURL, migURL := m46b1HandlerEnv(t)
+	migDB := m46b1OpenOrSkip(t, migURL)
+	appDB := m46b1OpenOrSkip(t, appURL)
+
+	seed := m47SeedAll(t, migDB, "m62latewrite")
+	cve := m62CVE(t, migDB)
+	_, srv := newM62NVD(t, map[string]string{"libm47": cve})
+	nvd := service.NewNVDService(repository.NewVulnerabilityRepository(appDB),
+		repository.NewComponentRepository(appDB), "m62-fake-api-key", srv.URL, false)
+
+	holder, err := migDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.Exec(`SELECT pg_advisory_xact_lock($1)`, service.ScanLockKey(seed.sbomID)); err != nil {
+		t.Fatal(err)
+	}
+	tracker := service.NewScanTracker()
+	h := (&SbomHandler{db: appDB, nvdService: nvd, scanTracker: tracker}).WithScanDeadline(1500 * time.Millisecond)
+	done := make(chan struct{})
+	go func() { defer close(done); h.runScan(context.Background(), seed.sbomID, seed.tenantID) }()
+
+	time.Sleep(3 * time.Second) // well past the deadline, write still blocked
+	if err := holder.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("scan did not finish after the lock was released")
+	}
+	if n := m62LinkCount(t, migDB, seed.componentID, cve); n != 1 {
+		t.Errorf("link = %d, want 1 (fetched in time, committed after the lock)", n)
+	}
+	if st, msg := tracker.Get(seed.sbomID); st != service.ScanStateCompleted {
+		t.Errorf("state = %s (%q), want completed: every component was fetched before the deadline and written", st, msg)
+	}
+}

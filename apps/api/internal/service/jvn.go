@@ -409,14 +409,13 @@ func (s *JVNService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID) (JVNScanReport, error) {
 	var rep JVNScanReport
 
-	if s.offline {
-		slog.Info("scan skipped: offline mode", "source", "jvn")
-		return rep, nil
-	}
-
 	scope, err := scanScopeFrom(ctx)
 	if err != nil {
 		return rep, err
+	}
+	if s.offline {
+		slog.Info("scan skipped: offline mode", "source", "jvn")
+		return rep, nil
 	}
 
 	var components []model.Component

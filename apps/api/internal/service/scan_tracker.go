@@ -42,6 +42,10 @@ type ScanTracker struct {
 	mu        sync.RWMutex
 	entries   map[uuid.UUID]scanEntry
 	retention time.Duration
+	// nextGen numbers runs (M62, Codex R1 High): every Begin / MarkRunning
+	// starts a new run of its SBOM, and Finish records an outcome only for
+	// the run that is still the current one.
+	nextGen uint64
 }
 
 type scanEntry struct {
@@ -49,6 +53,7 @@ type scanEntry struct {
 	updatedAt time.Time
 	errMsg    string
 	reasons   []string
+	gen       uint64
 }
 
 // NewScanTracker creates an in-memory tracker. Entries older than 1 hour
@@ -76,19 +81,52 @@ func NewScanTrackerFor(scanDeadline time.Duration) *ScanTracker {
 // MarkRunning records that a background scan has been launched for the
 // given sbom. Call this synchronously before spawning the goroutine so
 // that a CLI client polling immediately after upload sees "running"
-// rather than "unknown".
+// rather than "unknown". It starts a new run; prefer Begin, which also
+// returns the run's generation for Finish.
 func (t *ScanTracker) MarkRunning(sbomID uuid.UUID) {
+	t.Begin(sbomID)
+}
+
+// Begin starts a new run of the sbom's scan, marks it running, and returns the
+// run's generation. Only the run that is current when it finishes can record
+// its outcome (Finish): if a second scan of the same SBOM starts while the
+// first is still running (an upload scan and a manual one), the first one's
+// completion must not report "completed" while the second is still fetching
+// — a poller would read the counts as final (Codex M62 R1 High).
+func (t *ScanTracker) Begin(sbomID uuid.UUID) uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.entries[sbomID] = scanEntry{state: ScanStateRunning, updatedAt: time.Now()}
+	t.nextGen++
+	t.entries[sbomID] = scanEntry{state: ScanStateRunning, updatedAt: time.Now(), gen: t.nextGen}
+	return t.nextGen
+}
+
+// Finish records run gen's outcome — completed when reasons is empty and
+// errMsg is "", failed otherwise — if gen is still the sbom's current run.
+// It reports whether the outcome was recorded.
+func (t *ScanTracker) Finish(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	cur, ok := t.entries[sbomID]
+	if ok && cur.gen != gen {
+		return false
+	}
+	e := scanEntry{state: ScanStateCompleted, updatedAt: time.Now(), gen: gen}
+	if errMsg != "" || len(reasons) > 0 {
+		e.state = ScanStateFailed
+		e.errMsg = errMsg
+		e.reasons = append([]string(nil), reasons...)
+	}
+	t.entries[sbomID] = e
+	return true
 }
 
 // MarkCompleted records that all background scans for the sbom finished
-// without error.
+// without error. It applies to whichever run is current (pre-M62 callers).
 func (t *ScanTracker) MarkCompleted(sbomID uuid.UUID) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.entries[sbomID] = scanEntry{state: ScanStateCompleted, updatedAt: time.Now()}
+	t.entries[sbomID] = scanEntry{state: ScanStateCompleted, updatedAt: time.Now(), gen: t.entries[sbomID].gen}
 }
 
 // MarkFailed records that at least one background scan for the sbom
@@ -96,9 +134,7 @@ func (t *ScanTracker) MarkCompleted(sbomID uuid.UUID) {
 // the upload succeeded, but scan results are incomplete; they exit with
 // code 2 rather than 1, matching --wait-timeout behaviour.
 func (t *ScanTracker) MarkFailed(sbomID uuid.UUID, errMsg string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.entries[sbomID] = scanEntry{state: ScanStateFailed, updatedAt: time.Now(), errMsg: errMsg}
+	t.MarkFailedWithReasons(sbomID, errMsg, nil)
 }
 
 // MarkFailedWithReasons is MarkFailed with the scan's reason codes
@@ -107,18 +143,25 @@ func (t *ScanTracker) MarkFailedWithReasons(sbomID uuid.UUID, errMsg string, rea
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.entries[sbomID] = scanEntry{state: ScanStateFailed, updatedAt: time.Now(), errMsg: errMsg,
-		reasons: append([]string(nil), reasons...)}
+		reasons: append([]string(nil), reasons...), gen: t.entries[sbomID].gen}
 }
 
-// GetDetail is Get plus the failed scan's reason codes.
+// GetDetail is Get plus the failed scan's reason codes, read atomically.
 func (t *ScanTracker) GetDetail(sbomID uuid.UUID) (ScanState, string, []string) {
-	state, msg := t.Get(sbomID)
-	if state != ScanStateFailed {
-		return state, msg, nil
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry, ok := t.entries[sbomID]
+	if !ok {
+		return ScanStateUnknown, "", nil
 	}
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return state, msg, append([]string(nil), t.entries[sbomID].reasons...)
+	if time.Since(entry.updatedAt) > t.retention {
+		delete(t.entries, sbomID)
+		return ScanStateUnknown, "", nil
+	}
+	if entry.state != ScanStateFailed {
+		return entry.state, entry.errMsg, nil
+	}
+	return entry.state, entry.errMsg, append([]string(nil), entry.reasons...)
 }
 
 // Get returns the current state of the scan and, when failed, the error

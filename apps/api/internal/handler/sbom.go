@@ -259,13 +259,18 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 	// retention and is acceptable because the sbom_id itself was never
 	// persisted — a client polling for it is asking about a row that does
 	// not exist.
+	//
+	// M62: Begin returns this run's generation; only the run that is still
+	// current when it finishes records its outcome (a manual scan of the same
+	// SBOM started meanwhile supersedes it — Codex M62 R1 High).
+	var gen uint64
 	if h.scanTracker != nil {
-		h.scanTracker.MarkRunning(sbom.ID)
+		gen = h.scanTracker.Begin(sbom.ID)
 	}
 	scanSbomID := sbom.ID
 	scanProjectID := projectID
 	appmw.RegisterPostCommit(c, func() {
-		h.startBackgroundScan(scanSbomID, tenantID, scanProjectID)
+		h.startBackgroundScan(scanSbomID, tenantID, scanProjectID, gen)
 	})
 
 	return c.JSON(http.StatusCreated, sbom)
@@ -291,7 +296,7 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 // desynchronised lib/pq and lost the whole sweep (0 of 800 rows, 2026-08-05)
 // until M54 serialised them. That transaction stayed open for every NVD/JVN
 // request of the sweep. M62 removed it: see service/scan_scope.go.
-func (h *SbomHandler) startBackgroundScan(sbomID, tenantID, projectID uuid.UUID) {
+func (h *SbomHandler) startBackgroundScan(sbomID, tenantID, projectID uuid.UUID, gen uint64) {
 	go func() {
 		ctx := context.Background()
 		// Vuln scan first — the diff webhook auto-trigger downstream
@@ -300,7 +305,7 @@ func (h *SbomHandler) startBackgroundScan(sbomID, tenantID, projectID uuid.UUID)
 		// evaluation. Running the scan first means a webhook that
 		// fires on "new critical vulns >= 1" sees the just-scanned
 		// rows rather than a stale snapshot.
-		h.runScan(ctx, sbomID, tenantID)
+		h.runScanRun(ctx, sbomID, tenantID, gen)
 
 		// M12-4 (#85): auto-fire diff webhook on ingest. nil guard
 		// preserves the M11-4 behaviour for deployments that have
@@ -579,11 +584,16 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 // step twice, not once), and one refused statement costs only its own work
 // item, not the sweep.
 func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
+	h.runScanRun(ctx, sbomID, tenantID, beginScanRun(h.scanTracker, sbomID))
+}
+
+// runScanRun is runScan for a run already begun (gen from ScanTracker.Begin).
+func (h *SbomHandler) runScanRun(ctx context.Context, sbomID, tenantID uuid.UUID, gen uint64) {
 	out := runSBOMScan(ctx, h.db, tenantID, sbomID, h.scanDeadline, []scanStep{
 		{source: "nvd", scanner: h.nvdService, okMsg: "Auto NVD scan completed"},
 		{source: "jvn", scanner: h.jvnService, okMsg: "Auto JVN scan completed"},
 	})
-	recordScanOutcome(h.scanTracker, sbomID, out)
+	recordScanOutcome(h.scanTracker, sbomID, gen, out)
 }
 
 func (h *SbomHandler) Get(c echo.Context) error {
