@@ -1707,7 +1707,7 @@ OSV for Maven/npm/Go, openssl.org's 1.1.1 advisory list for OpenSSL):
 | openssl 1.1.1k-1 (deb) | 49 | 0 | 313 (44) | 313 nvd_cpe_unverified³ |
 | glibc 2.31 | 26¹ | 3 (0) | 26 (26) | 26 nvd_cpe |
 | libc6 2.31-13 (deb) | 26¹ | 0 | 0 | keyword fallback |
-| linux kernel 5.10.46 | 7,059² | 0 | 493, **truncated** | 492 nvd_cpe + 1 unverified |
+| linux kernel 5.10.46 | 7,059² | 0 | 6,552, complete | 6,550 nvd_cpe + 2 unverified |
 
 ¹ NVD's own configurations — not an independent source. ² NVD's count; not
 verified independently. ³ `1.1.1k-1` is not a plain version, so no version
@@ -1749,12 +1749,16 @@ replaced.
   otherwise, and a known product whose exact version has no CVE costs 1 plus
   its product walk. Maven packages where Syft guesses `apache:log4j-core` first
   cost up to 5.
-  The fixture above took 37 NVD requests for 13 components on a cold cache (14
-  before: one keyword walk each, two pages for one of them) and 9 on the next scan (24-hour cache; "unknown product" answers are
-  cached too; truncated answers and answers holding an `nvd_cpe_unverified` CVE
-  are not — here the kernel's 5 pages, openssl's 2, and the other answers
-  holding an unverified CVE). Without an NVD API key
-  that is ~6 s per request.
+  The fixture above (measured 2026-11-08, no API key) took **68 NVD requests and
+  14 min 24 s** for 13 components on a cold cache — the kernel's 36 pages
+  dominate, and NVD itself took 15-36 s to answer each deep kernel page — and
+  **40 requests / 4 min 54 s** on the next scan. The 24-hour cache holds
+  verified answers and "unknown product" answers, but not truncated answers or
+  answers holding an `nvd_cpe_unverified` CVE; here that is the kernel (36
+  pages, 2 unverified CVEs) and openssl (2 pages), re-fetched on every scan.
+  Before M60 the same SBOM cost 14 requests (one keyword walk each, two pages
+  for one of them). Without an NVD API key the limiter allows one request per
+  6 s.
 - **Truncation and the CPE page budget.** The keyword path keeps its budget of
   5 pages / 996 records. The CPE path has its own, larger budget of **60 pages
   / 11,941 records**, sized for a full Linux kernel: NVD lists 7,059 CVEs for
@@ -1766,9 +1770,13 @@ replaced.
   the same rate limiter as every other request, so NVD's published rate limit
   is respected however many pages a component needs. A full kernel costs ~36
   requests: **about 3.6 minutes without an NVD API key** (6 s per request) or
-  ~25 s with one. The worst case, a 60-page answer, is 6 minutes / 42 s. Each
-  page is a single request under the 30-second client timeout (a 200-record
-  kernel page measured 2.0 s, 2 MB). There is no overall scan deadline (this
+  ~25 s with one, plus NVD's own response time: deep kernel pages took 15-36 s
+  each in the measurement above. The worst case, a 60-page answer, is 6 minutes
+  / 42 s of pacing plus NVD's time. The per-request client timeout was raised
+  from 30 s to **60 s** because one kernel page took 35.8 s at NVD; if a page
+  still fails partway through a CPE walk, the pages already verified are kept
+  and the component is reported truncated (the scan reports failed) rather
+  than losing every finding. There is no overall scan deadline (this
   predates M60), and the scan's database transaction stays open for the whole
   sweep, so a kernel lengthens it by that much. A complete answer is cached for
   24 h unless it holds an `nvd_cpe_unverified` CVE; truncated answers never are.
