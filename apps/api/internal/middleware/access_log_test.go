@@ -145,12 +145,24 @@ func TestAccessLog_PublicLinkTokenRedacted(t *testing.T) {
 		{"double slash", "//api/v1/public/" + tok, "//api/v1/public/[REDACTED]", "", 404},
 		{"upper case", "/API/V1/PUBLIC/" + tok, "/API/V1/PUBLIC/[REDACTED]", "", 404},
 		{"encoded slash", "/api/v1/public/ab%2F" + tok, "", "", 0},
+		// Codex R2 High: a double-encoded separator keeps the literal prefix
+		// out of the decoded URL.Path; it must fail closed.
+		{"double-encoded separator", "/api/v1/public%252F" + tok, "/api/v1/public[REDACTED]", "", 404},
+		// Prefix visible only after more decoding: whole path replaced.
+		{"double-encoded everywhere", "/api%252Fv1%252Fpublic%252F" + tok, "[REDACTED]", "", 404},
+		{"triple-encoded", "/api/v1/public%25252F" + tok, "/api/v1/public[REDACTED]", "", 404},
+		// Codex R2 High: invalid UTF-8 before the prefix made strings.ToLower
+		// grow the string, so its index cut the original past the prefix.
+		{"invalid utf8 before prefix", "/%FF%FF%FF%FF%FF%FF%FF%FF/API/v1/public/" + tok, "", "", 404},
+		{"no separator after prefix", "/api/v1/public" + tok, "/api/v1/public[REDACTED]", "", 404},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e, buf, _ := accessLogServer(t)
 			got, rec := serveAndDecode(t, e, buf, httptest.NewRequest(http.MethodGet, tc.target, nil))
-			if strings.Contains(buf.String(), tok) {
+			// Any 8-byte piece of the token counts as a leak (a shifted
+			// cut can leak a partial token).
+			if strings.Contains(buf.String(), tok[:8]) {
 				t.Fatalf("public-link token leaked: %s", buf.String())
 			}
 			if tc.wantURI != "" && got["uri"] != tc.wantURI {

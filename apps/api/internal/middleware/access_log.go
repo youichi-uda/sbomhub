@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -117,9 +118,11 @@ var accessLogSecretParams = map[string]bool{
 }
 
 // accessLogSecretPrefixes are lower-case path prefixes whose remainder holds a
-// bearer secret whether or not the request matched a route.
+// bearer secret whether or not the request matched a route. No trailing "/":
+// a token glued to the prefix is redacted too (over-redacting an unrelated
+// "/api/v1/publication..." path is the fail-closed side).
 var accessLogSecretPrefixes = []string{
-	"/api/v1/public/",
+	"/api/v1/public",
 }
 
 const accessLogRedacted = "[REDACTED]"
@@ -148,21 +151,69 @@ func accessLogPath(c echo.Context) string {
 		}
 	}
 
-	out := strings.Join(segs, "/")
+	return redactSecretPrefixes(strings.Join(segs, "/"))
+}
 
-	// Prefix redaction: everything after a secret prefix goes, wherever the
-	// prefix appears and in any letter case. This covers a request that
-	// matched no route (a 404 on a mistyped public-link URL still carries the
-	// real token), a "//api/..." path, and a token containing an encoded "/"
-	// (URL.Path is decoded, so it would otherwise span two segments). The
-	// matched route template is logged separately in `route`, so nothing an
-	// operator needs is lost.
-	lower := strings.ToLower(out)
-	for _, prefix := range accessLogSecretPrefixes {
-		if i := strings.Index(lower, prefix); i >= 0 && len(out) > i+len(prefix) {
-			out = out[:i+len(prefix)] + accessLogRedacted
-			lower = strings.ToLower(out)
+// redactSecretPrefixes removes everything after a secret prefix, wherever it
+// appears and in any ASCII letter case. This covers a request that matched no
+// route (a 404 on a mistyped public-link URL still carries the real token), a
+// "//api/..." path, a token directly glued to the prefix, and a token
+// containing an encoded "/" (URL.Path is decoded once, so it would otherwise
+// span two segments). The matched route template is logged separately in
+// `route`, so nothing an operator needs is lost.
+//
+// Case folding is ASCII-only and byte-for-byte, so an index found in the
+// folded copy is valid in the original (strings.ToLower is not: it turns each
+// invalid UTF-8 byte into a 3-byte U+FFFD and shifted the cut into the token).
+//
+// It fails closed: when the prefix shows up only after further
+// percent-decoding (a double-encoded "%252F" separator survives URL.Path's
+// single decode), the whole path is replaced, because there is no reliable
+// offset to cut at.
+func redactSecretPrefixes(p string) string {
+	if i, ok := indexSecretPrefix(p); ok {
+		if i < len(p) {
+			if p[i] == '/' {
+				return p[:i+1] + accessLogRedacted
+			}
+			return p[:i] + accessLogRedacted
+		}
+		return p
+	}
+	d := p
+	for n := 0; n < 8 && strings.Contains(d, "%"); n++ {
+		u, err := url.PathUnescape(d)
+		if err != nil || u == d {
+			break
+		}
+		d = u
+		if _, ok := indexSecretPrefix(d); ok {
+			return accessLogRedacted
 		}
 	}
-	return out
+	return p
+}
+
+// indexSecretPrefix returns the offset just past the first secret prefix in p
+// (ASCII case-insensitive), and whether one was found.
+func indexSecretPrefix(p string) (int, bool) {
+	lower := asciiLower(p)
+	for _, prefix := range accessLogSecretPrefixes {
+		if i := strings.Index(lower, prefix); i >= 0 {
+			return i + len(prefix), true
+		}
+	}
+	return 0, false
+}
+
+// asciiLower lower-cases ASCII letters only, keeping every other byte (and so
+// every offset) unchanged.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
 }
