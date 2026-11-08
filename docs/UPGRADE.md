@@ -1994,3 +1994,57 @@ Reason codes: `deadline_exceeded`, `cancelled`, `fetch_failed`, `truncated`,
   - 5xx requests are logged at ERROR, everything else at INFO. `method`,
     `status`, `latency` (ns), `latency_human`, `remote_ip`, `host`,
     `user_agent`, `bytes_in`, `bytes_out` keep their names and types.
+
+## 17. Safer 5xx log, SBOM version checks, Redis timeouts, migration lock (M64)
+
+**Who must act:** anyone who parses the `"http 5xx error"` log line; anyone who uploads CycloneDX without `specVersion` or SPDX with a non-standard `spdxVersion`; operators running more than one API replica (no action, but read §17.4).
+
+### 17.1 The `"http 5xx error"` log line carries no error text
+
+The server's 5xx record used to include `detail` (the HTTP error message) and `internal` (the wrapped error) verbatim. Error text can carry credentials: a DSN with its password, an outbound URL with a token, and `*url.Error`, which repeats the whole URL. The line now mirrors the access log (§16):
+
+- `error` is a classification: `http_error code=<status>` plus the internal error's Go type chain (`internal=*fmt.wrapError > *url.Error > *net.OpError`), or the type chain alone for a plain error.
+- `message_error` (only when the HTTP error's message is itself an error) is that error's type chain.
+- `method`, `route` (the route template, replacing `path`, which already held the template), `status`, `request_id` (when the request carried `X-Request-ID`).
+- `detail` and `internal` are gone. The level is now ERROR (was WARN).
+- A plain (non-HTTP) handler error, which echo answers with 500, is now logged too. It wasn't logged here before.
+
+To debug a 5xx, match `request_id` / `route` with the access log. Handlers that need the error text must log it themselves, scrubbed.
+
+### 17.2 Unsupported SBOM spec versions are refused with 400
+
+The SBOM spec version is now checked when the format is detected, before anything is stored:
+
+- CycloneDX: `bomFormat` must be exactly `"CycloneDX"`. `specVersion` must be a version that the bundled cyclonedx-go supports and that has a JSON format, currently 1.2–1.7. If it is missing, not a string, unknown (e.g. `"1.8"`) or one of the XML-only versions 1.0 / 1.1, the upload gets a 400.
+- SPDX 2: `spdxVersion` must be `SPDX-2.0` … `SPDX-2.3`. A bare `"2.3"` and `"SPDX-3.0"` are now refused. Before, `"SPDX-3.0"` was sent to the SPDX 3 parser and silently produced zero components. `packages`, when present, must be an array of objects. `null`, a number or a non-object entry used to be stored as an SBOM with zero components.
+- SPDX 3: `@context` must start with `https://spdx.org/rdf/3` (or `http://`), and its release segment must be `3.0` or `3.0.1`. Before, `3.0.2` was labelled `3.0`.
+- CycloneDX `components`, when present, must be an array of objects, and every top-level component must have a `name`, as the schema requires. `null`, `[null]` and nameless components used to be stored as empty components. Nested component trees are still not read.
+- Components are now parsed before the SBOM row is written. An upload that fails parsing therefore leaves nothing stored. Before, the row could be inserted ahead of the 400.
+
+The 400 message names the field, the value sent and the accepted versions, e.g. `failed to parse SBOM: unsupported SBOM spec version: CycloneDX specVersion "1.8" (supported: 1.2, 1.3, 1.4, 1.5, 1.6, 1.7)`. The CLI upload path returns the same text after `failed to detect SBOM format:`. Syft, Trivy and cdxgen output is unaffected.
+
+### 17.3 Redis client timeouts
+
+The API now sets explicit go-redis timeouts unless `REDIS_URL` sets them: `dial_timeout=3s`, `read_timeout=2s`, `write_timeout=2s`, `pool_timeout=3s`. These were go-redis's implicit 5s / 5s / 5s / 6s. A query parameter in `REDIS_URL` still wins. Automatic command retries are now off: go-redis's default of 3 retries could replay an `INCR` or rate-limit script whose reply was lost, charging one request several times. `max_retries` in the URL overrides this. Call sites now also bound every operation: rate-limit bookkeeping 3s, NVD cache 1s per round trip, startup ping 5s. Before, the API-key limiter used the request context, which has no deadline, and the public-link limiter's 3s deadline was ignored for socket I/O.
+
+When Redis is down or hung:
+
+- API-key rate limiting answers 500.
+- Public-link rate limiting answers 503.
+- The NVD cache counts as a miss.
+- Startup fails within ~5s.
+
+The API-key rate limiter now charges its per-window bucket and sets the bucket's TTL in one Lua script. Before, these were two calls, and a lost `EXPIRE` left the counter without a TTL.
+
+### 17.4 Migrations take an advisory lock
+
+The startup auto-migration and `cmd/migrate up|down|status` now hold a session-level PostgreSQL advisory lock for the whole run. Replicas that boot together against one database therefore migrate one after another. Before, two replicas on an empty database failed with `duplicate key value violates unique constraint "pg_type_typname_nsp_index"`.
+
+A waiting migrator logs `waiting for migration lock held by another migrator` every 10s with the holder's pid / application / client address. The whole acquisition is bounded by that wait: getting a database connection, each poll, and a grant that arrives after the deadline is handed back. After 10 minutes it gives up with `migration lock: another migrator (...) still held it after 10m0s`. The process then exits and the orchestrator restarts it. The migrator role needs no new privileges: advisory locks need none.
+
+### 17.5 Web: react-query data loading (Clerk mode only)
+
+Web pages now load their data through react-query. Self-hosted deployments
+see no difference. In Clerk mode, switching organisation now shows a brief
+"Loading..." screen and reloads the dashboard. Before, the previous
+organisation's data could stay on screen until the next fetch.
