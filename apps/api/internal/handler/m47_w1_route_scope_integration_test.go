@@ -539,31 +539,35 @@ type m47RecordingScanner struct {
 func (s *m47RecordingScanner) ScanComponents(ctx context.Context, sbomID uuid.UUID) error {
 	defer close(s.done)
 	s.sbomID = sbomID
-	tx, ok := database.TxFromContext(ctx)
-	if !ok {
-		// This IS the pre-fix state: context.Background() carries no tx, so
-		// every statement below would run on a pooled connection with no
-		// app.current_tenant_id bound.
-		s.scanErr = fmt.Errorf("scan ctx carries no transaction (tenant GUC cannot be bound)")
+	// M62: the scan goroutine no longer hands scanners a transaction; it
+	// hands them the tenant scope, and each scanner reads through a short
+	// tenant transaction of its own. Observe through exactly that path.
+	if _, ok := database.TxFromContext(ctx); ok {
+		s.scanErr = fmt.Errorf("scan ctx carries a transaction; M62 scanners must not run inside one")
 		return s.scanErr
 	}
-	var q database.Queryable = tx
-	var guc sql.NullString
-	if err := q.QueryRowContext(ctx, `SELECT current_setting('app.current_tenant_id', true)`).Scan(&guc); err != nil {
-		s.scanErr = err
-		return err
+	scope, err := service.ScanScopeFrom(ctx)
+	if err != nil {
+		// The pre-M47 state in M62 terms: no tenant to bind, so RLS would
+		// silently filter every component row.
+		s.scanErr = fmt.Errorf("scan ctx carries no tenant scope: %w", err)
+		return s.scanErr
 	}
-	if guc.Valid {
-		s.guc = guc.String
-	}
-	// The load-bearing observation: can the scanner actually SEE the
-	// components it is supposed to scan?
-	if err := q.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM components WHERE sbom_id = $1`, sbomID).Scan(&s.components); err != nil {
-		s.scanErr = err
-		return err
-	}
-	return nil
+	s.scanErr = scope.ReadTx(ctx, func(txCtx context.Context) error {
+		tx, _ := database.TxFromContext(txCtx)
+		var guc sql.NullString
+		if err := tx.QueryRowContext(txCtx, `SELECT current_setting('app.current_tenant_id', true)`).Scan(&guc); err != nil {
+			return err
+		}
+		if guc.Valid {
+			s.guc = guc.String
+		}
+		// The load-bearing observation: can the scanner actually SEE the
+		// components it is supposed to scan?
+		return tx.QueryRowContext(txCtx,
+			`SELECT COUNT(*) FROM components WHERE sbom_id = $1`, sbomID).Scan(&s.components)
+	})
+	return s.scanErr
 }
 
 // TestM47W1Scan_SiblingProjectSbomIsRejected: pre-fix `?sbom_id=` was parsed
@@ -672,7 +676,7 @@ func TestM47W1Scan_InProjectSbomRunsWithTenantBound(t *testing.T) {
 		t.Fatalf("scanner observation failed: %v", scanner.scanErr)
 	}
 	if scanner.guc != seed.tenantID.String() {
-		t.Errorf("app.current_tenant_id inside the scan tx = %q, want %q "+
+		t.Errorf("app.current_tenant_id inside the scanner's read tx = %q, want %q "+
 			"(context.Background() leaves it unset, which makes RLS filter every component)",
 			scanner.guc, seed.tenantID)
 	}

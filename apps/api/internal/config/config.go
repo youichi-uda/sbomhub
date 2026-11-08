@@ -50,6 +50,10 @@ type Config struct {
 	// default and refuses an unusable value.
 	NVDReconcileIntervalRaw string
 
+	// ScanDeadlineRaw is SBOMHUB_SCAN_DEADLINE as the operator spelled it
+	// (M62). Read it through ScanDeadline.
+	ScanDeadlineRaw string
+
 	// Clerk authentication (SaaS mode)
 	ClerkSecretKey     string
 	ClerkWebhookSecret string
@@ -240,6 +244,7 @@ func Load() *Config {
 		Offline: getEnvBool("SBOMHUB_OFFLINE", false),
 
 		NVDReconcileIntervalRaw: getEnv("SBOMHUB_NVD_RECONCILE_INTERVAL", ""),
+		ScanDeadlineRaw:         getEnv("SBOMHUB_SCAN_DEADLINE", ""),
 
 		// Clerk
 		ClerkSecretKey:     getEnv("CLERK_SECRET_KEY", ""),
@@ -724,6 +729,55 @@ func (c *Config) NVDReconcileInterval() (time.Duration, error) {
 	}
 	if d < minNVDReconcileInterval {
 		return 0, fmt.Errorf("SBOMHUB_NVD_RECONCILE_INTERVAL=%q is shorter than 24h; use \"off\" to disable the re-read", c.NVDReconcileIntervalRaw)
+	}
+	return d, nil
+}
+
+// DefaultScanDeadline is the overall deadline of one SBOM vulnerability scan
+// (NVD + JVN) when SBOMHUB_SCAN_DEADLINE is unset (M62). It equals
+// service.DefaultScanDeadline.
+//
+// Why 30 minutes: the slowest scan measured is a cold scan, without an NVD
+// API key, of an SBOM holding a Linux kernel — 68 NVD requests in 14 min 24 s
+// (M60, live NVD, 2026-11-08), the kernel's 36 CPE pages dominating at 15-36 s
+// of NVD response time each on top of the 6 s/request keyless rate limit.
+// 30 minutes is 2.1x that, and leaves the 60-page CPE worst case (6 min of
+// pacing plus NVD's time) and a JVN sweep room. Without a key a scan pays 6 s
+// per NVD request, so fewer than 300 requests fit; at 1 request per keyword
+// component and typically 1-5 per CPE component, an SBOM beyond roughly
+// 100-250 distinct components does not fit and is reported failed with
+// reason deadline_exceeded, its verified findings committed — set NVD_API_KEY
+// (0.7 s per request) or raise this value.
+const DefaultScanDeadline = 30 * time.Minute
+
+const (
+	minScanDeadline = time.Minute
+	// maxScanDeadline: a scan longer than a day would overlap the next daily
+	// scheduled scan of the same tenant.
+	maxScanDeadline = 24 * time.Hour
+)
+
+// ScanDeadline returns the configured overall scan deadline. An empty value
+// is DefaultScanDeadline; anything that is not a Go duration between 1m and
+// 24h is an error, and the API refuses to start on it. There is no "off": an
+// unbounded scan is exactly what this setting exists to prevent.
+func (c *Config) ScanDeadline() (time.Duration, error) {
+	v := strings.ToLower(strings.TrimSpace(c.ScanDeadlineRaw))
+	switch v {
+	case "":
+		return DefaultScanDeadline, nil
+	case "off", "disabled", "false", "0", "none":
+		return 0, fmt.Errorf("SBOMHUB_SCAN_DEADLINE=%q: the scan deadline cannot be disabled; set a duration such as \"45m\"", c.ScanDeadlineRaw)
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("SBOMHUB_SCAN_DEADLINE=%q: want a duration such as \"30m\" or \"1h\"", c.ScanDeadlineRaw)
+	}
+	if d < minScanDeadline {
+		return 0, fmt.Errorf("SBOMHUB_SCAN_DEADLINE=%q: must be at least 1m", c.ScanDeadlineRaw)
+	}
+	if d > maxScanDeadline {
+		return 0, fmt.Errorf("SBOMHUB_SCAN_DEADLINE=%q: must be at most 24h", c.ScanDeadlineRaw)
 	}
 	return d, nil
 }

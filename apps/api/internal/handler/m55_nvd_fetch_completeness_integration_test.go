@@ -28,14 +28,14 @@
 //	  -> mcp-server                                    => counts_final: false
 //
 // and the second test measures the deliberate NON-escalation next to it, so
-// the two cannot drift apart unnoticed.
+// the two cannot drift apart unnoticed. (M62 escalated the partial case too.)
 package handler
 
 import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -47,7 +47,6 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
@@ -283,7 +282,8 @@ func TestM55NVDTruncatedResultSetIsReportedToTheCaller(t *testing.T) {
 }
 
 // TestM55NVDPartialFetchFailureIsCountedNotSwallowed pins the OTHER half of
-// this wave, and it is deliberately an assertion that the scan still succeeds.
+// this wave, and it was deliberately an assertion that the scan still
+// succeeds. M62 reversed that policy (see the assertion below).
 //
 // Some components answered and some did not. How many may fail before a scan
 // is worthless is a threshold, i.e. a product decision, and this wave does not
@@ -361,9 +361,14 @@ func TestM55NVDPartialFetchFailureIsCountedNotSwallowed(t *testing.T) {
 	}()
 	logs := logged.String()
 
-	if scanErr != nil {
-		t.Fatalf("a PARTIAL fetch failure must not fail the scan (that needs a threshold, "+
-			"which is a product decision this wave does not take): %v", scanErr)
+	// M62 took the decision M55 deferred: a PARTIAL fetch failure fails the
+	// scan (threshold zero, as for truncation), and still commits what the
+	// lookups that answered found.
+	if !errors.Is(scanErr, service.ErrScanFetchFailed) {
+		t.Fatalf("a PARTIAL fetch failure must fail the scan with ErrScanFetchFailed (M62), got %v", scanErr)
+	}
+	if n := m62LinkCount(t, migDB, seed.componentID, okID); n != 1 {
+		t.Errorf("the answered component's link = %d, want 1: a failed sibling must not discard it", n)
 	}
 	if report.FetchFailures != 1 {
 		t.Errorf("report.FetchFailures = %d, want 1 — the count is the whole point: a policy "+
@@ -390,10 +395,12 @@ func TestM55NVDPartialFetchFailureIsCountedNotSwallowed(t *testing.T) {
 	}
 }
 
-// m55ScanInTenantTx runs one sweep the way every production caller does: inside
-// a transaction with app.current_tenant_id bound, because `components` FORCEs
-// row-level security and an unbound connection reads zero rows — which would
-// make this test vacuously green with UniqueComponents = 0.
+// m55ScanInTenantTx runs one sweep the way every production caller does. Up
+// to M61 that meant inside a transaction with app.current_tenant_id bound;
+// since M62 it means with the tenant SCOPE and no transaction (the scanner
+// opens its own short ones and refuses a context carrying one). The name is
+// kept for the callers. Without the tenant, `components` FORCE RLS would read
+// zero rows and the test would be vacuously green with UniqueComponents = 0.
 func m55ScanInTenantTx(
 	t *testing.T,
 	appDB *sql.DB,
@@ -401,24 +408,8 @@ func m55ScanInTenantTx(
 	seed m47Seed,
 ) (service.NVDScanReport, error) {
 	t.Helper()
-	var report service.NVDScanReport
-	var scanErr error
-	txErr := database.WithTxFunc(context.Background(), appDB,
-		func(txCtx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(txCtx,
-				`SELECT set_config('app.current_tenant_id', $1, true)`,
-				seed.tenantID.String()); err != nil {
-				return fmt.Errorf("set tenant context: %w", err)
-			}
-			report, scanErr = nvd.ScanComponentsWithReport(txCtx, seed.sbomID)
-			// nil so the sweep's writes still commit, exactly as
-			// SbomHandler.runScan does.
-			return nil
-		})
-	if txErr != nil {
-		t.Fatalf("tenant tx: %v", txErr)
-	}
-	return report, scanErr
+	ctx := service.WithScanScope(context.Background(), appDB, seed.tenantID)
+	return nvd.ScanComponentsWithReport(ctx, seed.sbomID)
 }
 
 // m55Tail keeps a failure message readable when the scan logged a lot.

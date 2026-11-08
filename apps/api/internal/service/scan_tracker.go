@@ -48,6 +48,7 @@ type scanEntry struct {
 	state     ScanState
 	updatedAt time.Time
 	errMsg    string
+	reasons   []string
 }
 
 // NewScanTracker creates an in-memory tracker. Entries older than 1 hour
@@ -58,6 +59,18 @@ func NewScanTracker() *ScanTracker {
 		entries:   make(map[uuid.UUID]scanEntry),
 		retention: 1 * time.Hour,
 	}
+}
+
+// NewScanTrackerFor is NewScanTracker sized for a scan deadline (M62): a
+// running entry must not be evicted while its scan can still be running, or
+// a scan longer than the retention would read "unknown" and never reach a
+// terminal state for the CLI. Retention is max(1h, deadline + 15m).
+func NewScanTrackerFor(scanDeadline time.Duration) *ScanTracker {
+	t := NewScanTracker()
+	if r := scanDeadline + 15*time.Minute; r > t.retention {
+		t.retention = r
+	}
+	return t
 }
 
 // MarkRunning records that a background scan has been launched for the
@@ -86,6 +99,26 @@ func (t *ScanTracker) MarkFailed(sbomID uuid.UUID, errMsg string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.entries[sbomID] = scanEntry{state: ScanStateFailed, updatedAt: time.Now(), errMsg: errMsg}
+}
+
+// MarkFailedWithReasons is MarkFailed with the scan's reason codes
+// (service.ScanReason*), exposed as `reasons` on the scan-status response.
+func (t *ScanTracker) MarkFailedWithReasons(sbomID uuid.UUID, errMsg string, reasons []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.entries[sbomID] = scanEntry{state: ScanStateFailed, updatedAt: time.Now(), errMsg: errMsg,
+		reasons: append([]string(nil), reasons...)}
+}
+
+// GetDetail is Get plus the failed scan's reason codes.
+func (t *ScanTracker) GetDetail(sbomID uuid.UUID) (ScanState, string, []string) {
+	state, msg := t.Get(sbomID)
+	if state != ScanStateFailed {
+		return state, msg, nil
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return state, msg, append([]string(nil), t.entries[sbomID].reasons...)
 }
 
 // Get returns the current state of the scan and, when failed, the error

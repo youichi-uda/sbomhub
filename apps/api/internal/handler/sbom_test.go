@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service"
@@ -103,11 +105,8 @@ func TestRunScan_NVDFailureMarksFailed(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectBegin()
-	mock.ExpectExec(`SELECT set_config\('app.current_tenant_id'`).
-		WithArgs(sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
+	// M62: runScan opens no transaction; each scanner opens its own short
+	// ones. sqlmock with no expectations proves nothing was begun here.
 
 	nvd := &stubScanner{err: errors.New("nvd timeout")}
 	tracker := service.NewScanTracker()
@@ -158,11 +157,8 @@ func TestRunScan_JVNFailureMarksFailed(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectBegin()
-	mock.ExpectExec(`SELECT set_config\('app.current_tenant_id'`).
-		WithArgs(sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
+	// M62: runScan opens no transaction; each scanner opens its own short
+	// ones. sqlmock with no expectations proves nothing was begun here.
 
 	jvn := &stubScanner{err: errors.New("jvn 503")}
 	tracker := service.NewScanTracker()
@@ -198,17 +194,14 @@ func TestRunScan_JVNFailureMarksFailed(t *testing.T) {
 // the tracker error string mentions both — the operator needs to see every
 // failure, not just the first, to diagnose a wider outage.
 func TestRunScan_BothFailuresAggregated(t *testing.T) {
-	db, mock, err := sqlmock.New()
+	db, _, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer db.Close()
 
-	mock.ExpectBegin()
-	mock.ExpectExec(`SELECT set_config\('app.current_tenant_id'`).
-		WithArgs(sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
+	// M62: runScan opens no transaction; each scanner opens its own short
+	// ones. sqlmock with no expectations proves nothing was begun here.
 
 	nvd := &stubScanner{err: errors.New("nvd boom")}
 	jvn := &stubScanner{err: errors.New("jvn boom")}
@@ -249,11 +242,8 @@ func TestRunScan_SuccessMarksCompleted(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectBegin()
-	mock.ExpectExec(`SELECT set_config\('app.current_tenant_id'`).
-		WithArgs(sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
+	// M62: runScan opens no transaction; each scanner opens its own short
+	// ones. sqlmock with no expectations proves nothing was begun here.
 
 	nvd := &stubScanner{}
 	jvn := &stubScanner{}
@@ -279,44 +269,92 @@ func TestRunScan_SuccessMarksCompleted(t *testing.T) {
 	}
 }
 
-// TestRunScan_TxBeginFailureMarksFailed verifies that a tx-level failure
-// (begin / set_config / commit) is also surfaced via MarkFailed instead of
-// silently leaving the tracker in "running" forever. Without this branch,
-// a transient DB hiccup at scan kickoff would block the CLI poller until
-// --wait-timeout fired.
-func TestRunScan_TxBeginFailureMarksFailed(t *testing.T) {
+// TestRunScan_M62_NoTransactionScopeAndDeadline pins the M62 contract of the
+// upload path: runScan opens no transaction, and every scanner receives a
+// context with the tenant scope, a deadline, and NO transaction.
+func TestRunScan_M62_NoTransactionScopeAndDeadline(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer db.Close()
 
-	mock.ExpectBegin().WillReturnError(errors.New("db down"))
-
+	probe := &m62ProbeScanner{}
 	tracker := service.NewScanTracker()
-	h := &SbomHandler{
-		nvdService:  &stubScanner{},
-		jvnService:  &stubScanner{},
-		scanTracker: tracker,
-		db:          db,
-	}
+	h := (&SbomHandler{nvdService: probe, scanTracker: tracker, db: db}).WithScanDeadline(7 * time.Minute)
 
 	sbomID := uuid.New()
 	tracker.MarkRunning(sbomID)
 	h.runScan(context.Background(), sbomID, uuid.New())
 
-	state, errMsg := tracker.Get(sbomID)
-	if state != service.ScanStateFailed {
-		t.Fatalf("tracker state = %q, want %q", state, service.ScanStateFailed)
+	if probe.sawTx {
+		t.Errorf("the scanner was handed a transaction")
 	}
-	// F445: the "tx:" label stays so ops knows it was a tx-level failure, but
-	// the raw DB error ("db down") must not be stored in ScanStatus.Error.
-	if !contains(errMsg, "tx: scan failed") {
-		t.Fatalf("tracker errMsg = %q, want generic 'tx: scan failed'", errMsg)
+	if !probe.hasDeadline || probe.deadlineIn > 7*time.Minute || probe.deadlineIn < 6*time.Minute {
+		t.Errorf("deadline present=%v in=%s, want ~7m", probe.hasDeadline, probe.deadlineIn)
 	}
-	if contains(errMsg, "db down") {
-		t.Fatalf("tracker errMsg = %q leaked the raw tx error 'db down'", errMsg)
+	if probe.scopeErr != nil {
+		t.Errorf("the scanner's context carries no usable scan scope: %v", probe.scopeErr)
 	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+	if st, _ := tracker.Get(sbomID); st != service.ScanStateCompleted {
+		t.Errorf("state = %s, want completed", st)
+	}
+}
+
+// A scanner that hits the deadline is reported failed with reason
+// deadline_exceeded, and a scanner whose turn comes after the deadline is not
+// started at all.
+func TestRunScan_M62_DeadlineIsReportedAndLaterScannersSkipped(t *testing.T) {
+	nvd := &m62DeadlineScanner{}
+	jvn := &stubScanner{}
+	tracker := service.NewScanTracker()
+	h := (&SbomHandler{nvdService: nvd, jvnService: jvn, scanTracker: tracker}).WithScanDeadline(50 * time.Millisecond)
+
+	sbomID := uuid.New()
+	tracker.MarkRunning(sbomID)
+	h.runScan(context.Background(), sbomID, uuid.New())
+
+	st, msg, reasons := tracker.GetDetail(sbomID)
+	if st != service.ScanStateFailed {
+		t.Fatalf("state = %s, want failed", st)
+	}
+	if jvn.called != 0 {
+		t.Errorf("JVN was started after the deadline had fired")
+	}
+	if !contains(msg, "nvd: scan failed (deadline_exceeded)") || !contains(msg, "jvn: scan failed (deadline_exceeded)") {
+		t.Errorf("message %q does not name the deadline for both scanners", msg)
+	}
+	if len(reasons) != 1 || reasons[0] != service.ScanReasonDeadlineExceeded {
+		t.Errorf("reasons = %v, want [deadline_exceeded]", reasons)
+	}
+}
+
+type m62ProbeScanner struct {
+	sawTx       bool
+	hasDeadline bool
+	deadlineIn  time.Duration
+	scopeErr    error
+}
+
+func (p *m62ProbeScanner) ScanComponents(ctx context.Context, _ uuid.UUID) error {
+	_, p.sawTx = database.TxFromContext(ctx)
+	var dl time.Time
+	dl, p.hasDeadline = ctx.Deadline()
+	p.deadlineIn = time.Until(dl)
+	p.scopeErr = service.CheckScanScope(ctx)
+	return nil
+}
+
+// m62DeadlineScanner blocks until the scan deadline fires, then reports it
+// the way the real scanners do.
+type m62DeadlineScanner struct{}
+
+func (m62DeadlineScanner) ScanComponents(ctx context.Context, _ uuid.UUID) error {
+	<-ctx.Done()
+	return fmt.Errorf("nvd: interrupted: %w", context.Cause(ctx))
 }
 
 // ----------------------------------------------------------------------------

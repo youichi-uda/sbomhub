@@ -653,12 +653,11 @@ func TestM55ScanReport_EscalationLadder(t *testing.T) {
 			"paging budget",
 		},
 		{
-			// Deliberately NOT escalated: the threshold is a product decision
-			// and this wave does not take it. The count must still be present
-			// on the report — see the partial-failure observability test.
-			"partial fetch failure stays a success",
+			// M55 left this a success pending a threshold decision; M62
+			// escalates it (threshold zero, as for truncation).
+			"partial fetch failure fails the scan (M62)",
 			NVDScanReport{UniqueComponents: 10, Processed: 7, FetchFailures: 3},
-			"",
+			"3 of 10 component lookup(s) failed",
 		},
 	}
 	for _, tc := range cases {

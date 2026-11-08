@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -126,6 +127,16 @@ type SbomHandler struct {
 	diffSvc     diffComputer
 	webhookSvc  webhookFirer
 	auditWriter auditLogger
+
+	// scanDeadline is the overall deadline of one post-upload scan
+	// (SBOMHUB_SCAN_DEADLINE, M62); 0 means service.DefaultScanDeadline.
+	scanDeadline time.Duration
+}
+
+// WithScanDeadline sets the overall scan deadline (M62).
+func (h *SbomHandler) WithScanDeadline(d time.Duration) *SbomHandler {
+	h.scanDeadline = d
+	return h
 }
 
 // NewSbomHandler wires the handler with the services it needs.
@@ -266,58 +277,20 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 //
 // The goroutine outlives the request that started it, so it CANNOT borrow
 // the request's TenantTx (already committed/rolled back by the time the
-// goroutine starts working). Instead it opens its own transaction via
-// database.WithTxFunc and binds `app.current_tenant_id` to that tx with
-// `set_config(..., true)` (the same pattern as the TenantTx middleware).
-// Without this, the inner `ComponentRepository.ListBySbom` call — which is
-// tx-aware via database.Querier and protected by FORCE ROW LEVEL SECURITY
-// — would see no tenant GUC and the RLS predicate
-// `tenant_id = current_setting('app.current_tenant_id', true)::UUID` would
-// either reject the cast (NULL → UUID) or evaluate to false, returning 0
-// components. The vulnerability scan would then "complete" with 0 findings
-// and `sbomhub scan --fail-on critical` would always exit 0 — Codex R1
-// production blocker.
+// goroutine starts working). Since M62 it opens no transaction of its own
+// either: runScan hands the scanners the tenant scope
+// (service.WithScanScope), and each scanner binds `app.current_tenant_id` in
+// its own short transactions. Without the tenant GUC, the component read —
+// protected by FORCE ROW LEVEL SECURITY — would return 0 components and the
+// scan would "complete" with 0 findings (Codex R1 production blocker); the
+// scanners refuse a context without the scope rather than run that way.
 //
-// Concurrency (corrected M54 — the previous text here was false in a way
-// that mattered). This used to claim the NVD worker pool touches the
-// global `vulnerabilities` / `component_vulnerabilities` tables "via the
-// raw `*sql.DB`, not the tx — so they do not contend on the single tx
-// connection", and that the tx "stays effectively idle for most of the
-// scan". Neither half was true. The repositories resolve their Queryable
-// with database.Querier(ctx, r.db), runScan below hands the scanners the
-// ctx WithTxFunc created, and that ctx carries the *sql.Tx: every write
-// the pool makes goes through this transaction, on its one connection.
-// The same correction was applied to VulnerabilityHandler.runScan in M50
-// (0090c7b); this copy of the claim was missed then.
-//
-// The contention the old text denied was real and it was destructive.
-// Up to maxConcurrentWithKey (5) workers ran concurrently against that one
-// *sql.Tx whenever NVD_API_KEY was set; *sql.Tx is not safe for concurrent
-// use, and two workers overlapping desynchronised the lib/pq wire protocol
-// (`pq: unexpected Parse response`), poisoned the connection
-// (`driver: bad connection`), failed the commit, and discarded EVERY row
-// the sweep had written — measured at 0 of 800 rows on PostgreSQL 15,
-// 2026-08-05. NVDService.processComponentsParallel now serialises the
-// pool's database section behind a mutex, so the workers do contend, but
-// they contend correctly and the cost is invisible next to the 700ms
-// rate-limiter tick each work item already waits for.
-//
-// What remains true: the tx pins one pooled connection for the scan's
-// duration, and that is an acknowledged trade-off (see ※要確認 in
-// completion report). Moving the pool's writes off the transaction
-// entirely (database.WithoutTx) would relieve that too and is a real
-// option, but it trades this route's all-or-nothing durability for
-// partial durability and was deliberately NOT taken in M54 — see the
-// commit note on processComponentsParallel.
-//
-// M57 moved exactly one write off it: the catalogue INSERT
-// (VulnerabilityRepository.Create), which is global rather than this
-// tenant's, and which — inside this transaction — was invisible to the
-// catalogue's owner for the whole scan and aborted the scan when refused. It
-// writes on a separate small pool (database.ConnectCatalogue) so that a scan
-// holding this transaction's connection never waits on the pool it is
-// holding. The LINKS stay here, so the all-or-nothing durability of what the
-// scan found is unchanged.
+// History, kept because it explains the design (M50, M54, M57): until M62
+// runScan wrapped the whole sweep in ONE transaction, every link write of the
+// NVD worker pool went through it, and concurrent workers on one *sql.Tx
+// desynchronised lib/pq and lost the whole sweep (0 of 800 rows, 2026-08-05)
+// until M54 serialised them. That transaction stayed open for every NVD/JVN
+// request of the sweep. M62 removed it: see service/scan_scope.go.
 func (h *SbomHandler) startBackgroundScan(sbomID, tenantID, projectID uuid.UUID) {
 	go func() {
 		ctx := context.Background()
@@ -577,186 +550,40 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 // can drive the scan flow without dealing with goroutine timing
 // (handler/sbom_test.go).
 //
-// Error surfacing contract (Codex R15 P2):
-//   - Any scanner that returns a non-nil error is recorded in `errs`.
-//   - Any tx-level failure (BeginTx / set_config / Commit) is recorded
-//     under the "tx:" prefix.
-//   - If `errs` is non-empty at the end of the run, ScanTracker.MarkFailed
-//     is called with a joined GENERIC marker string (F445: the raw scanner /
-//     tx error is logged via slog and never stored, because ScanStatus.Error
-//     is returned verbatim to the client on a 200 status response). ONLY when
-//     every scanner returns nil AND the tx commits cleanly is MarkCompleted
-//     called.
+// Error surfacing contract (Codex R15 P2, F445, M62):
+//   - any scanner that returns a non-nil error is recorded as a GENERIC
+//     marker, "<scanner>: scan failed (<reasons>)" — the raw error is logged
+//     and never stored, because ScanStatus.Error is returned verbatim to the
+//     client — and its reason codes become scan-status `reasons`;
+//   - MarkCompleted only when every scanner returned nil.
 //
-// Without this contract, a transient NVD/JVN outage would land the
-// CLI-observed scan status at "completed, 0 vulnerabilities" and
-// `sbomhub scan --fail-on critical` would silently exit 0.
+// What a scanner escalates (and therefore what "completed" means) since M62:
+// no database write was refused, no component lookup failed (partial failure
+// included — before M62 only a total failure escalated), no match set is known
+// to be truncated, and the overall scan deadline (SBOMHUB_SCAN_DEADLINE) did
+// not cut the sweep short. It still does not promise that any component was
+// checked: an empty SBOM, components without names, and offline mode finish
+// with nothing looked up. Nor that catalogue metadata was refreshed (that is
+// cve_sync's job), nor JVN precision (keyword matching).
 //
-// How much of the partial-result gap the scanner now closes, and what
-// "completed" is therefore worth (M54):
+// # Transactions (M62)
 //
-//   - REFUSED WRITES (R1). processComponentsParallel counts the statements
-//     the DATABASE refused and errors when that count is non-zero, so a scan
-//     that obtained matches and then failed to record them reaches `errs` and
-//     MarkFailed. This is the case where the data we already hold is unsound.
-//
-//   - TOTAL FETCH FAILURE (R2). If every component lookup failed (429 / 500 /
-//     timeout) the scanner errors too. Deciding that a scan which checked
-//     nothing checked nothing needs no threshold, and leaving it as success
-//     meant an NVD outage read out as "completed, 0 vulnerabilities".
-//
-//   - TRUNCATED RESULT SET (M55). A component whose keyword matched more CVEs
-//     than NVDService's paging budget (5 pages x 200) could fetch makes the
-//     scanner error, so it reaches `errs` and MarkFailed. NVD's own
-//     totalResults is what proves the set is incomplete, so no threshold is
-//     involved. Note what that costs on this path: the CLI treats a failed
-//     scan as "threshold NOT evaluated" and exits 2, so a critical that WAS
-//     fetched no longer produces exit 1. Exit 2 is still non-zero — a CI job
-//     checking for success fails either way — and the alternative is a scan
-//     that provably did not see everything being read as a clean bill of
-//     health. See NVDService.searchByKeyword for the measured distribution
-//     that makes this rare (every versioned component in it fits in one page).
-//     JVN is NOT part of this change; its own truncation is listed below.
-//
-//   - PARTIAL FETCH FAILURE — still success, still open. Some components
-//     answered and some did not, and choosing how many may fail before the
-//     scan is worthless (e.g. "N% failed → error") is a product-policy
-//     decision, not a bug fix. Tracked separately (※要確認).
-//
-//     M55 did NOT take that decision, and did close the observability half of
-//     it: service.NVDScanReport.FetchFailures carries the count out of the
-//     sweep (NVDService.ScanComponentsWithReport), and the sweep summary logs
-//     at WARN rather than INFO whenever it is non-zero. This handler still
-//     consumes only the error bit — ScanTracker has no state between completed
-//     and failed to put a partial count in — so the number is visible to an
-//     operator and to any caller that asks for the report, and not yet to the
-//     CLI.
-//
-// So what "completed" is worth, stated as the weakest true form (Codex M54 R3,
-// Critical — an earlier draft of this paragraph promised "at least one
-// component was checked and everything the scan learned was written down", and
-// both halves were false):
-//
-//	completed  ==  no database write was refused, AND it was not the case that
-//	               every attempted lookup failed.
-//
-// It does NOT promise any of the following, each of which reports completed
-// today:
-//
-//   - that any component was checked at all — an SBOM with no components and
-//     offline mode both finish with nothing looked up. (An earlier draft
-//     listed "component names are all empty" as a third example of that. It
-//     is not: NVD skips nameless components, but JVNService.ScanComponents
-//     has no such guard and issues one keyword query per component with an
-//     empty keyword — Codex M54 R6, Low. The limitation on what "completed"
-//     means still holds; that example was simply wrong.);
-//   - that every component was checked (partial fetch failure, above);
-//   - that every match for a checked component was seen — this is now true of
-//     NVD (M55: a truncated NVD result set makes the scan fail, so a completed
-//     scan did see every NVD match for every component it checked), and is
-//     still false of JVN, whose truncation is listed below;
-//   - that CVE metadata already in the catalogue was refreshed — a CVE NVD has
-//     re-scored is linked but not updated (see NVDService.persistWorkItem).
-//
-// Reported rather than fixed in M54 — fetch-COMPLETENESS defects, all of the
-// same shape. Each makes a successful scan mean less than it appears to, and
-// each needs a paging and rate-limit budget rather than a loop, so each belongs
-// in its own change. The first is now done; the JVN ones are not:
-//
-//   - NVDService.searchByKeyword asked NVD for resultsPerPage=20 and never
-//     followed `totalResults` / `startIndex`, so a component matching more than
-//     20 CVEs was truncated to the first 20 (Codex M54 R2, Critical).
-//     FIXED in M55: 200 per page, up to 5 pages, and anything past that budget
-//     is reported as a scan failure rather than returned as if it were the
-//     whole match set. See the TRUNCATED RESULT SET entry above.
-//   - JVNService.searchByKeyword sends no date range, and MyJVN defaults to
-//     the PAST WEEK — so JVN results cover seven days, not history (R9,
-//     Critical).
-//   - JVNService.searchByKeyword requests maxCountItem=10, never sends
-//     startItem, and ignores totalRes (R9, Critical).
-//   - JVNService.parseJVNResponse checks neither firstRes (which page this is)
-//     nor totalResRet (how many entries the page should hold), so a later page
-//     or a short page is accepted as a complete answer (R10, Critical). The
-//     NVD equivalents of both checks are enforced in NVDResponse.validate;
-//     the JVN pair is deferred with the paging work above rather than written
-//     twice.
-//
-// Paging any of them naively multiplies a scan's rate-limited request count by
-// the match cardinality; the JVN pair in particular must be decided together,
-// because removing the date default without paging makes the truncation worse.
-// The honest reading of a completed scan today is therefore "every NVD match
-// per component, and the first N JVN matches from the window MyJVN defaults
-// to".
+// This function opens none. Until M62 it wrapped the whole sweep in one tenant
+// transaction, held open for every NVD/JVN request — about 14 minutes for a
+// cold keyless scan of an SBOM with a Linux kernel (M60) — with a pool
+// connection, row locks on every link written and the transaction's xid held
+// the whole time. Each scanner now opens a short read transaction, fetches
+// with none open, and writes its links in one short transaction serialised per
+// SBOM by an advisory lock (service/scan_scope.go). Consequences callers can
+// observe: NVD's links commit before the JVN sweep starts (scan-status counts
+// step twice, not once), and one refused statement costs only its own work
+// item, not the sweep.
 func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
-	var errs []string
-
-	txErr := database.WithTxFunc(ctx, h.db, func(txCtx context.Context, tx *sql.Tx) error {
-		if _, err := tx.ExecContext(txCtx,
-			`SELECT set_config('app.current_tenant_id', $1, true)`,
-			tenantID.String(),
-		); err != nil {
-			return fmt.Errorf("set tenant context: %w", err)
-		}
-
-		// Scan with NVD
-		if h.nvdService != nil {
-			if err := h.nvdService.ScanComponents(txCtx, sbomID); err != nil {
-				// F445: log the raw scanner error server-side only; the
-				// string recorded in ScanStatus.Error is returned to the
-				// client on a 200 status response, so keep it generic.
-				slog.Warn("sbom: scan failed", "sbom_id", sbomID, "scanner", "nvd", "error", err)
-				errs = append(errs, "nvd: scan failed")
-			} else {
-				slog.Info("Auto NVD scan completed", "sbom_id", sbomID)
-			}
-		}
-
-		// Scan with JVN
-		if h.jvnService != nil {
-			if err := h.jvnService.ScanComponents(txCtx, sbomID); err != nil {
-				// F445: raw scanner error to logs only; stored string is generic.
-				slog.Warn("sbom: scan failed", "sbom_id", sbomID, "scanner", "jvn", "error", err)
-				errs = append(errs, "jvn: scan failed")
-			} else {
-				slog.Info("Auto JVN scan completed", "sbom_id", sbomID)
-			}
-		}
-
-		// Return nil even when a scanner failed, so WithTxFunc COMMITS
-		// rather than rolls back. Per-scan failures are recorded in
-		// `errs` and surfaced through ScanTracker, not through tx
-		// rollback: a JVN outage must not throw away the CVEs NVD
-		// already matched.
-		//
-		// M54 correction: the reason given here used to be that the
-		// "NVD worker pool uses raw db", i.e. that its links were
-		// inserted OUTSIDE this transaction and the commit merely had
-		// to not get in their way. That was false — the pool's writes
-		// go through THIS tx (see the Concurrency note on
-		// startBackgroundScan), so this commit is the only thing that
-		// makes them durable, and a rollback here would discard the
-		// entire sweep rather than nothing.
-		//
-		// Returning nil is therefore load-bearing, not permissive. It
-		// is also not sufficient: the commit can still fail on its own
-		// (an aborted transaction refuses it), which is exactly what
-		// txErr below reports and what M50's poison test measures.
-		return nil
+	out := runSBOMScan(ctx, h.db, tenantID, sbomID, h.scanDeadline, []scanStep{
+		{source: "nvd", scanner: h.nvdService, okMsg: "Auto NVD scan completed"},
+		{source: "jvn", scanner: h.jvnService, okMsg: "Auto JVN scan completed"},
 	})
-	if txErr != nil {
-		// F445: the tenant-tx error can carry DB/driver internals; log it
-		// server-side only and record a generic marker in ScanStatus.Error.
-		slog.Warn("sbom: scan failed", "sbom_id", sbomID, "tenant_id", tenantID, "scanner", "tx", "error", txErr)
-		errs = append(errs, "tx: scan failed")
-	}
-
-	if h.scanTracker != nil {
-		if len(errs) > 0 {
-			h.scanTracker.MarkFailed(sbomID, strings.Join(errs, "; "))
-		} else {
-			h.scanTracker.MarkCompleted(sbomID)
-		}
-	}
+	recordScanOutcome(h.scanTracker, sbomID, out)
 }
 
 func (h *SbomHandler) Get(c echo.Context) error {
@@ -923,6 +750,10 @@ type ScanStatusResponse struct {
 	ProjectID       string                    `json:"project_id"`
 	Error           string                    `json:"error,omitempty"`
 	Vulnerabilities VulnerabilitySummaryCount `json:"vulnerabilities"`
+	// Reasons (M62, additive) are the machine-readable reasons a failed scan
+	// is incomplete: deadline_exceeded, cancelled, fetch_failed, truncated,
+	// write_refused, scan_error. Present only when status=failed and known.
+	Reasons []string `json:"reasons,omitempty"`
 }
 
 // VulnerabilitySummaryCount aggregates vulnerability counts by severity
@@ -959,6 +790,7 @@ type VulnerabilitySummaryCount struct {
 //	  "sbom_id": "...",
 //	  "project_id": "...",
 //	  "error": "..." (only when status=failed),
+//	  "reasons": ["deadline_exceeded", ...] (M62; only when status=failed),
 //	  "vulnerabilities": { "critical": N, "high": N, "medium": N,
 //	                       "low": N, "unknown": N, "total": N }
 //	}
@@ -966,19 +798,12 @@ type VulnerabilitySummaryCount struct {
 // The counts reflect the current COMMITTED state of the
 // component_vulnerabilities join.
 //
-// M54 correction: this used to say a caller polling during a "running"
-// scan "can see counts climb as NVD/JVN match more components". It cannot.
-// runScan wraps the whole NVD + JVN sweep in ONE transaction and this
-// request reads on a different pooled connection, so none of the scan's
-// writes are visible until that transaction commits — measured by M50's
-// tx-semantics test, which reads a mid-scan write from a second connection
-// and gets 0. The observable sequence is a step, not a climb: 0 (or the
-// previous scan's totals) for the whole run, then the final totals at
-// once. A "running" poll returning 0 therefore means "not committed yet",
-// never "nothing found so far".
-//
-// The operational advice is unchanged and is now the only safe reading:
-// CLI callers (`sbomhub scan --fail-on`) must trust counts only once
+// They do not climb during a scan: each scanner commits all of its links in
+// one write transaction at the end of its sweep (M62; before M62 the whole
+// NVD + JVN sweep was one transaction). The observable sequence is a step
+// after the NVD sweep and another after the JVN sweep. A "running" poll
+// therefore means "not committed yet", never "nothing found so far", and CLI
+// callers (`sbomhub scan --fail-on`) must trust counts only once
 // status = "completed".
 func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	projectID, err := uuid.Parse(c.Param("id"))
@@ -991,9 +816,9 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	}
 
 	// Vulnerability counts come from the live join, which means whatever the
-	// background scan has COMMITTED — not what it has matched (M54: the scan
-	// holds one transaction for its whole run, so nothing it writes is
-	// visible here until it ends; see the godoc above). We return them for
+	// background scan has COMMITTED — not what it has matched (each
+	// scanner commits its links at the end of its sweep; see the godoc
+	// above). We return them for
 	// status=running anyway so the CLI has something to render, but they are
 	// the previous scan's totals until this one commits, and the threshold
 	// check is gated on status=completed by the client.
@@ -1018,8 +843,9 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 
 	state := service.ScanStateUnknown
 	var errMsg string
+	var reasons []string
 	if h.scanTracker != nil {
-		state, errMsg = h.scanTracker.Get(sbomID)
+		state, errMsg, reasons = h.scanTracker.GetDetail(sbomID)
 	}
 
 	resp := ScanStatusResponse{
@@ -1030,6 +856,7 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	}
 	if state == service.ScanStateFailed {
 		resp.Error = errMsg
+		resp.Reasons = reasons
 	}
 
 	return c.JSON(http.StatusOK, resp)

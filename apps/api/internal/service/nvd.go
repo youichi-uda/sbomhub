@@ -109,6 +109,9 @@ type NVDService struct {
 	// air-gapped degrade mode): scans return empty results with no error so the
 	// enclosing SBOM scan continues without network access.
 	offline bool
+	// paceInterval, when > 0, overrides the rate-limit interval (tests only;
+	// production always paces at rateLimitWithKey / rateLimitWithoutKey).
+	paceInterval time.Duration
 }
 
 // NewNVDService creates a new NVD service (without cache - for backwards compatibility).
@@ -156,7 +159,7 @@ type NVDResponse struct {
 	// indistinguishable from "this component genuinely has no CVEs". The worker
 	// counted it as processed, persisted nothing, and the scan reported
 	// completed with zero findings, sailing straight past the
-	// total-fetch-failure guard in processComponentsParallel.
+	// total-fetch-failure guard in fetchComponents.
 	//
 	// That is reachable in the field: baseURL is operator-overridable for
 	// air-gapped mirrors (M40 Wave B), and an interposing proxy or a
@@ -390,13 +393,9 @@ type nvdWorkItem struct {
 // not mean "the number is unavailable", which is how it was before. The count
 // is now returned, so the policy can be written against a number that exists.
 //
-// Honest limitation: no production caller reads this yet. handler.SbomHandler
-// and handler.VulnerabilityHandler both depend on the narrow
-// `ScanComponents(ctx, sbomID) error` interface, and ScanTracker has no state
-// between completed and failed to carry a partial count into. Wiring it
-// through is a change to those files and is out of this wave's scope; what is
-// in scope is that the number is counted, logged at WARN, and reachable in-band
-// rather than swallowed.
+// Since M62 the scheduler reads it (NewVulnerabilities), and every reason the
+// sweep is incomplete reaches the handlers through the error's sentinels
+// (ScanReasons), so a partial count is reported as scan-status `reasons`.
 type NVDScanReport struct {
 	// UniqueComponents is the number of deduplicated (name, version) work
 	// items the sweep was given.
@@ -414,11 +413,12 @@ type NVDScanReport struct {
 	// NVD's published rate limit.
 	APICalls int
 	// FetchFailures counts work items whose NVD lookup never returned an
-	// answer. Processed + FetchFailures == UniqueComponents unless the sweep
-	// was cancelled.
+	// answer. Processed + FetchFailures + Unscanned == UniqueComponents.
 	FetchFailures int
-	// RefusedWrites counts statements the DATABASE refused. See
-	// persistWorkItem: it is a floor on the loss, not its size.
+	// RefusedWrites counts writes the DATABASE refused: catalogue inserts
+	// (resolveMatches) plus links (ScanScope.writeLinks — a refused link
+	// counts every link of its work item, which is rolled back to its
+	// savepoint). It is a floor on the loss, not its size.
 	RefusedWrites int
 	// TruncatedComponents counts work items whose match set the sweep could
 	// not prove it saw in full — the paging budget ran out, or the result set
@@ -447,6 +447,21 @@ type NVDScanReport struct {
 	// CPEUndecidable counts records KEPT although the local version
 	// comparison could not decide them (NVD's own evaluation returned them).
 	CPEUndecidable int
+
+	// M62 — interruption and the write phase.
+	//
+	// Unscanned counts work items never looked up because the scan's context
+	// ended first (an item whose lookup was cut off by it counts here, not
+	// in FetchFailures). DeadlineExceeded / Cancelled say which: the overall
+	// scan deadline (SBOMHUB_SCAN_DEADLINE) or another cancellation.
+	Unscanned        int
+	DeadlineExceeded bool
+	Cancelled        bool
+	// NewVulnerabilities is how many distinct vulnerabilities became linked
+	// to the SBOM in this sweep's write transaction (0 if it did not commit).
+	NewVulnerabilities int
+	// LinksWritten counts links the write phase attempted and committed.
+	LinksWritten int
 }
 
 // ScanComponents scans all components in an SBOM for vulnerabilities.
@@ -472,8 +487,20 @@ func (s *NVDService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.U
 		return NVDScanReport{}, nil
 	}
 
-	components, err := s.compRepo.ListScanTargetsBySbom(ctx, sbomID)
+	// M62: no transaction may be open while this sweep talks to NVD. The
+	// scope check refuses a tx-bearing context outright; see scan_scope.go.
+	scope, err := scanScopeFrom(ctx)
 	if err != nil {
+		return NVDScanReport{}, err
+	}
+
+	// Phase 1 — read, in a short tenant transaction.
+	var components []model.Component
+	if err := scope.readTx(ctx, func(txCtx context.Context) error {
+		var lerr error
+		components, lerr = s.compRepo.ListScanTargetsBySbom(txCtx, sbomID)
+		return lerr
+	}); err != nil {
 		return NVDScanReport{}, fmt.Errorf("failed to get components: %w", err)
 	}
 
@@ -506,80 +533,67 @@ func (s *NVDService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.U
 
 	slog.Info("deduplicated components", "unique_count", len(uniqueComponents), "total_count", len(components))
 
-	// Process components with worker pool
-	return s.processComponentsParallel(ctx, uniqueComponents)
+	// Phase 2 — fetch, with no transaction. Each answer's catalogue rows are
+	// resolved as it arrives (autocommit / catalogue pool) and its links are
+	// queued for phase 3.
+	var mu sync.Mutex
+	var groups [][]pendingLink
+	catalogueRefused := 0
+	report := s.fetchComponents(ctx, uniqueComponents, func(item *nvdWorkItem, l nvdLookup) {
+		g, refused := s.resolveMatches(ctx, l, item.componentIDs)
+		mu.Lock()
+		groups = append(groups, g)
+		catalogueRefused += refused
+		mu.Unlock()
+	})
+
+	// Phase 3 — write, one short locked tenant transaction. It runs even when
+	// the deadline fired: what was verified before it is committed (M60's
+	// "keep verified pages, report truncated" rule), and the report says the
+	// scan is incomplete.
+	refused, newVulns, werr := scope.writeLinks(ctx, sbomID, groups, func(txCtx context.Context, l pendingLink) error {
+		return s.vulnRepo.LinkComponent(txCtx, l.componentID, l.vulnID, l.method)
+	})
+	if werr != nil {
+		slog.Warn("nvd: write phase failed; no link of this sweep was committed", "sbom_id", sbomID, "error", werr)
+	}
+	total := 0
+	for _, g := range groups {
+		total += len(g)
+	}
+	report.RefusedWrites = catalogueRefused + refused
+	report.LinksWritten = total - refused
+	report.NewVulnerabilities = newVulns
+
+	s.logSweepSummary(sbomID, report)
+	return report, report.incompleteErr()
 }
 
-// processComponentsParallel processes components in parallel with rate limiting.
+// fetchComponents is phase 2 of a sweep: it looks every work item up on NVD in
+// parallel under the sweep's shared rate limiter and hands each answer to
+// onLookup. It touches no database itself and must not be called with a
+// transaction open (ScanComponentsWithReport guarantees that).
 //
-// # Why the database section is serialised (M54)
+// # Concurrency (M54, revised M62)
 //
-// Every caller of ScanComponents hands this function a context that carries a
-// *sql.Tx: VulnerabilityHandler.runScan and SbomHandler.runScan both open one
-// via database.WithTxFunc, and scheduler.VulnerabilityScanJob.scanProject runs
-// inside runWithTenantTx. They must — `components` FORCEs row-level security,
-// so ListScanTargetsBySbom above returns zero rows on a connection with no
-// app.current_tenant_id bound. The repositories then resolve that tx through
-// database.Querier, which means every statement the workers below issue lands
-// on ONE PostgreSQL connection.
+// Until M62 every worker wrote its links on the caller's *sql.Tx, which is not
+// safe for concurrent use (lib/pq desynchronised — `pq: unexpected Parse
+// response 'C'` — and the whole sweep was lost; measured 2026-08-05), so a
+// per-sweep mutex serialised the database section. Workers no longer share a
+// transaction: onLookup resolves catalogue rows on the pool (safe for
+// concurrent use) and only queues links, which phase 3 writes from one
+// goroutine. The mutex is gone because what it protected is gone.
 //
-// *sql.DB is safe for concurrent use. *sql.Tx is not, and the gap is not
-// theoretical: an open *sql.Rows (which is what QueryRowContext returns until
-// Scan closes it) leaves lib/pq mid-message on the wire, so a second worker's
-// Parse is written into the middle of another worker's result set. Measured on
-// PostgreSQL 15 (2026-08-05) with two workers whose NVD responses arrived
-// together, 400 CVEs each:
+// # Interruption (M62)
 //
-//	pq: unexpected Parse response 'C'   <- first collision
-//	driver: bad connection              <- every statement after it
-//	database.WithTxFunc: commit: driver: bad connection
-//	durable rows: 0 of 800
-//
-// The connection is destroyed, the commit fails, and the WHOLE sweep is lost —
-// not just the two items that collided. At the time of that measurement
-// ScanComponents also returned nil, so "NVD scan completed" was logged in the
-// same run as the error (the asymmetry M50 pinned). That second half no longer
-// describes this function (Codex M54 R5, Low — the sentence outlived the code
-// twice): the R1 follow-up below counts refused writes and returns an error,
-// so the contradictory INFO line is not emitted for that case any more.
-//
-// dbMu closes that window: it is taken for the entire per-item persistence
-// section, so at most one goroutine is ever inside a statement on the shared
-// tx.
-//
-// The throughput it gives up is not the concurrency this pool exists for. The
-// NVD HTTP round trip (hundreds of ms to seconds) stays OUTSIDE the lock, and
-// the shared rate limiter already caps the whole pool at one work item per
-// rateLimitWithKey (700ms) no matter how many workers there are. What is
-// serialised is only the statements: measured on the same PostgreSQL 15, 200
-// statements over 40 work items took 22.4ms across 5 goroutines and 55.4ms on
-// one — so serialising costs ~0.8ms per work item against a 700ms tick, near
-// 0.1%. (Both figures come from an autocommit pool; a serial baseline for the
-// transactional path cannot be measured, because that is the configuration
-// that destroys its own connection.)
-//
-// The rejected alternative was maxConcurrentWithKey = 1, which serialises the
-// HTTP round trip as well. Measured end to end at 1.5s NVD latency over 6 work
-// items: 5.71s with this fix, 9.75s with one worker — a 1.7x regression paid
-// by exactly the operators who configured an API key to make scans faster.
-//
-// The mutex is per-call rather than a field on NVDService on purpose: one
-// NVDService is shared process-wide, and two scans for different tenants run
-// on different transactions with nothing to contend over.
-//
-// What this does NOT fix: a statement that fails on its own merits still
-// aborts the shared transaction and discards every LINK the sweep wrote (M50).
-// Serialising the workers removes the concurrency as a CAUSE of that abort; it
-// does not change what an abort costs. What it does change, as of the R1
-// follow-up below, is that the scanner now REPORTS it instead of returning
-// nil.
-//
-// M57 narrowed which statements can trigger it: the catalogue INSERT (Create)
-// no longer runs on the shared transaction at all — see persistWorkItem — so
-// a refused catalogue write costs its own match and nothing else. What can
-// still abort the sweep is a statement that IS on the transaction: GetByCVE
-// and LinkComponent.
-func (s *NVDService) processComponentsParallel(ctx context.Context, components map[nvdComponentKey]*nvdWorkItem) (NVDScanReport, error) {
+// When ctx ends — the scan deadline or a cancellation — workers stop taking
+// items, an in-flight lookup returns what it may keep (a CPE or keyword walk
+// cut off by the DEADLINE keeps its validated pages as a truncated answer;
+// see partialWalk) or an error, and the items never answered are counted in
+// Unscanned rather than FetchFailures: they did not fail, they were not
+// tried. Before M62 an interrupted sweep returned nil — "completed" — for the
+// items it never reached.
+func (s *NVDService) fetchComponents(ctx context.Context, components map[nvdComponentKey]*nvdWorkItem, onLookup func(*nvdWorkItem, nvdLookup)) NVDScanReport {
 	report := NVDScanReport{UniqueComponents: len(components)}
 
 	maxWorkers := maxConcurrentNoKey
@@ -588,8 +602,10 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 		maxWorkers = maxConcurrentWithKey
 		rateLimit = rateLimitWithKey
 	}
+	if s.paceInterval > 0 {
+		rateLimit = s.paceInterval
+	}
 
-	// Create work channel
 	workChan := make(chan *nvdWorkItem, len(components))
 	for _, item := range components {
 		workChan <- item
@@ -600,18 +616,9 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	rateLimiter := time.NewTicker(rateLimit)
 	defer rateLimiter.Stop()
 
-	// pace is the SAME ticker, handed to searchByKeyword so that the follow-up
-	// pages of a multi-page component are rate-limited too (M55).
-	//
-	// This is the whole reason paging is safe to add. The worker loop below
-	// takes one tick per WORK ITEM, which was one request until M55; a walk
-	// that issued its extra pages without a tick would let the pool emit up to
-	// maxConcurrentWithKey * nvdMaxPagesPerComponent requests inside one tick
-	// and blow straight through NVD's published rate (50 requests / 30s with a
-	// key). Sharing the ticker keeps the invariant that held before: the whole
-	// pool issues at most one NVD request per `rateLimit`, whatever the mix of
-	// first pages and follow-ups.
-	//
+	// pace is the SAME ticker, handed to the page walks so that follow-up
+	// pages are rate-limited too (M55): the whole pool issues at most one NVD
+	// request per `rateLimit`, whatever the mix of first pages and follow-ups.
 	// A per-worker sleep would NOT do: five workers each pausing rateLimit
 	// between their own pages is five times the intended aggregate rate.
 	pace := func(ctx context.Context) error {
@@ -625,27 +632,6 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	// dbMu guards every statement issued against the (possibly transactional)
-	// ctx — see the "Why the database section is serialised" note above. It is
-	// deliberately separate from mu, which only protects the counters: mixing
-	// them would hold the database lock across the counter updates for no
-	// reason, and would make it easy to later "optimise" the counters and
-	// silently drop the correctness guarantee with them.
-	var dbMu sync.Mutex
-	processedCount := 0
-	cacheHits := 0
-	apiCalls := 0
-	// refusedWrites counts statements the DATABASE refused (Codex M54 R1,
-	// Critical); fetchFailures counts work items whose NVD lookup never
-	// returned an answer (Codex M54 R2, Critical); truncatedComponents and
-	// droppedMatches count work items whose match set was provably bigger than
-	// the paging budget (M55). See the returns at the bottom of this function
-	// for exactly which combinations are escalated.
-	refusedWrites := 0
-	fetchFailures := 0
-	truncatedComponents := 0
-	droppedMatches := 0
-	cpeMatched, keywordOnly, keywordFallback, cpeRejected, cpeUndecidable := 0, 0, 0, 0, 0
 
 	for i := 0; i < maxWorkers; i++ {
 		wg.Add(1)
@@ -662,28 +648,35 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 
 				lookup, err := s.lookupComponent(ctx, *work, pace)
 				if err != nil {
+					if scanInterruption(ctx) != nil {
+						// Cut off by the deadline / cancellation, not a
+						// failure of NVD: counted in Unscanned below.
+						mu.Lock()
+						report.APICalls += lookup.requests
+						mu.Unlock()
+						return
+					}
 					slog.Warn("failed to get vulnerabilities",
 						"component", work.key.Name,
 						"version", work.key.Version,
 						"error", err)
 					mu.Lock()
-					fetchFailures++
+					report.FetchFailures++
 					// The requests a FAILED walk already spent still count
-					// against NVD's rate limit, so they still belong in the
-					// accounting (Codex M55 R1, Low).
-					apiCalls += lookup.requests
+					// against NVD's rate limit (Codex M55 R1, Low).
+					report.APICalls += lookup.requests
 					mu.Unlock()
 					continue
 				}
 
 				if lookup.truncated {
 					// Per-component, at WARN, with the numbers: an operator
-					// reading only the aggregate below cannot tell WHICH
-					// component's match set was cut off, and that is the one
-					// thing they need in order to act (pin a version, add a
-					// purl, or accept the noise).
+					// reading only the aggregate cannot tell WHICH component's
+					// match set was cut off.
 					reason := "paging budget exhausted"
 					switch {
+					case lookup.partialFailure && scanDeadlineFired(ctx):
+						reason = "the scan deadline fired partway through the walk; the pages before it were kept"
 					case lookup.partialFailure:
 						reason = "a page failed partway through the walk; the pages before it were kept"
 					case lookup.shifted:
@@ -700,304 +693,207 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 				}
 
 				mu.Lock()
-				processedCount++
+				report.Processed++
 				if lookup.fromCache {
-					cacheHits++
+					report.CacheHits++
 				}
-				apiCalls += lookup.requests
+				report.APICalls += lookup.requests
 				switch {
 				case lookup.method != model.MatchNVDKeyword:
-					cpeMatched++
+					report.CPEMatched++
 				case lookup.keywordFallback:
-					keywordFallback++
+					report.KeywordFallback++
 				default:
-					keywordOnly++
+					report.KeywordOnly++
 				}
-				cpeRejected += lookup.cpeRejected
-				cpeUndecidable += lookup.cpeUndecidable
+				report.CPERejected += lookup.cpeRejected
+				report.CPEUndecidable += lookup.cpeUndecidable
 				if lookup.truncated {
-					truncatedComponents++
+					report.TruncatedComponents++
 					// A shifted walk knows it lost records but not how many,
 					// so it contributes 0 here rather than a negative number.
 					if d := lookup.total - lookup.fetched; d > 0 {
-						droppedMatches += d
+						report.DroppedMatches += d
 					}
 				}
 				mu.Unlock()
 
-				// Link vulnerabilities to all component instances
-				refused := s.persistWorkItem(ctx, &dbMu, lookup.vulns, lookup.methods, work.componentIDs, lookup.method)
-				if refused > 0 {
-					mu.Lock()
-					refusedWrites += refused
-					mu.Unlock()
-				}
+				onLookup(work, lookup)
 			}
 		}()
 	}
 
 	wg.Wait()
 
-	report.Processed = processedCount
-	report.CacheHits = cacheHits
-	report.APICalls = apiCalls
-	report.RefusedWrites = refusedWrites
-	report.FetchFailures = fetchFailures
-	report.TruncatedComponents = truncatedComponents
-	report.DroppedMatches = droppedMatches
-	report.CPEMatched = cpeMatched
-	report.KeywordOnly = keywordOnly
-	report.KeywordFallback = keywordFallback
-	report.CPERejected = cpeRejected
-	report.CPEUndecidable = cpeUndecidable
-
-	// The summary is WARN, not INFO, whenever the sweep is known to be less
-	// than complete (M55). A PARTIAL fetch failure is not escalated into a scan
-	// error — that needs a threshold, which is a product decision — but it is
-	// not swallowed either: the count is in this line, and it is in the report
-	// this function returns.
-	//
-	// "component scan completed" at INFO with fetch_failures=37 buried in it
-	// was the previous shape, and it reads as success to everything that
-	// filters on level.
-	logArgs := []any{
-		"processed", processedCount,
-		"unique_components", report.UniqueComponents,
-		"cache_hits", cacheHits,
-		"api_calls", apiCalls,
-		"refused_writes", refusedWrites,
-		"fetch_failures", fetchFailures,
-		"truncated_components", truncatedComponents,
-		"dropped_matches", droppedMatches,
-		"cpe_matched", cpeMatched,
-		"keyword_only", keywordOnly,
-		"keyword_fallback", keywordFallback,
-		"cpe_rejected", cpeRejected,
-		"cpe_undecidable", cpeUndecidable,
+	report.Unscanned = report.UniqueComponents - report.Processed - report.FetchFailures
+	if report.Unscanned > 0 {
+		if scanDeadlineFired(ctx) {
+			report.DeadlineExceeded = true
+		} else {
+			report.Cancelled = true
+		}
 	}
-	if fetchFailures > 0 || truncatedComponents > 0 || refusedWrites > 0 {
+	return report
+}
+
+// logSweepSummary logs one sweep's accounting: WARN whenever the sweep is
+// known to be less than complete (M55), INFO otherwise. The deadline is named
+// in the message so it can be found without reading the counters (M62).
+func (s *NVDService) logSweepSummary(sbomID uuid.UUID, r NVDScanReport) {
+	logArgs := []any{
+		"sbom_id", sbomID,
+		"processed", r.Processed,
+		"unique_components", r.UniqueComponents,
+		"unscanned", r.Unscanned,
+		"cache_hits", r.CacheHits,
+		"api_calls", r.APICalls,
+		"refused_writes", r.RefusedWrites,
+		"fetch_failures", r.FetchFailures,
+		"truncated_components", r.TruncatedComponents,
+		"dropped_matches", r.DroppedMatches,
+		"cpe_matched", r.CPEMatched,
+		"keyword_only", r.KeywordOnly,
+		"keyword_fallback", r.KeywordFallback,
+		"cpe_rejected", r.CPERejected,
+		"cpe_undecidable", r.CPEUndecidable,
+		"links_written", r.LinksWritten,
+		"new_vulnerabilities", r.NewVulnerabilities,
+		"deadline_exceeded", r.DeadlineExceeded,
+		"cancelled", r.Cancelled,
+	}
+	switch {
+	case r.DeadlineExceeded:
+		slog.Warn("nvd: scan deadline exceeded; findings verified before it were committed and the scan is reported incomplete", logArgs...)
+	case r.Cancelled || r.FetchFailures > 0 || r.TruncatedComponents > 0 || r.RefusedWrites > 0:
 		slog.Warn("component scan completed with incomplete coverage", logArgs...)
-	} else {
+	default:
 		slog.Info("component scan completed", logArgs...)
 	}
-
-	return report, report.incompleteErr()
 }
 
 // incompleteErr is the ONE bit ScanComponents is able to hand its caller: the
 // error that turns into ScanTracker.MarkFailed, scan_state "failed",
-// `counts_final: false` in the MCP server, and exit 2 from `sbomhub scan`.
+// `counts_final: false` in the MCP server, exit 2 from `sbomhub scan`, and a
+// failed scheduler scan_logs row.
 //
 // Everything it escalates has the same shape — the scan's results are known to
-// be less than what the scan claims to have looked for — and everything it does
-// NOT escalate is listed at the bottom, because a reader needs both halves to
-// know what a nil return is worth.
+// be less than what the scan claims to have looked for — and since M62 it
+// reports EVERY applicable reason (errors.Join), each wrapping its sentinel
+// (ErrScanWriteRefused, ErrScanDeadlineExceeded, ErrScanCancelled,
+// ErrScanFetchFailed, ErrScanTruncated) so ScanReasons can name them.
+//
+//   - Refused writes: the database declined to record a match we had already
+//     obtained (Codex M54 R1, Critical).
+//   - Deadline / cancellation: components were never looked up (M62; before,
+//     an interrupted sweep returned nil).
+//   - Fetch failures, TOTAL (Codex M54 R2, Critical) and, since M62, PARTIAL.
+//     The partial case was left as success through M55-M61 pending "a
+//     threshold policy". M62 takes the decision M55 deferred, with the
+//     threshold the product already applies to truncation: zero. A scan
+//     that did not check a component cannot report it clean, and a partial
+//     answer must not be readable as a clean one (UPGRADE §9.3). The CPE
+//     path already escalated a page failing partway (as truncation); the
+//     keyword path now does both: a failed lookup escalates, and a page
+//     failing partway keeps the pages before it as a truncated answer.
+//   - Truncated result sets (M55): NVD's totalResults proves the set is
+//     incomplete.
+//
+// A scan with NO work (offline, no components, all components nameless) is
+// not a failure: there was nothing to look up.
 func (r NVDScanReport) incompleteErr() error {
-	// A refused WRITE means the database declined to record a match we had
-	// already obtained. Reporting success after that is the silent-data-loss
-	// failure this product cannot afford: the caller marks the scan completed,
-	// the CLI trusts the counts, and `sbomhub scan --fail-on critical` exits 0
-	// on an incomplete result. So it is escalated (Codex M54 R1, Critical).
-	//
-	// This is also the loudest symptom of the M50 abort cascade: once one
-	// statement poisons the shared transaction, every subsequent write is
-	// refused, so this count goes from 0 to "all of them" and the scanner now
-	// says so instead of returning nil.
-	//
+	var errs []error
 	if r.RefusedWrites > 0 {
-		return fmt.Errorf("nvd: database refused %d vulnerability write(s); scan results are incomplete", r.RefusedWrites)
+		errs = append(errs, fmt.Errorf("nvd: database refused %d vulnerability write(s); scan results are incomplete: %w",
+			r.RefusedWrites, ErrScanWriteRefused))
 	}
-
-	// TOTAL fetch failure: every work item was asked about and none answered,
-	// so this scan has ZERO coverage. Codex M54 R2 (Critical) was right that
-	// the first cut hid this behind the policy argument below — deciding that
-	// no component was successfully checked requires no threshold, and
-	// reporting "completed, 0 vulnerabilities" for it is the same
-	// silent-data-loss shape as the refused writes above. `sbomhub scan
-	// --fail-on critical` would exit 0 on an NVD outage.
-	//
-	// The condition is deliberately Processed == 0 rather than
-	// FetchFailures > 0: it fires only when NOTHING got through.
-	if r.Processed == 0 && r.FetchFailures > 0 {
-		return fmt.Errorf("nvd: all %d component lookup(s) failed; the scan has no coverage", r.FetchFailures)
+	if r.DeadlineExceeded {
+		errs = append(errs, fmt.Errorf("nvd: %d of %d component(s) were never looked up before the scan deadline; "+
+			"scan results are incomplete: %w", r.Unscanned, r.UniqueComponents, ErrScanDeadlineExceeded))
 	}
-
-	// TRUNCATED RESULT SET (M55). At least one component matched more CVEs than
-	// the paging budget could fetch, so the findings recorded for it are a
-	// PREFIX of its match set and the omitted tail may hold the critical CVE.
-	//
-	// Escalating needs no threshold, which is what separates it from the
-	// partial fetch failure below: we are not estimating how much coverage is
-	// enough, we are reporting that NVD itself told us how many matches exist
-	// and we did not fetch them. searchByKeyword makes this rare by
-	// construction — every versioned component in the measured distribution
-	// fits in one page — so what reaches here is the component whose keyword
-	// stopped being a match query at all, and that is precisely the case an
-	// operator must not read as "checked, clean".
-	//
-	// The cost of escalating, stated plainly because it is real: ScanTracker
-	// marks the whole scan failed, and `sbomhub scan --fail-on <sev>` then
-	// exits 2 WITHOUT evaluating the threshold, so a critical that WAS fetched
-	// no longer produces exit 1. Exit 2 is still non-zero, so a CI job that
-	// checks for success fails either way; what is lost is only the
-	// distinction, and what is gained is that a scan which provably did not
-	// see everything can never be read as a clean bill of health. The
-	// alternative — stay silent and let the count look authoritative — is the
-	// failure mode this product exists to prevent.
+	if r.Cancelled {
+		errs = append(errs, fmt.Errorf("nvd: the scan was cancelled with %d of %d component(s) never looked up; "+
+			"scan results are incomplete: %w", r.Unscanned, r.UniqueComponents, ErrScanCancelled))
+	}
+	if r.FetchFailures > 0 {
+		if r.Processed == 0 && r.Unscanned == 0 {
+			errs = append(errs, fmt.Errorf("nvd: all %d component lookup(s) failed; the scan has no coverage: %w",
+				r.FetchFailures, ErrScanFetchFailed))
+		} else {
+			errs = append(errs, fmt.Errorf("nvd: %d of %d component lookup(s) failed; the findings for those "+
+				"components are missing: %w", r.FetchFailures, r.UniqueComponents, ErrScanFetchFailed))
+		}
+	}
 	if r.TruncatedComponents > 0 {
-		return fmt.Errorf("nvd: %d component(s) could not be enumerated completely "+
+		errs = append(errs, fmt.Errorf("nvd: %d component(s) could not be enumerated completely "+
 			"(the paging budget ran out — %d pages x %d for a keyword lookup, %d pages for a CPE "+
-			"lookup — a page failed partway through a CPE walk, or the result set changed "+
+			"lookup — a page failed or the scan deadline fired partway through a walk, or the result set changed "+
 			"underneath the walk); at least %d known "+
-			"match(es) were not retrieved and the findings for those components are incomplete",
-			r.TruncatedComponents, nvdMaxPagesPerComponent, nvdPageSize, nvdCPEMaxPagesPerComponent, r.DroppedMatches)
+			"match(es) were not retrieved and the findings for those components are incomplete: %w",
+			r.TruncatedComponents, nvdMaxPagesPerComponent, nvdPageSize, nvdCPEMaxPagesPerComponent, r.DroppedMatches,
+			ErrScanTruncated))
 	}
-
-	// STILL NOT escalated, and this is the honest remainder: a PARTIAL fetch
-	// failure (some components answered, some did not). Turning that into a
-	// scan failure needs a threshold — how many components may fail before the
-	// scan is worthless? — and that is a product-policy decision, not a bug
-	// fix. It stays tracked as the ※要確認 threshold noted on
-	// SbomHandler.runScan.
-	//
-	// M55 changed what "not escalated" costs, without taking that decision:
-	// NVDScanReport.FetchFailures now carries the count out of the sweep, and
-	// the summary above logs at WARN when it is non-zero. So the policy, when
-	// it is written, can be written against a number that already exists, and
-	// in the meantime a partial failure is visible instead of being absorbed
-	// into an INFO line that says "completed".
-	//
-	// Note that the guard above is `Processed == 0 && FetchFailures > 0`,
-	// not `Processed == 0`. A scan with NO work at all must not be
-	// reported as a failure — there was nothing to look up — and the two
-	// clauses are what distinguish it from a scan that tried and got nothing.
-	//
-	// Those scans arrive here by two different routes, and an earlier draft of
-	// this comment claimed both took the first (Codex M54 R7, Low): offline
-	// mode and an SBOM with no components return from ScanComponents before
-	// this function is called, but an SBOM whose component names are all empty
-	// is filtered into an EMPTY work map and does reach here, running the loop
-	// zero times and emitting the completion log above.
-	// But it does mean "completed" cannot be read as "something was checked"
-	// (Codex M54 R3, Critical, against an earlier draft of this comment that
-	// promised exactly that). See SbomHandler.runScan for what the status is
-	// actually worth.
-	return nil
+	switch len(errs) {
+	case 0:
+		return nil
+	case 1:
+		return errs[0]
+	default:
+		return errors.Join(errs...)
+	}
 }
 
-// persistWorkItem records one work item's matches: it links every component
-// instance that shares the item's (name, version) to each matched CVE, and
-// inserts the CVE into the global catalogue if it was not there already.
+// resolveMatches turns one work item's answer into links: it finds (or
+// inserts) each matched CVE in the global catalogue and pairs it with every
+// component instance that shares the item.
 //
-// # Which statements are on the tenant transaction (M57)
+// # When and where the catalogue is touched (M57, M62)
 //
-// GetByCVE and LinkComponent run on ctx's transaction. Create does NOT: the
-// repository writes the global catalogue on its own pool whatever ctx carries
-// (VulnerabilityRepository.Create, "It never joins the caller's
-// transaction"). Before M57 it did, and the row it inserted was invisible to
-// the catalogue's owner (scheduler.CVESyncJob) for the rest of the sweep, so a
-// refresh arriving in that window read "absent", skipped, and let this
-// scanner's possibly-cached copy commit; a refused INSERT also aborted the
-// transaction and discarded every link the sweep had written. Both measured
-// in handler/m57_nvd_catalogue_boundary_integration_test.go.
+// GetByCVE runs on the pool (autocommit) and Create on the catalogue pool
+// (VulnerabilityRepository.Create never joins a caller's transaction). Both
+// run right after the lookup, which is when they ran before M62 — so the row
+// becomes visible to cve_sync as soon as the scanner has it, and
+// cveSyncReplayOverlap's argument (the row is created while its cache entry
+// is still live) still holds. Only the LINKS wait for phase 3.
 //
-// The links stay on the transaction on purpose: they are the tenant's own
-// findings, and the scan's all-or-nothing durability for them is unchanged.
-// A catalogue row can now outlive a failed sweep with nothing linked to it,
-// which is the state cve_sync leaves every unmatched CVE in already.
+// It is NOT an upsert of the freshly fetched data (Codex M54 R3, Critical):
+// when the CVE is already in the catalogue the metadata NVD just returned is
+// discarded; the catalogue's metadata belongs to cve_sync (M55).
 //
-// It is NOT an upsert of the freshly fetched data, and an earlier draft of
-// this comment called it one (Codex M54 R3, Critical). Create only runs when
-// GetByCVE MISSES. When the CVE is already in the catalogue this function
-// writes the LINK and nothing else, so the severity, CVSS score and
-// description NVD just returned are discarded and whatever is stored — which
-// may be older, or may have come from JVN — is what the project's
-// vulnerability page keeps showing. A CVE that NVD has since re-scored from
-// LOW to CRITICAL therefore stays LOW until some other path refreshes it.
+// ctx may already be past the scan deadline when an answer the deadline cut
+// short is resolved, so the statements run on scanWriteContext (detached from
+// the scan's cancellation, bounded on its own).
 //
-// That refresh gap is pre-existing and is NOT fixed in M54: making the scanner
-// overwrite the row on every scan would have it fight the CVE-sync scheduler
-// and would let an NVD sweep stamp `source = 'NVD'` over a JVN-authored row.
-// Deciding who owns the catalogue's metadata is a design question, not a
-// concurrency fix. Reported rather than silently left undocumented.
-//
-// This is the ONLY place the worker pool touches the database, and it holds
-// dbMu for the whole body. That is the M54 correctness boundary described on
-// processComponentsParallel: ctx may carry a *sql.Tx shared by up to
-// maxConcurrentWithKey goroutines, and *sql.Tx is not safe for concurrent use.
-//
-// The lock spans GetByCVE as well as the writes, not just the writes:
-// QueryRowContext hands back an open *sql.Rows and only Scan closes it, so a
-// read left the connection mid-message just as readily as a write does.
-//
-// It returns the number of statements the DATABASE REFUSED — failed Creates
-// plus failed LinkComponents. The caller escalates a non-zero count into a
-// scan error (Codex M54 R1, Critical): before that, a run whose every write
-// was refused still logged "NVD scan completed" and was marked completed for
-// the CLI. A GetByCVE miss is NOT counted: sql.ErrNoRows is this function's
-// normal "not in the catalogue yet" branch, i.e. control flow, not failure.
-//
-// Per-statement failures are logged and skipped rather than aborting the item.
-// Do NOT read that as "one bad row only costs that row" for every statement —
-// an earlier draft of this comment said exactly that and it was wrong (Codex
-// M54 R2, High). For a statement ON the transaction (GetByCVE,
-// LinkComponent), PostgreSQL aborts the whole transaction at the FIRST
-// refusal: every later statement is refused as well, and every earlier link is
-// discarded at rollback. Since M57 a refused Create is the exception — it runs
-// off the transaction, so it really does cost only its own match
-// (TestM57NVDScan_ACatalogueRefusalDoesNotDiscardTheSweep: 2 of 2 links
-// survive where 0 did before).
-//
-// What the skipping buys is that the loop keeps going and keeps counting, so
-// the returned number does not stop at the first refusal. It is still only a
-// count of REFUSALS, not of rows lost (Codex M54 R3, Medium): the writes that
-// SUCCEEDED before the first refusal are rolled back too and are counted
-// nowhere, so a poison late in a sweep can report "1 refused write" while
-// hundreds of rows silently fail to become durable. Treat a non-zero return as
-// "this scan lost data, at least this much", never as the size of the loss.
-//
-// Row-local loss is what the skipping buys on a tx-FREE ctx (Querier falling
-// back to the pooled *sql.DB, i.e. autocommit), which no production caller
-// uses today — and, since M57, for Create on every ctx.
-func (s *NVDService) persistWorkItem(
-	ctx context.Context,
-	dbMu *sync.Mutex,
-	vulns []model.Vulnerability,
-	methods []model.MatchMethod,
-	componentIDs []uuid.UUID,
-	method model.MatchMethod,
-) int {
-	dbMu.Lock()
-	defer dbMu.Unlock()
+// It returns the links and the number of matches the catalogue refused (those
+// matches cannot be linked).
+func (s *NVDService) resolveMatches(ctx context.Context, l nvdLookup, componentIDs []uuid.UUID) ([]pendingLink, int) {
+	if len(l.vulns) == 0 {
+		return nil, 0
+	}
+	cctx, cancel := scanWriteContext(ctx)
+	defer cancel()
 
 	refused := 0
-	for i := range vulns {
-		vuln := vulns[i]
-		linkMethod := method
-		if i < len(methods) {
-			linkMethod = methods[i]
+	links := make([]pendingLink, 0, len(l.vulns)*len(componentIDs))
+	for i := range l.vulns {
+		vuln := l.vulns[i]
+		linkMethod := l.method
+		if i < len(l.methods) {
+			linkMethod = l.methods[i]
 		}
-		existing, err := s.vulnRepo.GetByCVE(ctx, vuln.CVEID)
+		existing, err := s.vulnRepo.GetByCVE(cctx, vuln.CVEID)
 		if err != nil {
-			if err := s.vulnRepo.Create(ctx, &vuln); err != nil {
+			if err := s.vulnRepo.Create(cctx, &vuln); err != nil {
 				slog.Warn("failed to create vulnerability", "cve", vuln.CVEID, "error", err)
 				refused++
 				continue
 			}
 			existing = &vuln
 		}
-
 		for _, compID := range componentIDs {
-			if err := s.vulnRepo.LinkComponent(ctx, compID, existing.ID, linkMethod); err != nil {
-				// Kept at Debug for volume (one line per component instance
-				// per CVE), but no longer the ONLY trace: the refused count
-				// this function returns is what reaches the caller.
-				slog.Debug("failed to link component", "component", compID, "vuln", existing.ID, "error", err)
-				refused++
-			}
+			links = append(links, pendingLink{componentID: compID, vulnID: existing.ID, method: linkMethod})
 		}
 	}
-	return refused
+	return links, refused
 }
 
 // nvdLookup is one work item's outcome: the matches plus everything the caller
@@ -1346,7 +1242,7 @@ type nvdSearchResult struct {
 // worker pool, e.g. a test driving one lookup against an httptest server).
 //
 // It is a parameter rather than a field on NVDService because the limiter is
-// per-SCAN, not per-process: processComponentsParallel creates one ticker for
+// per-SCAN, not per-process: fetchComponents creates one ticker for
 // the whole sweep, and that is the only thing that keeps the POOL — up to
 // maxConcurrentWithKey workers — inside NVD's published rate.
 type nvdPacer func(ctx context.Context) error
@@ -1404,7 +1300,7 @@ type nvdPacer func(ctx context.Context) error
 // "linux" matches 21670 CVEs. Fetching them all would cost 109 pages
 // (76 seconds of rate limit for ONE component with an API key, 11 minutes
 // without one) — and then LINK ALL 21670 to that component, because that is
-// what persistWorkItem does with whatever this function returns. The product
+// what resolveMatches does with whatever this function returns. The product
 // would report twenty-one thousand findings against one component, none of
 // them evidence of anything. Exhaustive paging makes the answer worse, not
 // just later.
@@ -1413,7 +1309,7 @@ type nvdPacer func(ctx context.Context) error
 // line past which the query has stopped being a vulnerability match, and the
 // honest thing to do at that line is to say the result is incomplete rather
 // than to keep spending requests on noise. That is what `truncated` is for and
-// what processComponentsParallel escalates.
+// what fetchComponents escalates.
 //
 // # What the budget costs, in requests
 //
@@ -1457,7 +1353,9 @@ func (s *NVDService) searchByKeywordPaced(ctx context.Context, name, version str
 	res, err := s.walkNVD(ctx, q, pace, paceFirst, nvdMaxPagesPerComponent)
 	if err != nil {
 		// A failed keyword walk is a failed lookup, records and all (M55);
-		// only the page count survives, for the request accounting.
+		// only the page count survives, for the request accounting. Since
+		// M62 a failed lookup escalates the scan even when other components
+		// answered (NVDScanReport.incompleteErr).
 		return nvdSearchResult{pages: res.pages}, err
 	}
 	return res, nil
@@ -1500,6 +1398,15 @@ func (s *NVDService) walkNVD(ctx context.Context, query url.Values, pace nvdPace
 		// requests per tick and blow through NVD's published rate.
 		if (out.pages > 0 || paceFirst) && pace != nil {
 			if err := pace(ctx); err != nil {
+				// M62: a walk the scan DEADLINE cuts off between pages
+				// returns the pages already validated with the error, so a
+				// CPE walk can keep them (partialWalk). Every caller still
+				// treats a non-nil error as a failed lookup unless
+				// partialWalk says otherwise.
+				if scanDeadlineFired(ctx) {
+					out.truncated = true
+					return out, err
+				}
 				return nvdSearchResult{pages: out.pages}, err
 			}
 		}

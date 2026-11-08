@@ -25,9 +25,11 @@ func Connect(databaseURL string) (*sql.DB, error) {
 
 // catalogueMaxOpenConns sizes the pool ConnectCatalogue returns. Each
 // connection is held for ONE autocommit statement (a catalogue INSERT or its
-// follow-up id lookup), and a scan sweep issues at most one at a time (its
-// database section is serialised — see service.NVDService.persistWorkItem), so
-// a handful is enough to keep concurrent sweeps from queueing on it for long.
+// follow-up id lookup). Since M62 a sweep's NVD workers (up to 5 with an API
+// key) resolve catalogue rows concurrently, right after each lookup
+// (service.NVDService.resolveMatches), but each holds a connection for one
+// statement against a rate-limited stream of lookups, so a handful is enough
+// to keep concurrent sweeps from queueing on it for long.
 const catalogueMaxOpenConns = 4
 
 // ConnectCatalogue opens the small, separate pool that

@@ -83,12 +83,12 @@ const cveSyncMaxFetchSpan = 110 * 24 * time.Hour
 // long as the cache entry was still live when the scanner WROTE the row, i.e.
 // T < F + NVDCacheTTL.
 //
-// That last condition is the argument's edge, and it is not enforced (Codex
-// M57 R2, Medium): a worker holds its lookup in memory between reading it and
-// persisting it, and nothing bounds that gap — a sweep stalled for more than a
-// day between the two (behind dbMu, say, with no statement timeout) creates
-// the row from data older than the overlap covers. That is a stalled scan, not
-// a normal one; it is recorded rather than given a deadline of its own.
+// That last condition is the argument's edge (Codex M57 R2, Medium). Since M62
+// the scanner creates the row right after the lookup that returned it
+// (NVDService.resolveMatches; only the LINKS wait for the sweep's write
+// phase), and the lookup itself is bounded by the scan deadline
+// (SBOMHUB_SCAN_DEADLINE, at most 24h) and the 60 s NVD client timeout, so
+// the gap between reading a cache entry and creating the row is one lookup.
 //
 // # What it costs, and what it does NOT do
 //

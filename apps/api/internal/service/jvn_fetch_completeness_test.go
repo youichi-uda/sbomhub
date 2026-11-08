@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1686,15 +1687,16 @@ func TestM55JVN_EmptyKeywordIsNotQueried(t *testing.T) {
 // TestM55JVN_ReportCountsAreCallerVisible pins that the counts a caller needs
 // to judge a partial failure are RETURN VALUES, not log lines.
 //
-// Whether N failures out of M components should fail a scan stays a product
-// decision (unchanged here); being able to count them is not.
+// Since M62 a partial failure also fails the scan (see JVNScanReport.Err).
 func TestM55JVN_ReportCountsAreCallerVisible(t *testing.T) {
 	rep := JVNScanReport{Components: 10, Scanned: 7, Failed: 3, EntriesRetrieved: 42, EntriesAvailable: 42}
 	if rep.Failed != 3 {
 		t.Fatalf("Failed = %d, want 3", rep.Failed)
 	}
-	if err := rep.Err(); err != nil {
-		t.Errorf("partial failure must stay a success (product policy unchanged), got %v", err)
+	// M62: a partial failure now fails the scan (it stayed a success through
+	// M55-M61 pending a threshold decision).
+	if err := rep.Err(); !errors.Is(err, ErrScanFetchFailed) {
+		t.Errorf("partial failure must fail the scan (M62), got %v", err)
 	}
 	if !strings.Contains(rep.Summary(), "failed=3") {
 		t.Errorf("Summary() = %q, want it to carry the failure count", rep.Summary())

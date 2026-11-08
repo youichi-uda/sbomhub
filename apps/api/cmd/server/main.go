@@ -510,6 +510,14 @@ func main() {
 		slog.Error("Refusing to start", "error", err)
 		os.Exit(1)
 	}
+	// M62: the overall deadline of one SBOM vulnerability scan. Refused at
+	// startup when unusable, like the re-read interval above.
+	scanDeadline, err := cfg.ScanDeadline()
+	if err != nil {
+		slog.Error("Refusing to start", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("vulnerability scan deadline", "deadline", scanDeadline.String())
 
 	// SECURITY (P0 #2 / Trust Rescue 9.1.1): Migrations and runtime use
 	// distinct DB roles. We open a short-lived migrator connection here, run
@@ -731,7 +739,10 @@ func main() {
 	// GET /api/v1/projects/:id/sboms/:sbom_id/scan-status so the CLI
 	// (`sbomhub scan --fail-on <severity>`) can block until scanning
 	// completes and then enforce the threshold. Trust Rescue P1 #12.
-	scanTracker := service.NewScanTracker()
+	//
+	// M62: retention is sized from the scan deadline so a running scan's
+	// entry is never evicted before the scan can reach a terminal state.
+	scanTracker := service.NewScanTrackerFor(scanDeadline)
 
 	// AI VEX triage runner (issue #30 / Wave M1-5). Composes the four
 	// input repositories above with the BYOK LLM provider and the
@@ -877,7 +888,8 @@ func main() {
 	// dropping the audit writer would silently violate F168 audit-
 	// or-nothing the moment a threshold trips.
 	sbomHandler := handler.NewSbomHandler(db, sbomService, nvdService, jvnService, scanTracker).
-		WithDiffWebhook(projectDiffService, projectDiffWebhookService, auditRepo)
+		WithDiffWebhook(projectDiffService, projectDiffWebhookService, auditRepo).
+		WithScanDeadline(scanDeadline)
 	sbomDiffHandler := handler.NewSbomDiffHandler(sbomDiffService)
 	// M10-6 (#74) — see projectDiffService comment above. M11-4 (#79)
 	// extends with AI summary + CSV/PDF export wired through the same
@@ -898,7 +910,10 @@ func main() {
 	// scan a silent no-op — RLS filtered every component); sbomService
 	// binds the caller-supplied ?sbom_id= to the route's project before
 	// the scan is started at all.
-	vulnHandler := handler.NewVulnerabilityHandler(db, sbomService, nvdService, jvnService)
+	// M62: the manual scan reports through the same tracker as the upload
+	// scan, under the same deadline.
+	vulnHandler := handler.NewVulnerabilityHandler(db, sbomService, nvdService, jvnService).
+		WithScanTracking(scanTracker, scanDeadline)
 	statsHandler := handler.NewStatsHandler(statsService)
 	// auditRepo is wired for the M27-A (#132 / F381) cross-project VEX
 	// apply endpoint's vex_statement_reused_cross_project domain audit row
@@ -2218,7 +2233,8 @@ func main() {
 
 	// Vulnerability scan job - runs hourly to scan components against NVD
 	// Uses NVDService with Redis cache for efficient API usage
-	vulnScanJob := scheduler.NewVulnerabilityScanJobFull(db, nvdService, notificationService)
+	vulnScanJob := scheduler.NewVulnerabilityScanJobFull(db, nvdService, notificationService).
+		WithScanDeadline(scanDeadline)
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()

@@ -847,7 +847,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 		q.Set("cpeName", c.query())
 		res, err := s.walkNVD(ctx, q, pace, paceFirst, nvdCPEMaxPagesPerComponent)
 		spent += res.pages
-		if err != nil && !partialWalk(ctx, &res, c, err) {
+		if err != nil && !partialWalk(ctx, &res, "cpe "+c.String(), err) {
 			return nvdLookup{requests: spent}, false, err
 		}
 		if res.total > 0 || len(res.entries) > 0 {
@@ -882,7 +882,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 	pq.Set("virtualMatchString", c.productQuery())
 	res, err := s.walkNVD(ctx, pq, pace, paceFirst || spent > 0, nvdCPEMaxPagesPerComponent)
 	spent += res.pages
-	if err != nil && !partialWalk(ctx, &res, c, err) {
+	if err != nil && !partialWalk(ctx, &res, "cpe "+c.String(), err) {
 		return nvdLookup{requests: spent}, false, err
 	}
 	if res.total == 0 && len(res.entries) == 0 {
@@ -915,15 +915,19 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 	return out, true, nil
 }
 
-// partialWalk decides whether a CPE walk that failed partway is kept as a
-// TRUNCATED answer: only when at least one page validated and the context is
-// still live (a cancelled sweep stays an error). Found by the M60 decision-2
-// end-to-end run: a 35.8 s kernel page past the client timeout made the whole
-// kernel lookup a partial fetch failure — 0 findings, not escalated. A
-// truncated answer IS escalated (the scan reports failed) and never cached,
-// and the verified pages' findings are kept.
-func partialWalk(ctx context.Context, res *nvdSearchResult, c cpeCandidate, err error) bool {
-	if ctx.Err() != nil || len(res.entries) == 0 {
+// partialWalk decides whether a page walk that failed partway is kept as a
+// TRUNCATED answer: only when at least one page validated, and the context is
+// either still live (a page failed) or ended by the SCAN DEADLINE (M62). Any
+// other cancellation stays an error. Found by the M60 decision-2 end-to-end
+// run: a 35.8 s kernel page past the client timeout made the whole kernel
+// lookup a partial fetch failure — 0 findings, not escalated. A truncated
+// answer IS escalated (the scan reports failed) and never cached, and the
+// pages' findings are kept.
+func partialWalk(ctx context.Context, res *nvdSearchResult, what string, err error) bool {
+	if len(res.entries) == 0 {
+		return false
+	}
+	if ctx.Err() != nil && !scanDeadlineFired(ctx) {
 		return false
 	}
 	res.truncated = true
@@ -931,8 +935,9 @@ func partialWalk(ctx context.Context, res *nvdSearchResult, c cpeCandidate, err 
 	if res.total <= res.fetched {
 		res.total = res.fetched + 1 // at least one record is known to be missing
 	}
-	slog.Warn("nvd: CPE walk failed partway; keeping the verified pages and reporting the answer truncated",
-		"cpe", c.String(), "pages", res.pages, "fetched", res.fetched, "total", res.total, "error", err)
+	slog.Warn("nvd: page walk failed partway; keeping the pages already read and reporting the answer truncated",
+		"query", what, "pages", res.pages, "fetched", res.fetched, "total", res.total,
+		"deadline_exceeded", scanDeadlineFired(ctx), "error", err)
 	return true
 }
 

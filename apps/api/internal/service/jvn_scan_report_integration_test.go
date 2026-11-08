@@ -23,6 +23,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
@@ -30,23 +31,18 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sbomhub/sbomhub/internal/database"
+	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
-// withTenantScanTx runs fn against the APP role inside a rolled-back tenant
-// transaction, the same shape SbomHandler.runScan gives the scanners.
+// withTenantScanTx runs fn with the context production callers hand the
+// scanners. Up to M61 that was a (here: rolled-back) tenant transaction; since
+// M62 it is the tenant SCOPE with no transaction — the scanner opens its own
+// short transactions and refuses a context carrying one. The name is kept for
+// the callers; the scanner's writes now commit.
 func withTenantScanTx(t *testing.T, appDB *sql.DB, tenantID uuid.UUID, fn func(ctx context.Context)) {
 	t.Helper()
-	tx, err := appDB.Begin()
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(`SELECT set_config('app.current_tenant_id', $1, true)`, tenantID.String()); err != nil {
-		t.Fatalf("set tenant context: %v", err)
-	}
-	fn(database.WithTx(context.Background(), tx))
+	fn(WithScanScope(context.Background(), appDB, tenantID))
 }
 
 func TestM55JVNScanReport_TruncationReachesScanComponents(t *testing.T) {
@@ -120,12 +116,20 @@ func TestM55JVNScanReport_TruncationReachesScanComponents(t *testing.T) {
 			t.Errorf("error %q does not declare the results incomplete", err)
 		}
 
-		// Still in the SAME transaction (withTenantScanTx rolls back, so a
-		// later one would see nothing): everything the budget did retrieve
-		// was persisted. Truncation reduces coverage; it must not discard
+		// Everything the budget did retrieve was persisted (M62: committed
+		// by the scanner's own write transaction; read back in a tenant
+		// transaction). Truncation reduces coverage; it must not discard
 		// the coverage that was obtained.
-		vulns, err := vulnRepo.ListByProject(ctx, project)
-		if err != nil {
+		scope, serr := ScanScopeFrom(ctx)
+		if serr != nil {
+			t.Fatal(serr)
+		}
+		var vulns []model.Vulnerability
+		if err := scope.ReadTx(ctx, func(txCtx context.Context) error {
+			var lerr error
+			vulns, lerr = vulnRepo.ListByProject(txCtx, project)
+			return lerr
+		}); err != nil {
 			t.Fatalf("ListByProject: %v", err)
 		}
 		if len(vulns) < jvnMaxCountItem*jvnMaxPagesPerComponent {
@@ -242,16 +246,7 @@ func TestM55JVNScanReport_CancellationIsNotSuccess(t *testing.T) {
 		repository.NewComponentRepository(appDB), ts.URL, false)
 	svc.requestDelay = 0
 
-	tx, err := appDB.Begin()
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(`SELECT set_config('app.current_tenant_id', $1, true)`, tenant.String()); err != nil {
-		t.Fatalf("set tenant context: %v", err)
-	}
-
-	rep, err := svc.ScanComponentsReport(database.WithTx(ctx, tx), sbom)
+	rep, err := svc.ScanComponentsReport(WithScanScope(ctx, appDB, tenant), sbom)
 	t.Logf("report: %s", rep.Summary())
 	if !rep.Cancelled {
 		t.Errorf("Cancelled = false after the context was cancelled mid-sweep")
@@ -383,9 +378,10 @@ func TestM55JVNScanReport_PartialFetchFailureIsCounted(t *testing.T) {
 		if rep.Scanned != 1 {
 			t.Errorf("Scanned = %d, want 1", rep.Scanned)
 		}
-		if err != nil {
-			t.Errorf("partial failure must stay a success until a threshold is chosen "+
-				"(product decision, unchanged here), got %v", err)
+		// M62: a partial failure now fails the sweep (it stayed a success
+		// through M55-M61 pending a threshold decision).
+		if !errors.Is(err, ErrScanFetchFailed) {
+			t.Errorf("partial failure must fail the sweep with ErrScanFetchFailed (M62), got %v", err)
 		}
 	})
 }

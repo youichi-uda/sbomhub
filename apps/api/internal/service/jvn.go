@@ -272,9 +272,7 @@ func (c JVNCVSS) Score() string    { return jvnAttr(c.Attrs, "score") }
 // lookup failed" from "fine" and nothing else, so a sweep in which 9 of 10
 // components could not be reached was indistinguishable from a clean one.
 //
-// Whether a partial failure should FAIL a scan is still a product decision and
-// is deliberately not taken here — Err() keeps the existing policy. Counting
-// it is not a policy decision, and is what this type fixes.
+// M62 escalates a partial failure too (see Err).
 type JVNScanReport struct {
 	// Components is how many components the SBOM held.
 	Components int
@@ -313,80 +311,101 @@ type JVNScanReport struct {
 	// BudgetExhausted records that the shared extra-page pool ran out, so
 	// truncation here is our own budget rather than MyJVN's size.
 	BudgetExhausted bool
+	// DeadlineExceeded records that Cancelled was the overall scan deadline
+	// (SBOMHUB_SCAN_DEADLINE), not another cancellation (M62).
+	DeadlineExceeded bool
+	// NewVulnerabilities is how many distinct vulnerabilities became linked
+	// to the SBOM in this sweep's write transaction (M62).
+	NewVulnerabilities int
 }
 
 // Summary renders the report as a single log/diagnostic string.
 func (r JVNScanReport) Summary() string {
 	return fmt.Sprintf(
-		"components=%d scanned=%d failed=%d skipped_no_name=%d unscanned=%d cancelled=%t "+
+		"components=%d scanned=%d failed=%d skipped_no_name=%d unscanned=%d cancelled=%t deadline_exceeded=%t "+
 			"refused_writes=%d truncated_components=%d advisories=%d/%d wire_entries=%d "+
 			"requests=%d budget_exhausted=%t",
-		r.Components, r.Scanned, r.Failed, r.SkippedNoName, r.Unscanned, r.Cancelled,
+		r.Components, r.Scanned, r.Failed, r.SkippedNoName, r.Unscanned, r.Cancelled, r.DeadlineExceeded,
 		r.RefusedWrites, r.TruncatedComponents, r.EntriesRetrieved, r.EntriesAvailable,
 		r.EntriesReturned, r.Requests, r.BudgetExhausted)
 }
 
-// Err maps the report onto the single channel JVNService owns to the caller.
-//
-// The caller is SbomHandler.runScan, which turns a non-nil error into
-// ScanTracker.MarkFailed — documented as "the upload succeeded, but scan
-// results are incomplete". Every condition below is exactly that, so they all
-// escalate through it:
+// Err maps the report onto the single channel JVNService owns to the caller,
+// reporting every applicable reason (errors.Join), each wrapping its M62
+// sentinel so ScanReasons can name it:
 //
 //   - a refused WRITE (M54 R10) — a match was obtained and not recorded;
-//   - EVERY lookup failing (M54 R8) — the sweep has no coverage at all;
-//   - the sweep being cancelled part-way — components were never looked up;
+//   - the sweep being cut off — by the scan deadline or another cancellation —
+//     with components never looked up;
+//   - a FETCH failure, total (M54 R8) or, since M62, PARTIAL. M55 left the
+//     partial case as success pending a threshold; M62 applies the threshold
+//     the product already applies to truncation, zero: a component that was
+//     not checked cannot be reported clean;
 //   - TRUNCATION (M55) — MyJVN holds more advisories for a component than the
 //     budget retrieved.
 //
-// Two conditions are counted and NOT escalated:
-//
-//   - a PARTIAL fetch failure, unchanged: picking the threshold at which N of M
-//     unreachable components invalidates a scan is a product decision. Failed
-//     carries the number either way.
-//   - a component with no name (SkippedNoName). There is nothing to look up, so
-//     this is a defect in the uploaded SBOM rather than in the scan; the
-//     component is not claimed as checked, it is claimed as skipped.
-//
-// It follows that a sweep of an SBOM whose components are ALL nameless returns
-// nil — the same "nothing was looked up, and that is not an error" outcome an
-// empty SBOM and offline mode already produce (see SbomHandler.runScan on what
-// `completed` is worth).
+// A component with no name (SkippedNoName) is counted and NOT escalated:
+// there is nothing to look up, so this is a defect in the uploaded SBOM rather
+// than in the scan. A sweep of an SBOM whose components are ALL nameless
+// therefore returns nil, like an empty SBOM and offline mode.
 func (r JVNScanReport) Err() error {
+	var errs []error
 	if r.RefusedWrites > 0 {
-		return fmt.Errorf("jvn: database refused %d vulnerability write(s); scan results are incomplete",
-			r.RefusedWrites)
-	}
-	if r.Scanned == 0 && r.Failed > 0 {
-		return fmt.Errorf("jvn: all %d component lookup(s) failed; the scan has no coverage", r.Failed)
+		errs = append(errs, fmt.Errorf("jvn: database refused %d vulnerability write(s); scan results are incomplete: %w",
+			r.RefusedWrites, ErrScanWriteRefused))
 	}
 	if r.Cancelled {
-		return fmt.Errorf("jvn: the scan was cancelled with %d of %d component(s) never looked up; "+
-			"scan results are incomplete", r.Unscanned, r.Components)
+		cause := ErrScanCancelled
+		what := "was cancelled"
+		if r.DeadlineExceeded {
+			cause = ErrScanDeadlineExceeded
+			what = "hit the scan deadline"
+		}
+		errs = append(errs, fmt.Errorf("jvn: the scan %s with %d of %d component(s) never looked up; "+
+			"scan results are incomplete: %w", what, r.Unscanned, r.Components, cause))
+	}
+	if r.Failed > 0 {
+		if r.Scanned == 0 && !r.Cancelled {
+			errs = append(errs, fmt.Errorf("jvn: all %d component lookup(s) failed; the scan has no coverage: %w",
+				r.Failed, ErrScanFetchFailed))
+		} else {
+			errs = append(errs, fmt.Errorf("jvn: %d of %d component lookup(s) failed; the findings for those "+
+				"components are missing: %w", r.Failed, r.Components, ErrScanFetchFailed))
+		}
 	}
 	if r.TruncatedComponents > 0 {
-		return fmt.Errorf("jvn: %d of %d component(s) match more advisories than the fetch budget "+
-			"retrieves (%d of %d entries pulled, budget_exhausted=%t); scan results are incomplete",
-			r.TruncatedComponents, r.Components, r.EntriesRetrieved, r.EntriesAvailable, r.BudgetExhausted)
+		errs = append(errs, fmt.Errorf("jvn: %d of %d component(s) match more advisories than the fetch budget "+
+			"retrieves (%d of %d entries pulled, budget_exhausted=%t); scan results are incomplete: %w",
+			r.TruncatedComponents, r.Components, r.EntriesRetrieved, r.EntriesAvailable, r.BudgetExhausted,
+			ErrScanTruncated))
 	}
-	return nil
+	switch len(errs) {
+	case 0:
+		return nil
+	case 1:
+		return errs[0]
+	default:
+		return errors.Join(errs...)
+	}
 }
 
 // ScanComponents scans components for JVN vulnerabilities.
 //
 // It is the compatibility shell over ScanComponentsReport for callers that
-// only want the pass/fail verdict. Callers that need the counts — how many
-// component lookups failed, how many match sets were truncated — must use
-// ScanComponentsReport; those numbers cannot be recovered from this error.
+// only want the pass/fail verdict.
 func (s *JVNService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error {
 	_, err := s.ScanComponentsReport(ctx, sbomID)
 	return err
 }
 
 // ScanComponentsReport scans every component of the SBOM against MyJVN and
-// returns both the counts and the verdict. The report is populated even when
-// the error is non-nil, except when the component list itself could not be
-// read.
+// returns the sweep's accounting alongside the verdict.
+//
+// M62: it runs in the same three phases as the NVD sweep (scan_scope.go) — a
+// short tenant transaction to list the components, the MyJVN requests with NO
+// transaction open (catalogue rows resolved per component on the pool, as
+// before), then ONE short locked tenant transaction for the links. ctx must
+// carry a ScanScope and no transaction.
 func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID) (JVNScanReport, error) {
 	var rep JVNScanReport
 
@@ -395,33 +414,34 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 		return rep, nil
 	}
 
-	components, err := s.componentRepo.ListBySbom(ctx, sbomID)
+	scope, err := scanScopeFrom(ctx)
 	if err != nil {
+		return rep, err
+	}
+
+	var components []model.Component
+	if err := scope.readTx(ctx, func(txCtx context.Context) error {
+		var lerr error
+		components, lerr = s.componentRepo.ListBySbom(txCtx, sbomID)
+		return lerr
+	}); err != nil {
 		return rep, fmt.Errorf("failed to get components: %w", err)
 	}
 	rep.Components = len(components)
 
-	// The pool is per-SWEEP, so one pathological component cannot spend the
-	// whole scan's allowance and every component still gets its first page.
+	// One pool of extra pages for the whole sweep (see
+	// jvnExtraPageBudgetPerScan for why it is shared, not per component).
 	extraPages := s.extraPageBudget
 
-	// queried counts components actually looked up, and drives the pacing:
-	// the delay is applied BEFORE each query except the first, never after
-	// one (Codex M55 R8 Low, R9 Low). Pausing after each component left a
-	// dead wait at the end of the sweep, and the "skip it on the last
-	// index" patch still waited when the trailing components were nameless
-	// and would never be queried at all — in both cases a context expiring
-	// in that wait turned a sweep that had scanned everything into a
-	// cancelled, "results are incomplete" one.
+	// queried counts components actually sent to MyJVN, so the pause between
+	// requests is taken before every request except the first.
 	queried := 0
+	var groups [][]pendingLink
 
 	for i := range components {
 		comp := &components[i]
 
 		if strings.TrimSpace(comp.Name) == "" {
-			// Not merely useless: with the date default removed a blank
-			// keyword matches the ENTIRE JVN corpus, so querying it would
-			// burn the page budget on an answer that means nothing.
 			slog.Warn("skipping JVN lookup for a component with no name", "component_id", comp.ID)
 			rep.SkippedNoName++
 			continue
@@ -456,29 +476,46 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 			rep.BudgetExhausted = true
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				// Cut off by the deadline / cancellation: this component and
+				// every one after it were not checked. Not a lookup failure.
+				rep.Cancelled = true
+				rep.Unscanned = len(components) - i
+				break
+			}
 			slog.Error("Failed to scan component for JVN vulnerabilities",
 				"component", comp.Name,
 				"error", err)
 			rep.Failed++
-			if ctx.Err() != nil {
-				// A cancelled context makes every remaining lookup fail
-				// for a reason that has nothing to do with the component.
-				// Counting those as "checked and clean" is how a killed
-				// scan used to finish as a successful one.
-				rep.Cancelled = true
-				rep.Unscanned = len(components) - i - 1
-				break
-			}
 			continue
 		}
+		groups = append(groups, out.Links)
 		rep.Scanned++
 	}
+	if rep.Cancelled && scanDeadlineFired(ctx) {
+		rep.DeadlineExceeded = true
+	}
 
-	slog.Info("JVN component scan completed", "report", rep.Summary())
+	refused, newVulns, werr := scope.writeLinks(ctx, sbomID, groups, func(txCtx context.Context, l pendingLink) error {
+		return s.vulnRepo.LinkToComponent(txCtx, l.vulnID, l.componentID, l.method)
+	})
+	if werr != nil {
+		slog.Warn("jvn: write phase failed; no link of this sweep was committed", "sbom_id", sbomID, "error", werr)
+	}
+	rep.RefusedWrites += refused
+	rep.NewVulnerabilities = newVulns
+
+	if rep.DeadlineExceeded {
+		slog.Warn("jvn: scan deadline exceeded; findings obtained before it were committed and the scan is reported incomplete",
+			"sbom_id", sbomID, "report", rep.Summary())
+	} else {
+		slog.Info("JVN component scan completed", "sbom_id", sbomID, "report", rep.Summary())
+	}
 	return rep, rep.Err()
 }
 
-// pause applies the inter-request delay, abandoning it if the context ends.
+// pause waits requestDelay between consecutive MyJVN requests, returning early
+// (with the context's error) if the sweep is cancelled meanwhile.
 func (s *JVNService) pause(ctx context.Context) error {
 	if s.requestDelay <= 0 {
 		return ctx.Err()
@@ -493,64 +530,45 @@ func (s *JVNService) pause(ctx context.Context) error {
 	}
 }
 
-// scanComponent looks one component up in JVN and records what it finds.
-//
-// It returns the number of statements the DATABASE REFUSED alongside any fetch
-// error, so ScanComponents can escalate (M54, Codex R10 Critical — the JVN twin
-// of the R1 NVD defect). Before this, every write failure was logged and
-// swallowed and scanComponent always returned nil, so a component whose matches
-// could not be recorded was counted as successfully scanned and "JVN scan
-// completed" was emitted for a sweep that persisted nothing.
+// scanComponent fetches one component's advisories and resolves each matched
+// CVE against the global catalogue (GetByCVEID on the pool; Create on the
+// catalogue pool — it never joins a transaction, M57). The LINKS are returned
+// for the sweep's write phase rather than written here (M62): this function
+// runs while network I/O is still in progress, so it must not hold a
+// transaction.
 func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component, extraPages *int) (jvnComponentOutcome, error) {
-	// Search JVN by product name
 	res, err := s.searchKeyword(ctx, comp.Name, extraPages)
 	out := jvnComponentOutcome{Fetch: res}
 	if err != nil {
 		return out, err
 	}
-	vulns := res.Vulns
 
+	cctx, cancel := scanWriteContext(ctx)
+	defer cancel()
 	refused := 0
-	for _, vuln := range vulns {
-		// Check if vulnerability already exists
-		existing, _ := s.vulnRepo.GetByCVEID(ctx, vuln.CVEID)
-		if existing != nil {
-			// Link existing vulnerability to component if not already linked.
-			// A failed link means the component silently loses this match, so
-			// log it (same treatment as the new-vulnerability path below).
-			if err := s.vulnRepo.LinkToComponent(ctx, existing.ID, comp.ID, model.MatchJVNKeyword); err != nil {
-				slog.Error("Failed to link existing vulnerability to component",
-					"cve_id", vuln.CVEID, "component", comp.Name, "error", err)
+	for _, vuln := range res.Vulns {
+		existing, _ := s.vulnRepo.GetByCVEID(cctx, vuln.CVEID)
+		if existing == nil {
+			vuln.ID = uuid.New()
+			if err := s.vulnRepo.Create(cctx, &vuln); err != nil {
+				slog.Error("Failed to create JVN vulnerability", "cve_id", vuln.CVEID, "error", err)
 				refused++
+				continue
 			}
-			continue
+			existing = &vuln
 		}
-
-		// Create new vulnerability. The catalogue row is written OFF this
-		// scan's tenant transaction (M57, VulnerabilityRepository.Create), so a
-		// refusal here costs this match only; the link below stays on it.
-		vuln.ID = uuid.New()
-		if err := s.vulnRepo.Create(ctx, &vuln); err != nil {
-			slog.Error("Failed to create JVN vulnerability", "cve_id", vuln.CVEID, "error", err)
-			refused++
-			continue
-		}
-
-		// Link to component
-		if err := s.vulnRepo.LinkToComponent(ctx, vuln.ID, comp.ID, model.MatchJVNKeyword); err != nil {
-			slog.Error("Failed to link vulnerability to component", "error", err)
-			refused++
-		}
+		out.Links = append(out.Links, pendingLink{componentID: comp.ID, vulnID: existing.ID, method: model.MatchJVNKeyword})
 	}
 
 	out.RefusedWrites = refused
 	return out, nil
 }
 
-// jvnComponentOutcome is what one component's scan did: what was fetched, and
-// how much of it the database refused.
+// jvnComponentOutcome is one component's result: what the fetch saw, the
+// links to write, and how many catalogue writes the database refused.
 type jvnComponentOutcome struct {
 	Fetch         jvnKeywordResult
+	Links         []pendingLink
 	RefusedWrites int
 }
 
