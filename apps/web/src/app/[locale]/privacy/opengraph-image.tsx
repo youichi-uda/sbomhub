@@ -1,6 +1,6 @@
 import { ImageResponse } from "next/og";
 
-export const runtime = "edge";
+// Node.js runtime (the default). The Edge Runtime is deprecated in Next 16.
 export const alt = "SBOMHub - Privacy Policy";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
