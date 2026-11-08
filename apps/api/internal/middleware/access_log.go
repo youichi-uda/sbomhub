@@ -294,9 +294,9 @@ func asciiLower(s string) string {
 // credentials in it in shapes no scrubber anticipates: query parameters
 // nobody listed, webhook secrets that are path segments, %q-quoted URLs, and
 // url.Parse diagnostics that repeat a bad "port" (a password) outside the
-// URL. The type chain still tells an operator which layer failed; the 5xx
-// detail of an *echo.HTTPError is logged separately by the server's error
-// handler.
+// URL. The type chain still tells an operator which layer failed. The
+// server's 5xx error handler logs the same classification (ErrorClass), not
+// the text, for the same reason.
 func accessLogErrorText(err error) string {
 	// A direct assertion, as echo's DefaultHTTPErrorHandler does: a wrapped
 	// *echo.HTTPError is answered 500, so it is classified by its type
@@ -339,4 +339,24 @@ func errorTypeChain(err error, depth int) string {
 		err = errors.Unwrap(err)
 	}
 	return strings.Join(parts, " > ")
+}
+
+// ErrorClass is the access log's text-free classification of a handler
+// error (see accessLogErrorText), exported so every log line that reports a
+// failed request uses the same rule: the server's 5xx error handler logs this
+// instead of the error text, for the same reason the access log does.
+func ErrorClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	return accessLogErrorText(err)
+}
+
+// ErrorTypeChain renders only the dynamic types along err's Unwrap chain
+// (e.g. "*fmt.wrapError > *url.Error > *net.OpError"), never its text.
+func ErrorTypeChain(err error) string {
+	if err == nil {
+		return ""
+	}
+	return errorTypeChain(err, 0)
 }
