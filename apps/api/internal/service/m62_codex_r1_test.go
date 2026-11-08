@@ -149,3 +149,29 @@ func TestM62R1_TrackerIgnoresAStaleRunsOutcome(t *testing.T) {
 		t.Errorf("a stale completion overwrote the current run's failure (%s)", st)
 	}
 }
+
+// Codex M62 R2 High: the NEWER run finishing first must not publish
+// "completed" while an older run of the same SBOM is still running; the
+// outcome is published when the last overlapping run finishes, failed if any
+// of them failed.
+func TestM62R2_TrackerWaitsForEveryOverlappingRun(t *testing.T) {
+	tr := NewScanTracker()
+	id := uuid.New()
+	a := tr.Begin(id)
+	b := tr.Begin(id)
+	tr.Finish(id, b, nil, "")
+	if st, _ := tr.Get(id); st != ScanStateRunning {
+		t.Fatalf("newer run finished first: state = %s, want running while the older run is still going", st)
+	}
+	tr.Finish(id, a, []string{ScanReasonFetchFailed}, "jvn: scan failed (fetch_failed)")
+	st, msg, reasons := tr.GetDetail(id)
+	if st != ScanStateFailed || msg != "jvn: scan failed (fetch_failed)" || !slices.Equal(reasons, []string{ScanReasonFetchFailed}) {
+		t.Fatalf("after both finished: %s %q %v, want failed with the older run's reasons", st, msg, reasons)
+	}
+	// A fresh run after the group ended starts a new group.
+	c := tr.Begin(id)
+	tr.Finish(id, c, nil, "")
+	if st, _ := tr.Get(id); st != ScanStateCompleted {
+		t.Errorf("a later clean run alone: state = %s, want completed", st)
+	}
+}

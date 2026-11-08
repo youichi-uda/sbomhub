@@ -119,6 +119,10 @@ func scanInterruption(ctx context.Context) error {
 	return ErrScanCancelled
 }
 
+// ScanInterruption is scanInterruption for callers outside the package: why
+// ctx is done, as ErrScanDeadlineExceeded / ErrScanCancelled, or nil.
+func ScanInterruption(ctx context.Context) error { return scanInterruption(ctx) }
+
 // scanDeadlineFired reports whether ctx ended because the scan deadline did.
 func scanDeadlineFired(ctx context.Context) bool {
 	return errors.Is(scanInterruption(ctx), ErrScanDeadlineExceeded)

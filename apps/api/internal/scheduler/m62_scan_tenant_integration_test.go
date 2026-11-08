@@ -165,3 +165,45 @@ func TestM62ScanTenant_DeadlineIsRecorded(t *testing.T) {
 		t.Errorf("scan log = %q / %q, want failed / \"scan failed (deadline_exceeded)\"", status, msg)
 	}
 }
+
+// Codex M62 R2 Medium: a scheduled scan cancelled mid-fetch (shutdown) still
+// finalises its scan log — failed (cancelled) — instead of leaving it
+// "running" forever because the log update reused the cancelled context.
+func TestM62ScanTenant_CancelledScanStillFinalisesItsLog(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+
+	tenantID := seedWave3Tenant(t, migDB, "m62schedCancel")
+	m62SchedSeedProject(t, migDB, tenantID, "m62hang")
+	entered := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	job := (&VulnerabilityScanJob{
+		db: appDB,
+		nvdService: service.NewNVDService(repository.NewVulnerabilityRepository(appDB),
+			repository.NewComponentRepository(appDB), "m62-fake-api-key", srv.URL, false),
+	}).WithScanDeadline(time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = job.scanTenant(ctx, tenantID) }()
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("NVD request never arrived")
+	}
+	cancel()
+	<-done
+
+	status, _, msg := m62SchedLastLog(t, migDB, tenantID)
+	if status != "failed" || msg != "scan failed (cancelled)" {
+		t.Errorf("scan log = %q / %q, want failed / \"scan failed (cancelled)\"", status, msg)
+	}
+}

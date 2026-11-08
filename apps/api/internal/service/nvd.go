@@ -83,14 +83,14 @@ const (
 	// ~36 requests = ~3.6 min without an API key (6 s/request) or ~25 s with
 	// one; the 60-page worst case is 6 min / 42 s. Each page is one request
 	// under the 30 s client timeout (a 200-record kernel page measured 2.0 s,
-	// 2 MB). There is no overall scan deadline (pre-existing).
+	// 2 MB). The whole scan is bounded by SBOMHUB_SCAN_DEADLINE (M62).
 	nvdCPEMaxPagesPerComponent = 60
 
 	// nvdClientTimeout bounds ONE NVD request. It was 30 s; the M60 kernel run
 	// (2026-11-08, live NVD) measured deep kernel pages of 200 records at
 	// 15-36 s, one of them 35.8 s at NVD itself, so 30 s failed a full kernel
 	// walk. 60 s covers the measured worst case with headroom. It bounds a
-	// single request, not a scan (there is no overall scan deadline).
+	// single request; the scan is bounded by SBOMHUB_SCAN_DEADLINE (M62).
 	nvdClientTimeout = 60 * time.Second
 )
 
