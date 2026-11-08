@@ -114,8 +114,14 @@ func parseCPE(s string) (cpeName, bool) {
 		for _, f := range raw {
 			// %01 / %02 are the CPE 2.2 URI wildcards ('?' and '*'): not one
 			// concrete product (Codex M60 R17 Medium).
-			if lf := strings.ToLower(f); strings.Contains(lf, "%01") || strings.Contains(lf, "%02") {
+			lf := strings.ToLower(f)
+			if strings.Contains(lf, "%01") || strings.Contains(lf, "%02") {
 				return cpeName{}, false
+			}
+			if lf == "%2a" || lf == "%2d" { // encoded lone "*" / "-": literal
+				u, _ := url.PathUnescape(f)
+				fields = append(fields, cpeLiteralMark+u)
+				continue
 			}
 			u, err := url.PathUnescape(f)
 			if err != nil {
@@ -157,14 +163,21 @@ func splitCPE23(s string) ([]string, bool) {
 	var b strings.Builder
 	esc := false
 	unquotedStar := false // this field holds an UNQUOTED '*'
+	quotedRunes := 0      // escaped characters in this field
 	endField := func() bool {
 		v := b.String()
 		if unquotedStar && v != "*" {
 			return false // a partial wildcard such as "widget*"
 		}
+		if quotedRunes == 1 && (v == "*" || v == "-") {
+			// A QUOTED lone "*" / "-" is a literal value, not ANY / NA
+			// (Codex M60 R19 Low).
+			v = cpeLiteralMark + v
+		}
 		out = append(out, v)
 		b.Reset()
 		unquotedStar = false
+		quotedRunes = 0
 		return true
 	}
 	for _, r := range s {
@@ -175,6 +188,7 @@ func splitCPE23(s string) ([]string, bool) {
 			}
 			b.WriteRune(r)
 			esc = false
+			quotedRunes++
 		case r == '\\':
 			esc = true
 		case r == ':':
@@ -196,6 +210,11 @@ func splitCPE23(s string) ([]string, bool) {
 	return out, true
 }
 
+// cpeLiteralMark prefixes a field that was a QUOTED lone "*" or "-": a
+// literal value, distinct from the logical ANY / NA. escapeCPE23 restores the
+// quoting.
+const cpeLiteralMark = "\x00"
+
 // cpeConcrete is false for the logical values ANY ("*") and NA ("-") and for
 // an empty attribute.
 func cpeConcrete(v string) bool {
@@ -205,6 +224,9 @@ func cpeConcrete(v string) bool {
 // escapeCPE23 re-escapes an attribute value for a CPE 2.3 formatted string:
 // everything other than letters, digits, '_', '-' and '.' is backslash-quoted.
 func escapeCPE23(v string) string {
+	if strings.HasPrefix(v, cpeLiteralMark) {
+		return `\` + v[len(cpeLiteralMark):] // a quoted lone "*" or "-"
+	}
 	var b strings.Builder
 	for _, r := range v {
 		if r < 0x80 && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.') {
@@ -408,9 +430,12 @@ func cpeCandidates(cpes []string, compVersion, purl string) []cpeCandidate {
 			// (Codex M60 R6 Medium).
 			continue
 		}
-		v, update, updateNA := strings.TrimSpace(compVersion), "", false
+		// raw is the version exactly as stated — whitespace included — and
+		// decides whether a comparison may exclude (Codex M60 R19 Medium);
+		// only the query value is trimmed.
+		v, raw, update, updateNA := strings.TrimSpace(compVersion), compVersion, "", false
 		if cpeConcrete(n.Version) {
-			v = n.Version
+			v, raw = n.Version, n.Version
 		}
 		// The update attribute is the SBOM's assertion whatever the version
 		// attribute says: "widget:*:beta" + component version 2.0 is 2.0 +
@@ -419,7 +444,6 @@ func cpeCandidates(cpes []string, compVersion, purl string) []cpeCandidate {
 			update = n.Update
 		}
 		updateNA = n.Update == "-"
-		raw := v
 		v = normaliseCPEVersion(v, distro)
 		if !cpeConcrete(v) {
 			continue
