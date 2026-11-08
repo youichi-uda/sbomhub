@@ -73,6 +73,8 @@ test.describe('SSO Settings', () => {
             /github\.com\/youichi-uda\/sbomhub\/blob\/main\/docs\/configuration\.ja\.md#/,
         );
         await expect(page.getByText('Enterprise プランが必要です', { exact: true })).toHaveCount(0);
+        // No "upgrade to Enterprise" setup step for a tenant that already is.
+        await expect(page.getByRole('heading', { name: 'Enterprise プランにアップグレード' })).toHaveCount(0);
     });
 
     test('should send a non-enterprise SaaS tenant to the real billing page', async ({ page }) => {
@@ -98,9 +100,34 @@ test.describe('SSO Settings', () => {
         const link = alert.getByRole('link', { name: '料金プラン' });
         // The old link pointed at /settings/billing, which does not exist.
         await expect(link).toHaveAttribute('href', '/billing');
+        await expect(page.getByRole('heading', { name: 'Enterprise プランにアップグレード' })).toBeVisible();
         await link.click();
         await expect(page).toHaveURL(/\/en\/billing$/);
         await expect(page.getByTestId('sso-self-hosted-notice')).toHaveCount(0);
+    });
+
+    test('should not guess the auth mode when the subscription cannot be loaded', async ({ page }) => {
+        // Codex R1 Medium: a failed GET /subscription used to fall through
+        // to "e-mail/password sign-in enabled" on an anonymous self-host.
+        let fail = true;
+        await page.route(`${API_BASE_URL}/api/v1/subscription`, (route) =>
+            fail
+                ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'boom' }) })
+                : route.continue(),
+        );
+        await page.goto('/en/settings/sso');
+        const error = page.getByTestId('sso-subscription-error');
+        await expect(error).toBeVisible({ timeout: 15000 });
+        const standard = page.locator('div.rounded-lg.border', { has: page.getByRole('heading', { name: '標準認証' }) });
+        await expect(standard.getByText('不明', { exact: true })).toBeVisible();
+        await expect(standard.getByText('有効', { exact: true })).toHaveCount(0);
+        await expect(page.getByText('Enterprise プランが必要です', { exact: true })).toHaveCount(0);
+
+        fail = false;
+        await error.getByRole('button', { name: '再試行' }).click();
+        await expect(page.getByTestId('sso-self-hosted-notice')).toBeVisible();
+        await expect(error).toHaveCount(0);
+        await expect(standard.getByText('なし', { exact: true })).toBeVisible();
     });
 
     test('should handle Clerk Enterprise SSO info', async ({ page }) => {

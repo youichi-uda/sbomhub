@@ -87,9 +87,15 @@ export default function SSOSettingsPage() {
     queryFn: () => api.billing.getSubscription(),
   });
   const subscription = subscriptionQuery.data;
-  const isSelfHosted = subscription?.is_self_hosted === true;
+  // "unknown" while loading or after a failure: the page must not guess
+  // the auth mode (Codex R1: it used to fall through to "sign-in enabled").
+  const authMode: "self-hosted" | "clerk" | "unknown" =
+    subscription === undefined ? "unknown" : subscription.is_self_hosted ? "self-hosted" : "clerk";
+  const isSelfHosted = authMode === "self-hosted";
   const needsEnterprise =
     subscription !== undefined && !isSelfHosted && subscription.plan !== "enterprise";
+  // Setup steps, numbered after dropping the upgrade step when it does not apply.
+  const stepOffset = needsEnterprise ? 1 : 0;
 
   return (
     <div className="space-y-6">
@@ -99,6 +105,25 @@ export default function SSOSettingsPage() {
           企業のアイデンティティプロバイダーと連携して、セキュアな認証を実現
         </p>
       </div>
+
+      {subscriptionQuery.isError && (
+        <Alert variant="destructive" data-testid="sso-subscription-error">
+          <Info className="h-4 w-4" />
+          <AlertTitle>プランと認証モードを取得できませんでした</AlertTitle>
+          <AlertDescription>
+            <p>API に接続できるか確認して、再試行してください。</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-2"
+              onClick={() => void subscriptionQuery.refetch()}
+              disabled={subscriptionQuery.isFetching}
+            >
+              再試行
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
 
       {isSelfHosted && (
         <Alert data-testid="sso-self-hosted-notice">
@@ -150,21 +175,23 @@ export default function SSOSettingsPage() {
           <div className="flex items-center justify-between p-4 rounded-lg border">
             <div className="flex items-center gap-3">
               <div
-                className={`p-2 rounded-lg ${isSelfHosted ? "bg-muted text-muted-foreground" : "bg-green-100 text-green-600"}`}
+                className={`p-2 rounded-lg ${authMode === "clerk" ? "bg-green-100 text-green-600" : "bg-muted text-muted-foreground"}`}
               >
-                {isSelfHosted ? <Shield className="h-5 w-5" /> : <CheckCircle2 className="h-5 w-5" />}
+                {authMode === "clerk" ? <CheckCircle2 className="h-5 w-5" /> : <Shield className="h-5 w-5" />}
               </div>
               <div>
                 <h4 className="font-medium">標準認証</h4>
                 <p className="text-sm text-muted-foreground">
-                  {isSelfHosted
+                  {authMode === "self-hosted"
                     ? "セルフホスト環境のため、ユーザー認証はありません"
-                    : "メールアドレスとパスワードによる認証が有効"}
+                    : authMode === "clerk"
+                      ? "メールアドレスとパスワードによる認証が有効"
+                      : "認証モードを確認できていません"}
                 </p>
               </div>
             </div>
-            <Badge variant={isSelfHosted ? "outline" : "secondary"}>
-              {isSelfHosted ? "なし" : "有効"}
+            <Badge variant={authMode === "clerk" ? "secondary" : "outline"}>
+              {authMode === "self-hosted" ? "なし" : authMode === "clerk" ? "有効" : "不明"}
             </Badge>
           </div>
 
@@ -223,6 +250,7 @@ export default function SSOSettingsPage() {
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="space-y-4">
+            {needsEnterprise && (
             <div className="flex gap-4">
               <div className="shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
                 1
@@ -234,10 +262,11 @@ export default function SSOSettingsPage() {
                 </p>
               </div>
             </div>
+            )}
 
             <div className="flex gap-4">
               <div className="shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
-                2
+                {1 + stepOffset}
               </div>
               <div>
                 <h4 className="font-medium">Clerk ダッシュボードで SSO を設定</h4>
@@ -260,7 +289,7 @@ export default function SSOSettingsPage() {
 
             <div className="flex gap-4">
               <div className="shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
-                3
+                {2 + stepOffset}
               </div>
               <div>
                 <h4 className="font-medium">IdP でアプリケーションを登録</h4>
@@ -273,7 +302,7 @@ export default function SSOSettingsPage() {
 
             <div className="flex gap-4">
               <div className="shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
-                4
+                {3 + stepOffset}
               </div>
               <div>
                 <h4 className="font-medium">ドメイン検証とテスト</h4>
