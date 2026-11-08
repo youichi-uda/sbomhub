@@ -1061,10 +1061,11 @@ func main() {
 	// raw-error-leak class in one place. See sanitizingErrorHandler.
 	e.HTTPErrorHandler = sanitizingErrorHandler(e.HTTPErrorHandler)
 
-	// Every c.Bind of a JSON body refuses invalid UTF-8 and U+0000 with 400
-	// before decoding (PostgreSQL cannot store U+0000, so it used to surface
-	// as a 500 at the INSERT). See handler.TextGuardBinder.
-	e.Binder = handler.NewTextGuardBinder()
+	// Every c.Bind of a JSON body refuses invalid UTF-8, U+0000 and unpaired
+	// UTF-16 surrogate escapes with 400 before decoding (PostgreSQL cannot
+	// store them, so they used to surface as a 500 at the INSERT). See
+	// handler.TextGuardJSONSerializer.
+	e.JSONSerializer = handler.NewTextGuardJSONSerializer()
 
 	// Access log via slog (echo's middleware.Logger is deprecated). Same
 	// fields and error-handler timing as before, but the query string is no

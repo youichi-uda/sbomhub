@@ -15,7 +15,7 @@ import (
 )
 
 // Codex R1 (Medium): CRA /reanalyse tolerated any bind error, so a body the
-// TextGuardBinder refused (NUL / invalid UTF-8) left the override empty and
+// TextGuardJSONSerializer refused (NUL / invalid UTF-8) left the override empty and
 // the handler went on to run the (LLM-backed) runner with the source
 // report's defaults. It must answer 400 and run nothing.
 func TestCRAReportsHandler_Reanalyse_InvalidTextBodyIs400AndRunsNothing(t *testing.T) {
@@ -24,7 +24,7 @@ func TestCRAReportsHandler_Reanalyse_InvalidTextBodyIs400AndRunsNothing(t *testi
 	h.seedReport(rid, h.projectID)
 
 	e := echo.New()
-	e.Binder = NewTextGuardBinder()
+	e.JSONSerializer = NewTextGuardJSONSerializer()
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/"+rid.String()+"/reanalyse",
 		strings.NewReader(`{"product_name":"x\u0000y"}`))

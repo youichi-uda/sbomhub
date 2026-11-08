@@ -25,7 +25,7 @@ type bindTarget struct {
 func bindWith(t *testing.T, method, ctype, body string) (bindTarget, error) {
 	t.Helper()
 	e := echo.New()
-	e.Binder = NewTextGuardBinder()
+	e.JSONSerializer = NewTextGuardJSONSerializer()
 	req := httptest.NewRequest(method, "/x?q=query", strings.NewReader(body))
 	if ctype != "" {
 		req.Header.Set(echo.HeaderContentType, ctype)
@@ -36,7 +36,7 @@ func bindWith(t *testing.T, method, ctype, body string) (bindTarget, error) {
 	return v, err
 }
 
-func TestTextGuardBinder_RefusesNULAndInvalidUTF8(t *testing.T) {
+func TestTextGuardJSONSerializer_RefusesNULAndInvalidUTF8(t *testing.T) {
 	for name, body := range map[string]string{
 		"nul escape":   `{"name":"a\u0000"}`,
 		"invalid utf8": "{\"name\":\"a\xc3\"}",
@@ -57,7 +57,7 @@ func TestTextGuardBinder_RefusesNULAndInvalidUTF8(t *testing.T) {
 // The guard must not change what a valid body decodes to (the body is read
 // once and replayed from memory), and must not touch non-JSON bodies, which
 // DefaultBinder does not decode as JSON either.
-func TestTextGuardBinder_PassesValidBodiesThroughUnchanged(t *testing.T) {
+func TestTextGuardJSONSerializer_PassesValidBodiesThroughUnchanged(t *testing.T) {
 	v, err := bindWith(t, http.MethodPost, echo.MIMEApplicationJSON, `{"name":"日本語 \\u0000 🚀"}`)
 	if err != nil {
 		t.Fatal(err)
@@ -79,9 +79,9 @@ func TestTextGuardBinder_PassesValidBodiesThroughUnchanged(t *testing.T) {
 
 // BodyLimit answers 413 through the body reader; the guard must not turn
 // that into a 400.
-func TestTextGuardBinder_KeepsBodyLimit413(t *testing.T) {
+func TestTextGuardJSONSerializer_KeepsBodyLimit413(t *testing.T) {
 	e := echo.New()
-	e.Binder = NewTextGuardBinder()
+	e.JSONSerializer = NewTextGuardJSONSerializer()
 	e.Use(middleware.BodyLimit("1K"))
 	e.POST("/x", func(c echo.Context) error {
 		var v bindTarget

@@ -34,7 +34,7 @@ import (
 
 func newProjectTestEcho() *echo.Echo {
 	e := echo.New()
-	e.Binder = NewTextGuardBinder()
+	e.JSONSerializer = NewTextGuardJSONSerializer()
 	return e
 }
 

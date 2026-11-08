@@ -455,7 +455,7 @@ func (h *VexDraftsHandler) Reanalyse(c echo.Context) error {
 	var override runTriageRequest
 	// A missing or malformed body is tolerated (the source draft supplies
 	// every field), but a body refused for its text (invalid UTF-8 / U+0000,
-	// see TextGuardBinder) or its size is answered, not silently ignored.
+	// see TextGuardJSONSerializer) or its size is answered, not silently ignored.
 	if err := c.Bind(&override); err != nil && isRefusedBody(err) {
 		return respondBindError(c, err)
 	}

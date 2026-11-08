@@ -108,6 +108,16 @@ func TestM68Schema_GuardSeesQuotedLiterals(t *testing.T) {
 		c VARCHAR(20) CHECK (c IN ('short', '12345678901234567890''x')))`); err != nil {
 		t.Fatal(err)
 	}
+	// Codex R5: no false positives. A multi-column CHECK compares each literal
+	// with ONE of its columns, and a pattern literal (regex / LIKE) is not a
+	// value the column must hold.
+	if _, err := tx.Exec(`CREATE TABLE m68_guard_probe_ok (
+		short VARCHAR(3), state VARCHAR(32),
+		CHECK (short = 'ok' AND state = 'detailed_notification'),
+		CHECK (short ~ '^[a-z]{1,3}$' AND short NOT LIKE 'xxxxxxxxxxxxxxxx%'),
+		CHECK (state IN ('early_warning', 'detailed_notification')))`); err != nil {
+		t.Fatal(err)
+	}
 	got := overlongCheckLiterals(t, tx)
 	want := `m68_guard_probe.c is limited to 20 characters but its CHECK allows "12345678901234567890'x" (22)`
 	if len(got) != 1 || got[0] != want {
@@ -119,8 +129,10 @@ type catalogueQueryer interface {
 	Query(query string, args ...any) (*sql.Rows, error)
 }
 
-// overlongCheckLiterals lists every CHECK literal longer than its
-// length-limited character column. Literals are parsed in Go from
+// overlongCheckLiterals lists every CHECK value literal longer than its
+// length-limited character column. Only single-column CHECKs are judged (in a
+// multi-column one the catalogue does not say which literal belongs to which
+// column); every enum-like CHECK in this schema is single-column. Literals are parsed in Go from
 // pg_get_constraintdef: a '...' run with ” as an escaped quote (the
 // deparser always emits standard-conforming strings).
 func overlongCheckLiterals(t *testing.T, db catalogueQueryer) []string {
@@ -140,7 +152,7 @@ func overlongCheckLiterals(t *testing.T, db catalogueQueryer) []string {
 		SELECT cols.relname, cols.attname, cols.maxlen, pg_get_constraintdef(con.oid)
 		FROM cols
 		JOIN pg_constraint con ON con.conrelid = cols.relid AND con.contype = 'c'
-		                      AND cols.attnum = ANY (con.conkey)
+		                      AND con.conkey = ARRAY[cols.attnum]::int2[]
 		ORDER BY 1, 2`)
 	if err != nil {
 		t.Fatalf("catalogue query: %v", err)
@@ -154,7 +166,7 @@ func overlongCheckLiterals(t *testing.T, db catalogueQueryer) []string {
 		if err := rows.Scan(&rel, &col, &maxlen, &def); err != nil {
 			t.Fatal(err)
 		}
-		for _, lit := range sqlStringLiterals(def) {
+		for _, lit := range sqlValueLiterals(def) {
 			checked++
 			if n := utf8.RuneCountInString(lit); n > maxlen {
 				out = append(out, fmt.Sprintf("%s.%s is limited to %d characters but its CHECK allows %q (%d)", rel, col, maxlen, lit, n))
@@ -170,8 +182,29 @@ func overlongCheckLiterals(t *testing.T, db catalogueQueryer) []string {
 	return out
 }
 
-func sqlStringLiterals(def string) []string {
+// sqlValueLiterals returns the literals of def that are VALUES the column is
+// compared with: an operand of = / <> or an element of an IN / ARRAY list
+// (deparsed as `= ANY ((ARRAY['a'::…, 'b'::…])::text[])`). Pattern operands
+// (~, LIKE / ~~) are skipped — a regex is not a value the column holds.
+func sqlValueLiterals(def string) []string {
 	var out []string
+	for _, l := range sqlStringLiterals(def) {
+		before := strings.TrimRight(def[:l.start], " (")
+		if strings.HasSuffix(before, "=") || strings.HasSuffix(before, "<>") ||
+			strings.HasSuffix(before, "ARRAY[") || strings.HasSuffix(before, ",") {
+			out = append(out, l.text)
+		}
+	}
+	return out
+}
+
+type sqlLiteral struct {
+	start int // offset of the opening quote
+	text  string
+}
+
+func sqlStringLiterals(def string) []sqlLiteral {
+	var out []sqlLiteral
 	for i := 0; i < len(def); i++ {
 		if def[i] != '\'' {
 			continue
@@ -189,7 +222,7 @@ func sqlStringLiterals(def string) []string {
 			}
 			b.WriteByte(def[j])
 		}
-		out = append(out, b.String())
+		out = append(out, sqlLiteral{start: i, text: b.String()})
 		i = j
 	}
 	return out

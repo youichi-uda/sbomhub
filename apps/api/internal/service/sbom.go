@@ -668,7 +668,7 @@ func parseSPDX3(data []byte) ([]model.Component, error) {
 // stored in sboms.raw_data (JSONB), which refuses U+0000, and its component
 // names / versions / purls go to text columns that refuse it too, so such an
 // upload used to fail at the INSERT with a 500. The SBOM routes read the raw
-// body themselves (they do not go through c.Bind and its TextGuardBinder),
+// body themselves (they do not go through c.Bind and its TextGuardJSONSerializer),
 // whatever the Content-Type, so the check lives here, for both the canonical
 // route (Import) and the CLI multipart route (CLIService.UploadSBOM).
 func checkSBOMText(data []byte) error {
