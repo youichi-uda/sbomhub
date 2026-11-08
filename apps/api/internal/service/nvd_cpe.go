@@ -539,7 +539,15 @@ func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
 		// NA: a version-less thing. Not a comparison this code may decide.
 		return cpeUndecidable
 	}
+	hasAnyBound := m.VersionStartIncluding != "" || m.VersionStartExcluding != "" ||
+		m.VersionEndIncluding != "" || m.VersionEndExcluding != ""
 	if cpeConcrete(crit.Version) {
+		if hasAnyBound {
+			// A concrete version AND range bounds: every version involved
+			// counts, and deciding on the version attribute alone would
+			// ignore the bounds (Codex M60 R16 Medium).
+			return cpeUndecidable
+		}
 		// update is ANY or NA here. NA names the final release; a candidate
 		// with update ANY and a plain version is taken to BE the final
 		// release and matches (Codex M60 R12 Medium-1, declined: the

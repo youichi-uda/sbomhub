@@ -415,11 +415,13 @@ func normaliseSBOMCPEs(in []string, compVersion string) []string {
 		// first CPE of each product only), so case variants and CPEs that
 		// differ only in ignored attributes do not use up the cap (Codex
 		// M60 R4 / R10 Medium).
-		// Product AND version: a version-less CPE must not shadow a
-		// versioned one of the same product (Codex M60 R11 Medium) —
-		// whether it is usable depends on the component version, which
-		// cpeCandidates knows and this function does not.
-		key := cpeCandidate{part: n.Part, vendor: n.Vendor, product: n.Product}.productKey() + ":" + escapeCPE23(n.Version)
+		// The scanner's product identity: cpeCandidates only ever tries the
+		// first USABLE CPE of a product, and the usability filter above
+		// (Codex M60 R14) already drops CPEs that need a component version
+		// when there is none — so a version-less CPE cannot shadow a usable
+		// one (R11), and other versions of a product cannot use up the cap
+		// (Codex M60 R16 Low).
+		key := cpeCandidate{part: n.Part, vendor: n.Vendor, product: n.Product}.productKey()
 		if _, dup := seen[key]; dup {
 			continue
 		}

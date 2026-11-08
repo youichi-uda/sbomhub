@@ -45,11 +45,12 @@ func TestM60R11_CandidateUpdateAnyIsNotFinalOnly(t *testing.T) {
 
 // Codex M60 R11 Medium: storage dedupe must not let a version-less CPE of a
 // product shadow a versioned CPE of the same product (with no component
-// version, only the versioned one is usable).
+// version, only the versioned one is usable). Since R14/R16 the version-less
+// one is not stored at all when there is no component version.
 func TestM60R11_VersionlessCPEDoesNotShadowVersionedOne(t *testing.T) {
 	in := []string{"cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*", "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"}
-	if got := normaliseSBOMCPEs(in, "1.0"); !reflect.DeepEqual(got, in) {
-		t.Fatalf("normaliseSBOMCPEs = %q, want both", got)
+	if got := normaliseSBOMCPEs(in, ""); !reflect.DeepEqual(got, in[1:]) {
+		t.Fatalf("normaliseSBOMCPEs = %q, want only the versioned CPE", got)
 	}
 	cs := cpeCandidates(in, "", "")
 	if len(cs) != 1 || cs[0].version != "2.14.1" {
