@@ -196,3 +196,27 @@ test.describe('API Keys Management', () => {
         await expect(page.getByText(keyName)).toBeHidden({ timeout: 10000 });
     });
 });
+
+// Tenant-level /settings/apikeys. Regression (M65 bug 5): the header
+// "Create API Key" button is a DialogTrigger, and a closed Dialog used to
+// drop its trigger, so the button never rendered (the only way in was the
+// empty-state CTA, which disappears once one key exists).
+test.describe('API Keys settings page', () => {
+    test('header Create API Key button opens the create dialog, and again after closing', async ({ page }) => {
+        const A = en.Settings.APIKeys;
+        await page.goto('/en/settings/apikeys');
+        await expect(page.getByRole('heading', { level: 1, name: A.title, exact: true })).toBeVisible({ timeout: 15000 });
+        const create = page.getByRole('button', { name: A.createButton, exact: true });
+        await expect(create).toBeEnabled();
+        await expect(page.getByRole('dialog')).toHaveCount(0);
+
+        await create.click();
+        const dialog = page.getByRole('dialog', { name: A.createTitle });
+        await expect(dialog).toBeVisible();
+        await dialog.getByRole('button', { name: A.cancel, exact: true }).click();
+        await expect(dialog).toHaveCount(0);
+
+        await create.click();
+        await expect(dialog).toBeVisible();
+    });
+});

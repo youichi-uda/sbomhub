@@ -21,7 +21,7 @@ async function openIntegrations(page: Page) {
 }
 
 // Opens the add dialog via the empty-state CTA. The header "Add
-// Integration" button is not rendered (see the fixme'd test below).
+// Integration" button (a DialogTrigger) is covered by its own test below.
 async function openAddDialog(page: Page) {
     await openIntegrations(page);
     await page.getByRole('button', { name: I.addFirstIntegration, exact: true }).click();
@@ -37,9 +37,20 @@ test.describe('Issue Tracker Integrations', () => {
     });
 
     test('should display add connection button', async ({ page }) => {
-        test.fixme(true, 'BUG: header "Add Integration" button never renders - components/ui/dialog.tsx Dialog returns null while closed, so its DialogTrigger child is dropped (and DialogTrigger has no click wiring)');
+        // Regression (M65 bug 5): a closed Dialog used to drop its
+        // DialogTrigger, so this header button never rendered.
         await openIntegrations(page);
-        await expect(page.getByRole('button', { name: I.addIntegration, exact: true })).toBeEnabled();
+        const add = page.getByRole('button', { name: I.addIntegration, exact: true });
+        await expect(add).toBeEnabled();
+        await expect(page.getByRole('dialog')).toHaveCount(0);
+        await add.click();
+        const dialog = page.getByRole('dialog', { name: I.addNewIntegration });
+        await expect(dialog).toBeVisible();
+        // Closing and re-opening works: the trigger survives the close.
+        await page.keyboard.press('Escape');
+        await expect(dialog).toHaveCount(0);
+        await add.click();
+        await expect(dialog).toBeVisible();
     });
 
     test('should show connection form dialog when clicking add', async ({ page }) => {

@@ -5,8 +5,10 @@ import { cn } from "@/lib/utils";
 import { X } from "lucide-react";
 
 interface DialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  /** Controlled open state. Omit (with defaultOpen) for an uncontrolled dialog. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  defaultOpen?: boolean;
   children: React.ReactNode;
 }
 
@@ -29,6 +31,15 @@ interface DialogProps {
 //     translation as its accessible name. A `closeLabel` prop is exposed
 //     so callers that mount via a server-rendered translation pass the
 //     localised string in; the shim keeps a sensible "Close" fallback.
+//
+// M65 E2E bug 5: Dialog used to `return null` while closed, which also
+// dropped every DialogTrigger child — the "Add Integration" / "Create API
+// Key" / "Create ticket" buttons never rendered — and DialogTrigger was a
+// bare pass-through with no click wiring, so it could not have opened the
+// dialog anyway. Dialog now always renders its children and only
+// DialogContent (backdrop + panel) is gated on `open`; DialogTrigger opens
+// the dialog through DialogRootContext, Radix-style. Pinned by
+// src/components/ui/__tests__/dialog.test.mjs.
 
 interface DialogContextValue {
   titleId: string;
@@ -36,7 +47,25 @@ interface DialogContextValue {
 
 const DialogContext = React.createContext<DialogContextValue | null>(null);
 
-export function Dialog({ open, onOpenChange, children }: DialogProps) {
+interface DialogRootContextValue {
+  open: boolean;
+  setOpen: (open: boolean) => void;
+}
+
+const DialogRootContext = React.createContext<DialogRootContextValue | null>(null);
+
+export function Dialog({ open: openProp, onOpenChange, defaultOpen = false, children }: DialogProps) {
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen);
+  const controlled = openProp !== undefined;
+  const open = controlled ? openProp : uncontrolledOpen;
+  const setOpen = React.useCallback(
+    (next: boolean) => {
+      if (!controlled) setUncontrolledOpen(next);
+      onOpenChange?.(next);
+    },
+    [controlled, onOpenChange],
+  );
+
   // F192: Escape key must dismiss the modal. We listen at the document
   // level (not at DialogContent) because focus may be on the backdrop
   // or briefly outside the trapped surface between renders, and the
@@ -46,23 +75,18 @@ export function Dialog({ open, onOpenChange, children }: DialogProps) {
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
         e.preventDefault();
-        onOpenChange(false);
+        setOpen(false);
       }
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [open, onOpenChange]);
+  }, [open, setOpen]);
 
-  if (!open) return null;
+  const root = React.useMemo(() => ({ open, setOpen }), [open, setOpen]);
 
-  return (
-    <div className="fixed inset-0 z-50">
-      <div className="fixed inset-0 bg-black/50" onClick={() => onOpenChange(false)} />
-      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50">
-        {children}
-      </div>
-    </div>
-  );
+  // Children (trigger + content) are always rendered; DialogContent itself
+  // renders nothing while closed.
+  return <DialogRootContext.Provider value={root}>{children}</DialogRootContext.Provider>;
 }
 
 // Focusable-element selector matching common form / nav controls. The
@@ -77,21 +101,42 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(",");
 
-export function DialogContent({
-  className,
-  children,
-  onClose,
-  closeLabel = "Close",
-  "aria-labelledby": ariaLabelledByProp,
-  "aria-label": ariaLabelProp,
-}: {
+interface DialogContentProps {
   className?: string;
   children: React.ReactNode;
   onClose?: () => void;
   closeLabel?: string;
   "aria-labelledby"?: string;
   "aria-label"?: string;
-}) {
+}
+
+/**
+ * Backdrop + modal panel. Renders nothing while the enclosing Dialog is
+ * closed, so the panel's focus trap mounts (and grabs focus) on open and
+ * restores focus on close.
+ */
+export function DialogContent(props: DialogContentProps) {
+  const root = React.useContext(DialogRootContext);
+  if (!root) throw new Error("DialogContent must be used within Dialog");
+  if (!root.open) return null;
+  return (
+    <div className="fixed inset-0 z-50">
+      <div className="fixed inset-0 bg-black/50" onClick={() => root.setOpen(false)} />
+      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50">
+        <DialogPanel {...props} />
+      </div>
+    </div>
+  );
+}
+
+function DialogPanel({
+  className,
+  children,
+  onClose,
+  closeLabel = "Close",
+  "aria-labelledby": ariaLabelledByProp,
+  "aria-label": ariaLabelProp,
+}: DialogContentProps) {
   // F174: role + aria-modal on the panel itself (kept).
   // F192: useId-derived titleId is provided to DialogTitle via context
   // so screen readers announce the dialog with its title rather than as
@@ -216,14 +261,37 @@ export function DialogDescription({ children }: { children: React.ReactNode }) {
 
 export function DialogTrigger({
   children,
-  // `asChild` is kept on the public type to match the shadcn/Radix
-  // surface (callers commonly pass `<DialogTrigger asChild>`), even
-  // though this minimal shim does not apply Slot-style merging.
-  asChild: _asChild,
+  asChild,
 }: {
   children: React.ReactNode;
   asChild?: boolean;
 }) {
-  // Simple pass-through - the trigger is handled by the parent
-  return <>{children}</>;
+  const root = React.useContext(DialogRootContext);
+  if (!root) throw new Error("DialogTrigger must be used within Dialog");
+  const open = () => root.setOpen(true);
+
+  // asChild: wire the click onto the caller's own element (e.g. a <Button>)
+  // instead of nesting it in a second button. The child's own onClick still
+  // runs first; preventDefault() in it keeps the dialog closed.
+  if (asChild && React.isValidElement(children)) {
+    const child = children as React.ReactElement<{
+      onClick?: (e: React.MouseEvent<HTMLElement>) => void;
+      "aria-haspopup"?: React.AriaAttributes["aria-haspopup"];
+      "aria-expanded"?: boolean;
+    }>;
+    return React.cloneElement(child, {
+      "aria-haspopup": "dialog",
+      "aria-expanded": root.open,
+      onClick: (e: React.MouseEvent<HTMLElement>) => {
+        child.props.onClick?.(e);
+        if (!e.defaultPrevented) open();
+      },
+    });
+  }
+
+  return (
+    <button type="button" aria-haspopup="dialog" aria-expanded={root.open} onClick={open}>
+      {children}
+    </button>
+  );
 }
