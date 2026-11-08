@@ -459,6 +459,15 @@ func criterionContains(crit cpeName, m NVDCPEMatch, version string) cpeVerdict {
 //     that depends on it is undecidable, never guessed. The caller keeps such
 //     a CVE as nvd_cpe_unverified and does not cache the answer.
 //
+// Separators matter in two places (Codex M60 R5 High):
+//
+//   - everything from "+" on is SemVer build metadata and is ignored
+//     ("1.0.0+1" == "1.0.0", "1.2.3+dfsg" == "1.2.3");
+//   - a NUMBER directly after "-" is a pre-release in SemVer ("1.0.0-1" <
+//     "1.0.0") but a revision in other schemes. Such a token compares only
+//     against another dash-number; any order that depends on it otherwise is
+//     undecidable.
+//
 // Numeric zero padding is skipped wherever a number faces a qualifier, so
 // "1.0" == "1.0.0" and "1.0.0-rc1" < "1.0" < "1.0.0a" all hold together.
 // The orderings are pinned by transitivity tests over mixed sets.
@@ -466,6 +475,8 @@ func criterionContains(crit cpeName, m NVDCPEMatch, version string) cpeVerdict {
 type versionToken struct {
 	num   bool
 	value string
+	// dashNum: a number whose preceding separator was "-" (see above).
+	dashNum bool
 }
 
 var releaseMarkers = map[string]bool{"final": true, "ga": true, "release": true}
@@ -511,13 +522,18 @@ func tokenKindAt(toks []versionToken, i int) tokenKind {
 }
 
 func tokeniseVersion(v string) []versionToken {
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i] // SemVer build metadata takes no part in ordering
+	}
 	var out []versionToken
 	var cur strings.Builder
 	curNum := false
+	var sep rune // separator seen since the last token
 	flush := func() {
 		if cur.Len() > 0 {
-			out = append(out, versionToken{num: curNum, value: cur.String()})
+			out = append(out, versionToken{num: curNum, value: cur.String(), dashNum: curNum && sep == '-'})
 			cur.Reset()
+			sep = 0
 		}
 	}
 	for _, r := range strings.ToLower(v) {
@@ -525,6 +541,7 @@ func tokeniseVersion(v string) []versionToken {
 		isAlpha := r >= 'a' && r <= 'z'
 		if !isNum && !isAlpha {
 			flush()
+			sep = r
 			continue
 		}
 		if cur.Len() > 0 && isNum != curNum {
@@ -558,7 +575,10 @@ func compareNumeric(a, b string) int {
 	return strings.Compare(a, b)
 }
 
-func isZero(t versionToken) bool { return t.num && strings.TrimLeft(t.value, "0") == "" }
+// isZero is a zero that can be read as padding — never a dash-number.
+func isZero(t versionToken) bool {
+	return t.num && !t.dashNum && strings.TrimLeft(t.value, "0") == ""
+}
 
 // compareVersions compares two versions the way NVD's configuration ranges
 // are written. ok is false when they cannot be ordered with confidence;
@@ -576,6 +596,10 @@ func compareTokens(ta, tb []versionToken) (int, bool) {
 		x, y := ta[i], tb[i]
 		switch {
 		case x.num && y.num:
+			if x.dashNum != y.dashNum {
+				// "1.0.0-1" vs "1.0.0.1": pre-release or revision?
+				return 0, false
+			}
 			if c := compareNumeric(x.value, y.value); c != 0 {
 				return c, true
 			}
@@ -625,6 +649,9 @@ func compareTokens(ta, tb []versionToken) (int, bool) {
 // compareNumVsQualifier handles a number (head of nums) facing a qualifier
 // (head of quals). sign orients the result: +1 when nums is the left operand.
 func compareNumVsQualifier(nums, quals []versionToken, sign int) (int, bool) {
+	if nums[0].dashNum {
+		return 0, false // SemVer and Maven order "1.0-1" vs "1.0-rc1" differently
+	}
 	if isZero(nums[0]) {
 		// Zero padding: "1.0.0" vs "1.0a" compares like "1.0" vs "1.0a".
 		j := 0
@@ -652,6 +679,9 @@ func compareRest(rest []versionToken) (int, bool) {
 	}
 	if len(rest) == 0 {
 		return 0, true
+	}
+	if rest[0].dashNum {
+		return 0, false // "1.0.0-1" vs "1.0.0": pre-release or revision?
 	}
 	switch tokenKindAt(rest, 0) {
 	case kindNum, kindPost:

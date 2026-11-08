@@ -397,8 +397,10 @@ func normaliseSBOMCPEs(in []string) []string {
 		if c == "" || len(c) > maxStoredCPELength {
 			continue
 		}
-		// Scheme matched case-insensitively (SPDX 2.2 allows "cPE:/A:...").
-		if lc := strings.ToLower(c); !strings.HasPrefix(lc, "cpe:2.3:") && !strings.HasPrefix(lc, "cpe:/") {
+		// Only a CPE the scanner can use counts toward the cap (Codex M60
+		// R5 Low): parseCPE accepts the scheme case-insensitively and
+		// requires a valid part and a concrete vendor and product.
+		if _, ok := parseCPE(c); !ok {
 			continue
 		}
 		// CPE matching is case-insensitive, so case variants are ONE CPE
