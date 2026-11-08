@@ -499,7 +499,7 @@ func (s *NVDService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.U
 // *sql.Tx: VulnerabilityHandler.runScan and SbomHandler.runScan both open one
 // via database.WithTxFunc, and scheduler.VulnerabilityScanJob.scanProject runs
 // inside runWithTenantTx. They must — `components` FORCEs row-level security,
-// so ListBySbom above returns zero rows on a connection with no
+// so ListScanTargetsBySbom above returns zero rows on a connection with no
 // app.current_tenant_id bound. The repositories then resolve that tx through
 // database.Querier, which means every statement the workers below issue lands
 // on ONE PostgreSQL connection.
@@ -1379,15 +1379,15 @@ type nvdPacer func(ctx context.Context) error
 // this fix. The pathological upper bound is 5x that, and it requires an SBOM
 // whose components are ALL unversioned generic words.
 //
-// # What is deliberately NOT done here
+// # CPE matching (M60)
 //
-// Matching on CPE (cpeName / virtualMatchString) instead of a keyword is the
-// real root fix for the precision half of the problem — it would replace a
-// description text search with NVD's own affected-configuration data, and the
-// unversioned blow-up above would simply not exist. It is out of this wave's
-// scope because it changes what a "match" MEANS for every component in the
-// product (and needs component CPE/purl mapping that this function does not
-// have), not because it was overlooked.
+// This keyword search is no longer the only matcher. Since M60 a component
+// whose SBOM entry carries a CPE NVD knows is matched by cpeName and verified
+// against NVD's configurations instead (nvd_cpe.go, lookupComponent); this
+// function now serves components with no usable CPE, and its links are
+// labelled nvd_keyword (low confidence). Everything above about the budget
+// still holds for it — and for the CPE walk, which goes through the same
+// walkNVD.
 func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, pace nvdPacer) (nvdSearchResult, error) {
 	return s.searchByKeywordPaced(ctx, name, version, pace, false)
 }

@@ -155,6 +155,19 @@ func escapeCPE23(v string) string {
 type cpeCandidate struct {
 	part, vendor, product string
 	version               string
+	// update is the CPE `update` attribute when the SBOM's CPE pinned one
+	// ("beta9" in log4j:2.0:beta9), else "". It is part of the release the
+	// CPE names (Codex M60 R1 High-1).
+	update string
+}
+
+// effectiveVersion is the release the candidate names, in the single-string
+// form SBOM versions use: "2.0-beta9" for version 2.0 + update beta9.
+func (c cpeCandidate) effectiveVersion() string {
+	if c.update != "" {
+		return c.version + "-" + c.update
+	}
+	return c.version
 }
 
 // query is the exact CPE name sent as cpeName. Every attribute after the
@@ -162,8 +175,12 @@ type cpeCandidate struct {
 // target_sw=node.js and with target_sw=* both returned the same 5 CVEs, and
 // a wildcard cannot exclude a criterion the SBOM's guess got wrong.
 func (c cpeCandidate) query() string {
+	update := "*"
+	if c.update != "" {
+		update = escapeCPE23(c.update)
+	}
 	return "cpe:2.3:" + c.part + ":" + escapeCPE23(c.vendor) + ":" + escapeCPE23(c.product) + ":" +
-		escapeCPE23(c.version) + ":*:*:*:*:*:*:*"
+		escapeCPE23(c.version) + ":" + update + ":*:*:*:*:*:*"
 }
 
 // productQuery is the version-less virtualMatchString used to ask whether NVD
@@ -246,15 +263,18 @@ func cpeCandidates(cpes []string, compVersion, purl string) []cpeCandidate {
 		if !ok {
 			continue
 		}
-		v := compVersion
+		v, update := compVersion, ""
 		if cpeConcrete(n.Version) {
 			v = n.Version
+			if cpeConcrete(n.Update) {
+				update = n.Update
+			}
 		}
 		v = normaliseCPEVersion(v, distro)
 		if !cpeConcrete(v) {
 			continue
 		}
-		c := cpeCandidate{part: n.Part, vendor: n.Vendor, product: n.Product, version: strings.ToLower(v)}
+		c := cpeCandidate{part: n.Part, vendor: n.Vendor, product: n.Product, version: strings.ToLower(v), update: update}
 		if _, dup := seen[c.productKey()]; dup {
 			continue
 		}
@@ -316,8 +336,17 @@ const (
 // the vulnerable X — the platform half cannot be known from an SBOM, so
 // requiring it would drop real findings. Negated nodes/configurations are
 // never used as positive evidence.
+//
+// Rejection requires POSITIVE evidence (Codex M60 R1 High-2): a criterion for
+// this product that is not vulnerable, or whose version spec excludes the
+// component. A CVE whose configurations are absent, or never mention the
+// product, cannot be verified either way — NVD's own cpeName evaluation
+// selected it, so it is kept as undecidable rather than silently dropped (and
+// then cached as a clean answer).
 func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
 	undecidable := false
+	sawProduct := false
+	version := c.effectiveVersion()
 	for _, cfg := range cve.Configurations {
 		if cfg.Negate {
 			continue
@@ -327,14 +356,15 @@ func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
 				continue
 			}
 			for _, m := range node.CpeMatch {
-				if !m.Vulnerable {
-					continue
-				}
 				crit, ok := parseCPE(m.Criteria)
 				if !ok || crit.Part != c.part || crit.Vendor != c.vendor || crit.Product != c.product {
 					continue
 				}
-				switch v := criterionContains(crit, m, c.version); v {
+				sawProduct = true
+				if !m.Vulnerable {
+					continue
+				}
+				switch v := criterionContains(crit, m, version); v {
 				case cpeMatched:
 					return cpeMatched
 				case cpeUndecidable:
@@ -343,7 +373,7 @@ func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
 			}
 		}
 	}
-	if undecidable {
+	if undecidable || !sawProduct {
 		return cpeUndecidable
 	}
 	return cpeRejected
@@ -555,7 +585,9 @@ func matchMethodFor(distro bool) model.MatchMethod {
 }
 
 // String is for logs.
-func (c cpeCandidate) String() string { return fmt.Sprintf("%s@%s", c.productKey(), c.version) }
+func (c cpeCandidate) String() string {
+	return fmt.Sprintf("%s@%s", c.productKey(), c.effectiveVersion())
+}
 
 // lookupComponent resolves one work item: the CPE path first, the keyword
 // fallback when no candidate names a product NVD knows.

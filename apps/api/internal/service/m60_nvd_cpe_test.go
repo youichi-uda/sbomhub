@@ -207,12 +207,12 @@ func TestM60VerifyCPEMatch_NoVersionDisagreementOnRecordedAnswers(t *testing.T) 
 		cand    cpeCandidate
 		want    int // CVEs kept (matched + undecidable)
 	}{
-		{"p01_cpename_log4j", cpeCandidate{"a", "apache", "log4j", "2.14.1"}, 10},
-		{"p09_cpename_tomcat", cpeCandidate{"a", "apache", "tomcat", "9.0.30"}, 0},
-		{"p11_cpename_lodash_node", cpeCandidate{"a", "lodash", "lodash", "4.17.20"}, 5},
-		{"p14_cpename_xnet", cpeCandidate{"a", "golang", "networking", "0.7.0"}, 2},
-		{"p15_cpename_gin", cpeCandidate{"a", "gin-gonic", "gin", "1.7.0"}, 2},
-		{"p18_cpename_glibc", cpeCandidate{"a", "gnu", "glibc", "2.31"}, 0},
+		{"p01_cpename_log4j", cpeCandidate{"a", "apache", "log4j", "2.14.1", ""}, 10},
+		{"p09_cpename_tomcat", cpeCandidate{"a", "apache", "tomcat", "9.0.30", ""}, 0},
+		{"p11_cpename_lodash_node", cpeCandidate{"a", "lodash", "lodash", "4.17.20", ""}, 5},
+		{"p14_cpename_xnet", cpeCandidate{"a", "golang", "networking", "0.7.0", ""}, 2},
+		{"p15_cpename_gin", cpeCandidate{"a", "gin-gonic", "gin", "1.7.0", ""}, 2},
+		{"p18_cpename_glibc", cpeCandidate{"a", "gnu", "glibc", "2.31", ""}, 0},
 	}
 	for _, tc := range cases {
 		r := m60NVDFixture(t, tc.fixture)
@@ -271,13 +271,16 @@ func TestM60VerifyCPEMatch_RangeBoundaries(t *testing.T) {
 		"2.0-beta1": cpeRejected, // not listed
 		"2.0.1":     cpeMatched,  // >= 2.0.1, < 2.3.1
 	} {
-		got := verifyCPEMatch(log4shell, cpeCandidate{"a", "apache", "log4j", v})
+		got := verifyCPEMatch(log4shell, cpeCandidate{"a", "apache", "log4j", v, ""})
 		if got != want {
 			t.Errorf("CVE-2021-44228 @ %s = %v want %v", v, got, want)
 		}
 	}
-	// Wrong product never matches.
-	if got := verifyCPEMatch(log4shell, cpeCandidate{"a", "apache", "log4j-core", "2.14.1"}); got != cpeRejected {
+	// A product the CVE never mentions is never MATCHED. Since Codex M60 R1
+	// High-2 it is "undecidable" rather than rejected — rejection needs
+	// positive evidence — which only matters for a mirror that answers a
+	// cpeName query with records not about that product.
+	if got := verifyCPEMatch(log4shell, cpeCandidate{"a", "apache", "log4j-core", "2.14.1", ""}); got == cpeMatched {
 		t.Errorf("log4j-core product matched: %v", got)
 	}
 }
