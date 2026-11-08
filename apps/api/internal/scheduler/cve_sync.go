@@ -53,7 +53,10 @@ const cveSyncMaxFetchSpan = 110 * 24 * time.Hour
 
 // cveSyncReplayOverlap is how far BEFORE the stored watermark each tick starts
 // reading (M57). Every record whose lastModified falls in the last
-// cveSyncReplayOverlap of the previous window is therefore offered twice.
+// cveSyncReplayOverlap before a watermark is therefore offered again by the
+// following tick — and, because the overlap (25h) is longer than the default
+// 24h interval, a record in the last hour before a watermark is offered by
+// the two following ticks, i.e. three times in all.
 //
 // # Why
 //
@@ -92,7 +95,7 @@ const cveSyncMaxFetchSpan = 110 * 24 * time.Hour
 // One extra day of NVD's modification feed per tick (typically one more
 // 2000-record page) and a re-run of the per-tenant match phase for those
 // CVEs, whose writes are all idempotent (links ON CONFLICT DO NOTHING,
-// advisory excerpts upserted). A record offered twice is refused the second
+// advisory excerpts upserted). A record offered again is refused every later
 // time by UpdateMetadata's strict `<` guard, so the replay cannot overwrite
 // anything with itself.
 //
@@ -525,7 +528,8 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	// so it is not offered again until upstream modifies the CVE — except that
 	// since M57 the next tick re-reads cveSyncReplayOverlap before the
 	// watermark, so a record whose lastModified falls in that last stretch is
-	// offered exactly once more. That is a side effect of the overlap, not a
+	// offered once more (twice for the last hour, while the interval is
+	// shorter than the overlap). That is a side effect of the overlap, not a
 	// retry policy: nothing tracks the failure, and a record older than the
 	// overlap gets no second chance.
 	//
