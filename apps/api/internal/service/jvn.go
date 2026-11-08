@@ -284,14 +284,14 @@ type JVNScanReport struct {
 	// SkippedNoName is how many components carried no usable name and were
 	// therefore not queried at all.
 	SkippedNoName int
-	// Unscanned is how many components were never reached because the
-	// sweep was cancelled part-way.
+	// Unscanned is how many components were never looked up because the
+	// sweep was cut off; since M62 it includes the component whose lookup
+	// the cut interrupted, so it is at least 1 when Cancelled is set.
 	Unscanned int
-	// Cancelled records that the sweep ended early because its context
-	// did. It is separate from Unscanned because cancellation ON THE LAST
-	// component leaves nothing behind it — Unscanned would be 0 and, with
-	// one earlier success, the killed sweep would report success (Codex
-	// M55 R1, Critical).
+	// Cancelled records that the sweep ended early because its context did
+	// (Codex M55 R1, Critical: before, a sweep killed on its last component
+	// could report success). DeadlineExceeded (M62) says whether that was
+	// the scan deadline rather than another cancellation.
 	Cancelled bool
 	// RefusedWrites is how many matches the database declined to record.
 	RefusedWrites int

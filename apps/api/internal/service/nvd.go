@@ -808,9 +808,9 @@ func (s *NVDService) logSweepSummary(sbomID uuid.UUID, r NVDScanReport) {
 //     threshold the product already applies to truncation: zero. A scan
 //     that did not check a component cannot report it clean, and a partial
 //     answer must not be readable as a clean one (UPGRADE §9.3). The CPE
-//     path already escalated a page failing partway (as truncation); the
-//     keyword path now does both: a failed lookup escalates, and a page
-//     failing partway keeps the pages before it as a truncated answer.
+//     path already escalated a page failing partway (as truncation, keeping
+//     the validated pages). On the keyword path a page failing partway
+//     discards the walk, as before, and is now escalated as fetch_failed.
 //   - Truncated result sets (M55): NVD's totalResults proves the set is
 //     incomplete.
 //
