@@ -2048,3 +2048,128 @@ Web pages now load their data through react-query. Self-hosted deployments
 see no difference. In Clerk mode, switching organisation now shows a brief
 "Loading..." screen and reloads the dashboard. Before, the previous
 organisation's data could stay on screen until the next fetch.
+
+## 18. Input validation, CRA 72h reports, NVD search status codes (M66)
+
+**Who must act:** clients that send project names with control characters or
+descriptions over 1000 characters; anyone who branches on the status of
+`GET /api/v1/search/cve`; operators rolling back past migration 068.
+
+### 18.1 72h CRA reports work (migration 068)
+
+`cra_reports.report_type` was VARCHAR(20), but its CHECK allows
+`detailed_notification`, which is 21 characters, so every 72h report failed
+with 500. Migration 068 widens the column to VARCHAR(32).
+
+- **Upgrading** does not rewrite the table. One scan re-checks the CHECK: 25 ms
+  for 300k rows on PostgreSQL 15. The migration bounds its lock wait (5s) and
+  its run time (60s).
+- **Rolling 068 back** rewrites the table and is refused while any 72h report
+  exists. Export and remove those reports first, or stay on 068.
+
+### 18.2 Text in JSON request bodies
+
+A JSON request body now gets 400 `invalid request body: <reason> at offset N`
+when it:
+
+- is not valid UTF-8,
+- contains U+0000 (raw or `\u0000`), or
+- contains an unpaired UTF-16 surrogate escape (`\ud800`).
+
+Before, U+0000 and lone surrogates failed in PostgreSQL with 500, and invalid
+UTF-8 was silently stored as U+FFFD. SBOM uploads (`POST /projects/:id/sbom`,
+`POST /cli/upload`) get the same check whatever the Content-Type, and answer
+400 `failed to parse SBOM: ...`. On a 10,000-component SBOM the check costs
+about 1-2% of parse time.
+
+### 18.3 Project name and description
+
+These rules apply to `POST /api/v1/projects`, `POST /api/v1/cli/projects` and
+the create path of `POST /api/v1/cli/upload`:
+
+- `name` must not be blank. It may be at most 255 characters, the column's
+  limit; longer names used to fail with 500. It may not contain control or
+  line-break characters (C0, DEL, C1, U+2028/U+2029).
+- `description` may be at most 1000 characters. The API always declared this
+  limit but never enforced it. It may not contain U+0000.
+
+A violation returns 400 with a message naming the field.
+
+The CLI routes still find an existing project whose name predates these rules;
+only creating such a name is refused. An empty name, which used to be stored,
+is now refused.
+
+### 18.4 Other status changes
+
+- **`DELETE /api/v1/projects/:id` for a project that does not exist:** now 404.
+  It was 500.
+- **`GET /api/v1/search/cve` and `/mcp/search/cve`:** this applies when the CVE
+  is not stored locally and the NVD lookup fails. Both used to return 500.
+  - If NVD answered 403, 429 or 503, the response is **503** with `Retry-After`
+    in seconds and `{"code":"nvd_unavailable","retry_after_seconds":N}`.
+    `Retry-After` is NVD's own value clamped to 1s-1h, or 30 when NVD sends
+    none.
+  - Any other upstream failure returns **502** with
+    `{"code":"nvd_upstream_error"}`.
+- **METI override and clear-override notes:** the 4096 limit now counts
+  characters, not bytes. Japanese notes over about 1,366 characters used to be
+  refused. The audit fields `override_note_len` and `clear_note_len` are now in
+  characters too.
+- **Reanalyse with a refused body:** `POST .../cra-reports/:id/reanalyse` and
+  `.../vex-drafts/:id/reanalyse` now answer 400 or 413 when the body is refused
+  for its text or size. They used to run with the defaults instead.
+
+## 19. Web: security headers, error states, required METI override reason (M66)
+
+### 19.1 Security headers on every page
+
+The web app now sends:
+
+- Content-Security-Policy
+- X-Content-Type-Options: nosniff
+- X-Frame-Options: DENY, with CSP `frame-ancestors 'none'`
+- Referrer-Policy: strict-origin-when-cross-origin
+- Permissions-Policy
+
+It no longer sends X-Powered-By. Pages can no longer be embedded in iframes.
+
+The policy is computed at build time:
+
+- `connect-src` allows the origin of `NEXT_PUBLIC_API_URL`, and of
+  `NEXT_PUBLIC_WAITLIST_FORM_URL` when that is set.
+- Clerk builds also allow the Frontend API host decoded from the publishable
+  key, plus Clerk's documented hosts.
+
+If your deployment loads something the policy does not allow, rebuild with
+`SBOMHUB_CSP_REPORT_ONLY=true`. The CSP is then sent as Report-Only; framing
+stays denied.
+
+The app does not set HSTS. Set it on your TLS-terminating proxy.
+
+### 19.2 Failed loads are shown as errors
+
+When one of these lists fails to load, the page now shows an error with a
+Retry button instead of an empty list:
+
+- projects
+- API keys
+- integrations
+- CRA reports
+- a project's API keys
+- a project's license check
+
+### 19.3 METI manual override requires a reason
+
+The override form now requires a reason that is not blank. The API already
+rejected a blank reason with 400.
+
+### 19.4 SSO settings page on self-host
+
+Self-hosted instances now see that they have no user authentication or SSO (see
+Deployment Mode). Before, the page asked them to upgrade to Enterprise.
+
+### 19.5 Dialog buttons
+
+The "Add integration", "Create API key" and vulnerability "Create ticket"
+buttons now open their dialogs. A shared Dialog component bug dropped the
+trigger while the dialog was closed.
