@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/lib/pq"
 
 	"github.com/sbomhub/sbomhub/internal/config"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
@@ -890,5 +891,21 @@ func writeJSON(t *testing.T, path string, v any) {
 	}
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatalf("write json: %v", err)
+	}
+}
+
+// A lib/pq server error is a DB error whether or not a dbErr wraps it, so
+// --continue-on-error never skips past it. The live-server counterpart is
+// TestIntegration_RealServerErrorIsPQError (pq_error_integration_test.go).
+func TestPQErrorClassifiedAsDBError(t *testing.T) {
+	raw := &pq.Error{Code: "23505", Message: "duplicate key value violates unique constraint"}
+	for name, err := range map[string]error{
+		"bare":    raw,
+		"wrapped": fmt.Errorf("update row: %w", raw),
+	} {
+		if !isDBErr(err) || isContinuableRowErr(err) || classifyErr(err) != exitDBError {
+			t.Errorf("%s: isDBErr=%v continuable=%v class=%d, want DB error (exit %d)",
+				name, isDBErr(err), isContinuableRowErr(err), classifyErr(err), exitDBError)
+		}
 	}
 }

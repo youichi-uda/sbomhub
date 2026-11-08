@@ -18,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgconn"
 	"github.com/lib/pq"
 
 	"github.com/sbomhub/sbomhub/internal/service"
@@ -973,13 +972,18 @@ func zero(b []byte) {
 type dbErr struct{ error }
 type preconditionErr struct{ error }
 
+// isDBErr reports whether err is a database failure (exit 2, never skipped by
+// --continue-on-error). The tool's driver is lib/pq (openDB = sql.Open with
+// the "postgres" driver lib/pq registers), so a server-side error arrives as
+// *pq.Error. An earlier *pgconn.PgError (jackc/pgconn v1) branch could never
+// match — no pgx driver is registered — and was removed together with that
+// unmaintained module; TestIntegration_RealServerErrorIsPQError pins the
+// driver's actual error type against a live server.
 func isDBErr(err error) bool {
 	var d dbErr
 	var pqe *pq.Error
-	var pge *pgconn.PgError
 	return errors.As(err, &d) ||
 		errors.As(err, &pqe) ||
-		errors.As(err, &pge) ||
 		errors.Is(err, sql.ErrConnDone) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, context.Canceled)
