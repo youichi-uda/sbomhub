@@ -134,6 +134,14 @@ jobs:
       - name: Proxy matcher invariant (M10-4)
         run: node apps/web/src/proxy.matcher.test.mjs
 
+      # Clerk 7 upgrade: runs the real `createRouteMatcher` over the
+      # public-route patterns from proxy.ts against 41 paths, so a
+      # protected path turning public (or a Clerk matcher semantics
+      # change in a future major) fails CI. Hard gate, same rationale as
+      # the matcher invariant above.
+      - name: Proxy public-route classification (Clerk createRouteMatcher)
+        run: node apps/web/src/proxy.public-routes.test.mjs
+
       # e2e skip-reachability meta-gate — fast, hermetic copy of a check
       # that also runs inside `web-e2e.yml::web-e2e-full` (which is the
       # BINDING run: that job is a required status check, this one is
