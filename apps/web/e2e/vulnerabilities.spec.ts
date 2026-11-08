@@ -195,8 +195,8 @@ test.describe('Vulnerabilities', () => {
     const cveId = FIXTURE_CVES[0].cveId;
     const entry = page.locator(`[data-vuln-cve-id="${cveId}"]`);
     // The real request goes to the API origin, not the web origin, and gets
-    // a JSON answer from the API (the hermetic stack is SBOMHUB_OFFLINE, so
-    // OSV is unreachable and the API answers 404 "remediation not available").
+    // a JSON answer from the API. The hermetic stack is SBOMHUB_OFFLINE, where
+    // the API skips OSV and answers 200 with type "manual" guidance.
     const asked = page.waitForRequest(remediationUrl(cveId));
     const answered = page.waitForResponse(remediationUrl(cveId));
     // The RemediationPanel trigger is the button labelled with the CVE id.
@@ -204,13 +204,15 @@ test.describe('Vulnerabilities', () => {
     expect(new URL((await asked).url()).origin).toBe(new URL(API_BASE_URL).origin);
     const res = await answered;
     expect(res.headers()['content-type']).toContain('application/json');
-    expect(res.status()).toBe(404);
-    expect((await res.json()).error).toBe('remediation not available');
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.cve_id).toBe(cveId);
+    expect(body.remediation.type).toBe('manual');
 
     const nvdLink = entry.getByRole('link', { name: 'NVD' });
     await expect(nvdLink).toBeVisible({ timeout: 10000 });
-    await expect(entry.getByText(en.RemediationPanel.notAvailable)).toBeVisible();
     await expect(entry.getByText(en.RemediationPanel.fetchFailed)).toHaveCount(0);
+    await expect(entry.getByText(en.RemediationPanel.notAvailable)).toHaveCount(0);
     await expect(nvdLink).toHaveAttribute('href', `https://nvd.nist.gov/vuln/detail/${cveId}`);
     await expect(nvdLink).toHaveAttribute('target', '_blank');
     await expect(nvdLink).toHaveAttribute('rel', /noopener/);
@@ -244,6 +246,21 @@ test.describe('Vulnerabilities', () => {
     await expect(entry.getByRole('link', { name: 'NVD' })).toBeVisible();
     await expect(entry.getByText(en.RemediationPanel.notAvailable)).toHaveCount(0);
     await expect(entry.getByText(en.RemediationPanel.fetchFailed)).toHaveCount(0);
+  });
+
+  test('should say remediation is not available when the API answers 404, and still link NVD / OSV', async ({ page }) => {
+    const cveId = FIXTURE_CVES[0].cveId;
+    // Stubbed: the online "OSV has no entry" answer cannot happen offline.
+    await page.route(`${API_BASE_URL}/api/v1/remediation/${cveId}**`, (route) =>
+      route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'remediation not available' }) }),
+    );
+    await openVulnerabilitiesTab(page, fixture.projectId);
+    const entry = page.locator(`[data-vuln-cve-id="${cveId}"]`);
+    await entry.getByRole('button', { name: new RegExp(cveId) }).click();
+    await expect(entry.getByText(en.RemediationPanel.notAvailable)).toBeVisible({ timeout: 10000 });
+    await expect(entry.getByText(en.RemediationPanel.fetchFailed)).toHaveCount(0);
+    await expect(entry.getByRole('link', { name: 'NVD' })).toHaveAttribute('href', `https://nvd.nist.gov/vuln/detail/${cveId}`);
+    await expect(entry.getByRole('link', { name: 'OSV' })).toHaveAttribute('href', `https://osv.dev/vulnerability/${cveId}`);
   });
 
   test('should report a failed remediation request as a failure, and retry on the next open', async ({ page }) => {
