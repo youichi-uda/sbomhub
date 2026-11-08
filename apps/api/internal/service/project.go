@@ -44,8 +44,8 @@ func ValidateProjectName(name string) error {
 
 // ValidateProjectInput checks the name (see ValidateProjectName) and the
 // optional description: at most ProjectDescriptionMaxChars characters, valid
-// UTF-8, no NUL; tab and line breaks are allowed, other control characters
-// are not.
+// UTF-8, no NUL (the only character TEXT cannot store); every other character,
+// line breaks and control characters included, is accepted as before.
 func ValidateProjectInput(name, description string) error {
 	if err := ValidateProjectName(name); err != nil {
 		return err
