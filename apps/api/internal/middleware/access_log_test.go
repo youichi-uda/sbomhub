@@ -331,3 +331,30 @@ func TestAccessLog_ErrorFieldIsRedacted(t *testing.T) {
 		t.Errorf("error field lost its non-secret text: %q", s)
 	}
 }
+
+// Codex R5 High: pattern-based scrubbing missed credentials it has no name
+// for. Every URL in the error text is cut to scheme://host, whatever its
+// query parameter names or path shape.
+func TestAccessLog_ErrorFieldURLsCutToHost(t *testing.T) {
+	cases := map[string]struct{ in, secret, keep string }{
+		"client_secret":   {`Post "https://idp.example.com/token?client_secret=CLIENTSECRET42&x=1": EOF`, "CLIENTSECRET42", "https://idp.example.com"},
+		"aws signature":   {`Get "https://b.s3.amazonaws.com/o?X-Amz-Signature=AMZSIG0987abc": timeout`, "AMZSIG0987abc", "https://b.s3.amazonaws.com"},
+		"encoded name":    {`Get "https://api.example.com/v1?api%5Fkey=ENCNAMESECRET": refused`, "ENCNAMESECRET", "https://api.example.com"},
+		"slack webhook":   {`Post "https://hooks.slack.com/services/T000/B000/SLACKPATHSECRET": 404`, "SLACKPATHSECRET", "https://hooks.slack.com"},
+		"discord webhook": {"post https://discord.com/api/webhooks/123/DISCORDPATHSECRET failed", "DISCORDPATHSECRET", "https://discord.com"},
+		"fragment":        {"see https://x.example.com/#access_token=FRAGSECRET77", "FRAGSECRET77", "https://x.example.com"},
+		"userinfo":        {"dial postgres://app:USERINFOPW@db:5432/sbomhub failed", "USERINFOPW", "postgres://db:5432"},
+		"bearer no url":   {"upstream said: Bearer eyJhbGciOiJIUzI1NiJ9.BEARERX1", "BEARERX1", "upstream said"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := accessLogErrorText(errors.New(tc.in))
+			if strings.Contains(got, tc.secret) {
+				t.Fatalf("secret %q survived: %q", tc.secret, got)
+			}
+			if !strings.Contains(got, tc.keep) {
+				t.Fatalf("lost the non-secret part %q: %q", tc.keep, got)
+			}
+		})
+	}
+}

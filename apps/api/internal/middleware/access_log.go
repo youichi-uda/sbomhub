@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -38,9 +39,10 @@ import (
 //     everything after accessLogSecretPrefixes. middleware.Logger logged the
 //     public-link token in clear.
 //   - `route` (the matched route template, e.g. /api/v1/projects/:id) is new.
-//   - `error` is scrubbed with internal/redact (query-string credentials,
-//     Bearer tokens, Authorization headers, DSN passwords); middleware.Logger
-//     logged it verbatim.
+//   - `error` is scrubbed (see accessLogErrorText): every URL in it is cut to
+//     scheme://host, then internal/redact removes Bearer tokens,
+//     Authorization headers and auth-shaped name=value pairs.
+//     middleware.Logger logged it verbatim.
 //   - 5xx responses are logged at ERROR, everything else at INFO.
 //
 // Error handling matches middleware.Logger exactly: a handler error is passed
@@ -95,11 +97,7 @@ func AccessLog(logger *slog.Logger) echo.MiddlewareFunc {
 				attrs = append(attrs, slog.String("request_id", v.RequestID))
 			}
 			if v.Error != nil {
-				// Error text can carry credentials (an outbound *url.Error
-				// with ?apiKey=, a Bearer token, a DSN password); scrub it
-				// with the same pattern set the audit log uses. redact.String
-				// works on a copy — redact.Error would mutate the chain.
-				attrs = append(attrs, slog.String("error", redact.String(v.Error.Error())))
+				attrs = append(attrs, slog.String("error", accessLogErrorText(v.Error)))
 			}
 			level := slog.LevelInfo
 			if v.Status >= 500 {
@@ -286,4 +284,30 @@ func asciiLower(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// accessLogURLRe matches a URL with an explicit scheme up to the next
+// whitespace or quote (*url.Error renders its URL in double quotes). Groups:
+// 1 scheme, 2 optional userinfo, 3 host[:port].
+var accessLogURLRe = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.\-]*)://([^/\s"'?#@]*@)?([^/\s"'?#]*)[^\s"']*`)
+
+// accessLogErrorText renders a handler error for the access log without the
+// credentials error text routinely carries. It fails closed on the main
+// carrier, URLs: an outbound *url.Error, a webhook or a DSN keeps only
+// scheme://host — userinfo, path, query and fragment are dropped whatever
+// their names or shape (a Slack/Discord webhook secret is a path segment; a
+// presigned URL's is an X-Amz-Signature parameter no name list anticipates).
+// internal/redact (the audit log's scrubber) then removes Bearer tokens,
+// Authorization headers and auth-shaped name=value pairs outside URLs. It
+// works on the rendered string; the error chain is not modified.
+func accessLogErrorText(err error) string {
+	s := accessLogURLRe.ReplaceAllStringFunc(err.Error(), func(u string) string {
+		m := accessLogURLRe.FindStringSubmatch(u)
+		cut := m[1] + "://" + m[3]
+		if len(cut) < len(u) {
+			cut += "/" + accessLogRedacted
+		}
+		return cut
+	})
+	return redact.String(s)
 }
