@@ -305,6 +305,10 @@ type CVESyncJob struct {
 	// pooled connection in autocommit. That is load-bearing, not incidental:
 	// see refreshCatalogueMetadata.
 	vulnRepo *repository.VulnerabilityRepository
+	// pageDelay is the pause between two NVD requests (M58: a field rather
+	// than a branch inside each fetch, so the delta fetch and the full
+	// re-read pace from one value and tests can shorten it).
+	pageDelay time.Duration
 }
 
 // NewCVESyncJob creates a new CVE sync job.
@@ -343,7 +347,17 @@ func NewCVESyncJob(db *sql.DB, tenantRepo *repository.TenantRepository, nvdAPIKe
 		offline:          offline,
 		osv:              client.NewOSVClient().WithOffline(offline),
 		vulnRepo:         repository.NewVulnerabilityRepository(db),
+		pageDelay:        cveSyncPageDelay(nvdAPIKey),
 	}
+}
+
+// cveSyncPageDelay is NVD's published pacing for this job's requests: ~5 per
+// 30s without an API key, ~50 per 30s with one.
+func cveSyncPageDelay(nvdAPIKey string) time.Duration {
+	if nvdAPIKey != "" {
+		return cveSyncRateLimitKey
+	}
+	return cveSyncRateLimitNoKey
 }
 
 // WithOSVBaseURL overrides the OSV API base endpoint used by the M43 Wave 3
@@ -641,127 +655,201 @@ type CVEInfo struct {
 	Keywords []string
 }
 
+// fetchModifiedCVEs reads every record NVD modified in [since, now].
+//
+// The window's end is fixed ONCE, before the first page (M58). It used to be
+// recomputed as time.Now() for every page, so each page asked about a
+// slightly different window and totalResults could move between pages for no
+// reason other than the clock.
 func (j *CVESyncJob) fetchModifiedCVEs(ctx context.Context, since time.Time) ([]CVEInfo, error) {
 	var allCVEs []CVEInfo
-	startIndex := 0
-
-	// Rate limiting
-	rateLimit := cveSyncRateLimitNoKey
-	if j.nvdAPIKey != "" {
-		rateLimit = cveSyncRateLimitKey
+	err := j.walkModifiedWindow(ctx, since, time.Now(), func(page []CVEInfo) error {
+		allCVEs = append(allCVEs, page...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	for {
-		params := url.Values{}
-		params.Set("lastModStartDate", since.UTC().Format("2006-01-02T15:04:05.000"))
-		params.Set("lastModEndDate", time.Now().UTC().Format("2006-01-02T15:04:05.000"))
-		params.Set("startIndex", fmt.Sprintf("%d", startIndex))
-		params.Set("resultsPerPage", fmt.Sprintf("%d", cveSyncResultsPerPage))
-
-		req, err := http.NewRequestWithContext(ctx, "GET", j.baseURL+"?"+params.Encode(), nil)
-		if err != nil {
-			return nil, err
-		}
-
-		if j.nvdAPIKey != "" {
-			req.Header.Set("apiKey", j.nvdAPIKey)
-		}
-
-		resp, err := j.httpClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("NVD API request failed: %w", err)
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("NVD API error: %d - %s", resp.StatusCode, string(body))
-		}
-
-		var nvdResp struct {
-			TotalResults    int `json:"totalResults"`
-			StartIndex      int `json:"startIndex"`
-			ResultsPerPage  int `json:"resultsPerPage"`
-			Vulnerabilities []struct {
-				CVE struct {
-					ID           string `json:"id"`
-					Published    string `json:"published"`
-					LastModified string `json:"lastModified"`
-					Descriptions []struct {
-						Lang  string `json:"lang"`
-						Value string `json:"value"`
-					} `json:"descriptions"`
-					// service.NVDMetrics carries each assessment's `type`
-					// (Primary / Secondary), which the anonymous struct here
-					// dropped (Codex M57 R1, Critical) — see
-					// extractCVSSFromMetrics.
-					Metrics        service.NVDMetrics `json:"metrics"`
-					Configurations []struct {
-						Nodes []struct {
-							CpeMatch []struct {
-								Criteria   string `json:"criteria"`
-								Vulnerable bool   `json:"vulnerable"`
-							} `json:"cpeMatch"`
-						} `json:"nodes"`
-					} `json:"configurations"`
-				} `json:"cve"`
-			} `json:"vulnerabilities"`
-		}
-
-		if err := json.NewDecoder(resp.Body).Decode(&nvdResp); err != nil {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to decode NVD response: %w", err)
-		}
-		resp.Body.Close()
-
-		// Convert to CVEInfo
-		for _, v := range nvdResp.Vulnerabilities {
-			cve := CVEInfo{
-				ID: v.CVE.ID,
-			}
-
-			// Get English description
-			for _, desc := range v.CVE.Descriptions {
-				if desc.Lang == "en" {
-					cve.Description = desc.Value
-					break
-				}
-			}
-
-			// Extract CVSS score and severity
-			cve.CVSSScore, cve.Severity = extractCVSSFromMetrics(v.CVE.Metrics)
-
-			// Parse dates. NVD sends them WITHOUT an offset
-			// ("2026-08-11T19:33:44.513", measured live 2026-11-08), which
-			// time.RFC3339 — what this used until M57 — rejects; the error was
-			// discarded, so every record was undateable and the metadata
-			// refresh refused all of them. service.ParseNVDTimestamp is the
-			// scanner's parser (M54) and reads the zoneless forms as UTC, as
-			// NVD documents them. Unparseable still yields the zero time,
-			// which the callers treat as "unknown".
-			if t := service.ParseNVDTimestamp(v.CVE.Published); t != nil {
-				cve.PublishedAt = *t
-			}
-			if t := service.ParseNVDTimestamp(v.CVE.LastModified); t != nil {
-				cve.ModifiedAt = *t
-			}
-
-			// Extract keywords from CPE for matching
-			cve.Keywords = extractKeywordsFromCPE(v.CVE.Configurations)
-
-			allCVEs = append(allCVEs, cve)
-		}
-
-		// Check if we have more results
-		if startIndex+len(nvdResp.Vulnerabilities) >= nvdResp.TotalResults {
-			break
-		}
-
-		startIndex += cveSyncResultsPerPage
-		time.Sleep(rateLimit) // Rate limit between pages
-	}
-
 	return allCVEs, nil
+}
+
+// walkModifiedWindow pages through NVD's records modified in [start, end],
+// handing each page to fn as soon as it is read, pausing j.pageDelay between
+// requests. It stops at the first error from NVD, from page validation, or
+// from fn.
+//
+// # Page identity (M58, M57 residual #3)
+//
+// The loop used to stop when startIndex + len(page) reached totalResults and
+// never looked at where the page said it was. A mirror that answered every
+// request with page zero (a cache keyed on the path alone) produced
+// 2000 + 2000 >= 3706: the loop stopped early, processed the duplicates
+// twice, and the caller advanced past 1,706 records it never saw. Every page
+// is now checked by checkModifiedPage before it is used.
+//
+// totalResults moving BETWEEN pages is not treated as an error: NVD keeps
+// modifying records while a long window is walked, and a record modified again
+// leaves this window for a later one. Failing the walk on that would make a
+// large window (the full re-read meets one of ~316,000 records) impossible to
+// complete. It is logged; what it can cost is a record shifted past the
+// cursor, which is re-offered by a later read (see cveSyncReplayOverlap and
+// reconcileCatalogue).
+func (j *CVESyncJob) walkModifiedWindow(ctx context.Context, start, end time.Time, fn func([]CVEInfo) error) error {
+	startIndex := 0
+	firstTotal := -1
+	for {
+		page, total, err := j.fetchModifiedPage(ctx, start, end, startIndex)
+		if err != nil {
+			return err
+		}
+		if firstTotal < 0 {
+			firstTotal = total
+		} else if total != firstTotal {
+			slog.Warn("CVE sync: NVD's result count for the window changed while it was being read; records may "+
+				"have moved between pages and are re-offered by a later read",
+				"window_start", start.UTC().Format(time.RFC3339), "window_end", end.UTC().Format(time.RFC3339),
+				"first_total", firstTotal, "total_now", total, "start_index", startIndex)
+			firstTotal = total
+		}
+		if err := fn(page); err != nil {
+			return err
+		}
+		if startIndex+len(page) >= total {
+			return nil
+		}
+		startIndex += len(page)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(j.pageDelay):
+		}
+	}
+}
+
+// checkModifiedPage refuses a page that is not the page that was asked for.
+func checkModifiedPage(wantStart, pageSize int, gotStart, gotTotal *int, n int) (int, error) {
+	if gotStart == nil || gotTotal == nil {
+		return 0, fmt.Errorf("NVD page is missing startIndex or totalResults; cannot verify it is the page requested (startIndex=%d)", wantStart)
+	}
+	if *gotStart != wantStart {
+		return 0, fmt.Errorf("NVD returned the page at startIndex=%d when startIndex=%d was requested", *gotStart, wantStart)
+	}
+	if n > pageSize {
+		return 0, fmt.Errorf("NVD page at startIndex=%d holds %d records, more than the %d requested", wantStart, n, pageSize)
+	}
+	if n == 0 && wantStart < *gotTotal {
+		return 0, fmt.Errorf("NVD page at startIndex=%d is empty but totalResults=%d says records remain", wantStart, *gotTotal)
+	}
+	return *gotTotal, nil
+}
+
+// fetchModifiedPage fetches and validates one page of the modified-CVE feed.
+func (j *CVESyncJob) fetchModifiedPage(ctx context.Context, start, end time.Time, startIndex int) ([]CVEInfo, int, error) {
+	params := url.Values{}
+	params.Set("lastModStartDate", start.UTC().Format("2006-01-02T15:04:05.000"))
+	params.Set("lastModEndDate", end.UTC().Format("2006-01-02T15:04:05.000"))
+	params.Set("startIndex", fmt.Sprintf("%d", startIndex))
+	params.Set("resultsPerPage", fmt.Sprintf("%d", cveSyncResultsPerPage))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", j.baseURL+"?"+params.Encode(), nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	if j.nvdAPIKey != "" {
+		req.Header.Set("apiKey", j.nvdAPIKey)
+	}
+	resp, err := j.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("NVD API request failed: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, 0, fmt.Errorf("NVD API error: %d - %s", resp.StatusCode, string(body))
+	}
+
+	var page []CVEInfo
+	var nvdResp struct {
+		// Pointers so an ABSENT field is distinguishable from 0: a
+		// page that does not say where it is cannot be checked (M58).
+		TotalResults    *int `json:"totalResults"`
+		StartIndex      *int `json:"startIndex"`
+		ResultsPerPage  int  `json:"resultsPerPage"`
+		Vulnerabilities []struct {
+			CVE struct {
+				ID           string `json:"id"`
+				Published    string `json:"published"`
+				LastModified string `json:"lastModified"`
+				Descriptions []struct {
+					Lang  string `json:"lang"`
+					Value string `json:"value"`
+				} `json:"descriptions"`
+				// service.NVDMetrics carries each assessment's `type`
+				// (Primary / Secondary), which the anonymous struct here
+				// dropped (Codex M57 R1, Critical) — see
+				// extractCVSSFromMetrics.
+				Metrics        service.NVDMetrics `json:"metrics"`
+				Configurations []struct {
+					Nodes []struct {
+						CpeMatch []struct {
+							Criteria   string `json:"criteria"`
+							Vulnerable bool   `json:"vulnerable"`
+						} `json:"cpeMatch"`
+					} `json:"nodes"`
+				} `json:"configurations"`
+			} `json:"cve"`
+		} `json:"vulnerabilities"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&nvdResp); err != nil {
+		resp.Body.Close()
+		return nil, 0, fmt.Errorf("failed to decode NVD response: %w", err)
+	}
+	resp.Body.Close()
+
+	// Convert to CVEInfo
+	for _, v := range nvdResp.Vulnerabilities {
+		cve := CVEInfo{
+			ID: v.CVE.ID,
+		}
+
+		// Get English description
+		for _, desc := range v.CVE.Descriptions {
+			if desc.Lang == "en" {
+				cve.Description = desc.Value
+				break
+			}
+		}
+
+		// Extract CVSS score and severity
+		cve.CVSSScore, cve.Severity = extractCVSSFromMetrics(v.CVE.Metrics)
+
+		// Parse dates. NVD sends them WITHOUT an offset
+		// ("2026-08-11T19:33:44.513", measured live 2026-11-08), which
+		// time.RFC3339 — what this used until M57 — rejects; the error was
+		// discarded, so every record was undateable and the metadata
+		// refresh refused all of them. service.ParseNVDTimestamp is the
+		// scanner's parser (M54) and reads the zoneless forms as UTC, as
+		// NVD documents them. Unparseable still yields the zero time,
+		// which the callers treat as "unknown".
+		if t := service.ParseNVDTimestamp(v.CVE.Published); t != nil {
+			cve.PublishedAt = *t
+		}
+		if t := service.ParseNVDTimestamp(v.CVE.LastModified); t != nil {
+			cve.ModifiedAt = *t
+		}
+
+		// Extract keywords from CPE for matching
+		cve.Keywords = extractKeywordsFromCPE(v.CVE.Configurations)
+
+		page = append(page, cve)
+	}
+
+	total, err := checkModifiedPage(startIndex, cveSyncResultsPerPage, nvdResp.StartIndex, nvdResp.TotalResults, len(nvdResp.Vulnerabilities))
+	if err != nil {
+		return nil, 0, err
+	}
+	return page, total, nil
 }
 
 // extractCVSSFromMetrics extracts CVSS score and severity from NVD
