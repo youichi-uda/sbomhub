@@ -405,7 +405,8 @@ func parseCycloneDX(data []byte) ([]model.Component, error) {
 	// "components" is optional, but when present it must be an array of
 	// objects. encoding/json decodes null (and a null element) without an
 	// error, which used to store a schema-invalid SBOM with no — or an empty
-	// — component (Codex R4 Medium).
+	// — component (Codex R4 Medium). Only the top-level list is parsed into
+	// components; nested component trees are not read, so not checked.
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(data, &top); err != nil {
 		return nil, err
@@ -430,6 +431,15 @@ func parseCycloneDX(data []byte) ([]model.Component, error) {
 
 	var components []model.Component
 	if bom.Components != nil {
+		// Judge what was decoded, not the raw key: encoding/json matches
+		// "components" case-insensitively and turns a null element into a
+		// zero component. The schema requires every component's name, and
+		// a nameless one can be neither shown nor matched (Codex R5 Medium).
+		for i, c := range *bom.Components {
+			if strings.TrimSpace(c.Name) == "" {
+				return nil, fmt.Errorf("CycloneDX components[%d] has no name", i)
+			}
+		}
 		for _, c := range *bom.Components {
 			comp := model.Component{
 				ID:        uuid.New(),
