@@ -335,6 +335,11 @@ jobs:
             echo "APP_ENV=development"
             echo "DATABASE_URL=postgres://sbomhub_app:${APP_PW}@postgres:5432/sbomhub?sslmode=disable"
             echo "MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIG_PW}@postgres:5432/sbomhub?sslmode=disable"
+            # Hermetic: no NVD / JVN / KEV egress. The 10,000-component upload
+            # spec otherwise triggers a JVN scan of up to 30 min; vulnerability
+            # links come from the seed (docker/seed/web-e2e.sql §8). The suite
+            # was verified unchanged (245 / 11 fixme / 0) with this set.
+            echo "SBOMHUB_OFFLINE=true"
           } >> .env
 
           grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV|DATABASE_URL|MIGRATE_DATABASE_URL)=' .env \
