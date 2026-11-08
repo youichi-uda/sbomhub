@@ -2,16 +2,15 @@ package middleware
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
 	echomw "github.com/labstack/echo/v4/middleware"
-
-	"github.com/sbomhub/sbomhub/internal/redact"
 )
 
 // AccessLog is the HTTP access log: one slog record per request, replacing
@@ -39,10 +38,10 @@ import (
 //     everything after accessLogSecretPrefixes. middleware.Logger logged the
 //     public-link token in clear.
 //   - `route` (the matched route template, e.g. /api/v1/projects/:id) is new.
-//   - `error` is scrubbed (see accessLogErrorText): every URL in it is cut to
-//     scheme://host, then internal/redact removes Bearer tokens,
-//     Authorization headers and auth-shaped name=value pairs.
-//     middleware.Logger logged it verbatim.
+//   - `error` is a classification, never the error text (see
+//     accessLogErrorText): "http_error code=N" for an *echo.HTTPError,
+//     otherwise the Go type chain. middleware.Logger logged err.Error()
+//     verbatim, which can carry credentials (outbound URLs, DSNs).
 //   - 5xx responses are logged at ERROR, everything else at INFO.
 //
 // Error handling matches middleware.Logger exactly: a handler error is passed
@@ -286,88 +285,56 @@ func asciiLower(s string) string {
 	return string(b)
 }
 
-// accessLogURLStartRe finds the start of a URL with an explicit scheme.
-var accessLogURLStartRe = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.\-]*://`)
-
-// accessLogErrorText renders a handler error for the access log without the
-// credentials error text routinely carries. It fails closed on the main
-// carrier, URLs: an outbound *url.Error, a webhook or a DSN keeps only
-// scheme://host — userinfo, path, query and fragment are dropped whatever
-// their names or shape (a Slack/Discord webhook secret is a path segment; a
-// presigned URL's is an X-Amz-Signature parameter no name list anticipates).
-// internal/redact (the audit log's scrubber) then removes Bearer tokens,
-// Authorization headers and auth-shaped name=value pairs outside URLs. It
-// works on the rendered string; the error chain is not modified.
-func accessLogErrorText(err error) string {
-	return redact.String(cutURLsToHost(err.Error()))
-}
-
-// cutURLsToHost replaces every scheme-bearing URL in s with scheme://host
-// plus a redaction marker when anything followed the host.
+// accessLogErrorText classifies a handler error for the access log without
+// any of its text: "http_error code=<status>" (plus the internal error's type
+// chain) for an *echo.HTTPError, otherwise the Go type chain of the error,
+// e.g. "*fmt.wrapError > *url.Error > *net.OpError".
 //
-// Where a URL ends is decided conservatively, because quotes and spaces can
-// sit inside one: a URL that opens right after a double quote (Go renders
-// URLs in errors with %q — *url.Error, url.Parse failures) runs to the
-// closing unescaped quote, skipping \" escapes and spaces; any other URL
-// runs to the next whitespace, so an apostrophe or quote inside it does not
-// end it. Over-consuming a little trailing punctuation is the fail-closed
-// side.
-func cutURLsToHost(s string) string {
-	var b strings.Builder
-	rest := s
-	for {
-		loc := accessLogURLStartRe.FindStringIndex(rest)
-		if loc == nil {
-			b.WriteString(rest)
-			return b.String()
+// Error text is deliberately never logged here. Review rounds kept finding
+// credentials in it in shapes no scrubber anticipates: query parameters
+// nobody listed, webhook secrets that are path segments, %q-quoted URLs, and
+// url.Parse diagnostics that repeat a bad "port" (a password) outside the
+// URL. The type chain still tells an operator which layer failed; the 5xx
+// detail of an *echo.HTTPError is logged separately by the server's error
+// handler.
+func accessLogErrorText(err error) string {
+	var he *echo.HTTPError
+	if errors.As(err, &he) {
+		eff := he
+		if inner, ok := he.Internal.(*echo.HTTPError); ok {
+			eff = inner // echo renders the promoted error; mirror its code
 		}
-		start, i := loc[0], loc[1]
-		quoted := start > 0 && rest[start-1] == '"'
-
-		// Authority: up to the first byte that cannot be part of it.
-		authEnd := i
-		for authEnd < len(rest) && !strings.ContainsRune("/?#\\\"' \t\r\n", rune(rest[authEnd])) {
-			authEnd++
+		out := "http_error code=" + strconv.Itoa(eff.Code)
+		if eff.Internal != nil {
+			out += " internal=" + errorTypeChain(eff.Internal, 0)
 		}
-		host := rest[i:authEnd]
-		if at := strings.LastIndexByte(host, '@'); at >= 0 {
-			host = host[at+1:] // drop userinfo
-		}
-
-		// End of the URL.
-		end := authEnd
-		if quoted {
-			for end < len(rest) && rest[end] != '"' {
-				if rest[end] == '\\' {
-					end++ // skip the escaped byte
-				}
-				end++
-			}
-			if end > len(rest) {
-				end = len(rest)
-			}
-		} else {
-			for end < len(rest) && !isASCIISpace(rest[end]) {
-				end++
-			}
-		}
-
-		// An "@" after the authority means the authority boundary is not
-		// trustworthy (an unescaped "/" inside userinfo): keep no host.
-		if strings.IndexByte(rest[authEnd:end], '@') >= 0 {
-			host = accessLogRedacted
-		}
-
-		b.WriteString(rest[:start])
-		b.WriteString(rest[start:loc[1]]) // scheme://
-		b.WriteString(host)
-		if end > authEnd || len(host) < authEnd-i {
-			b.WriteString("/" + accessLogRedacted)
-		}
-		rest = rest[end:]
+		return out
 	}
+	return errorTypeChain(err, 0)
 }
 
-func isASCIISpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
+// errorTypeChain renders the dynamic types along an error's Unwrap chain,
+// joined by " > ", with a multi-error's branches in brackets. Depth is capped
+// so a pathological chain cannot grow the line without bound.
+func errorTypeChain(err error, depth int) string {
+	const maxDepth = 8
+	parts := make([]string, 0, 4)
+	for err != nil {
+		if depth >= maxDepth {
+			parts = append(parts, "...")
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%T", err))
+		depth++
+		if multi, ok := err.(interface{ Unwrap() []error }); ok {
+			branches := make([]string, 0, len(multi.Unwrap()))
+			for _, b := range multi.Unwrap() {
+				branches = append(branches, errorTypeChain(b, depth))
+			}
+			parts = append(parts, "["+strings.Join(branches, ", ")+"]")
+			break
+		}
+		err = errors.Unwrap(err)
+	}
+	return strings.Join(parts, " > ")
 }

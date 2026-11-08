@@ -207,12 +207,14 @@ func TestAccessLog_ErrorHandledOnce(t *testing.T) {
 		level     string
 		errSubstr string
 	}{
-		{"/boom", 500, "ERROR", "pq: secret detail"},
+		// The error field is a classification, never text: the internal
+		// "pq: secret detail" must not appear, its type does.
+		{"/boom", 500, "ERROR", "http_error code=500 internal=*errors.errorString"},
 		// echo's Recover hands the panic to c.Error itself and returns nil,
 		// so the access log sees the 500 but no error (as middleware.Logger did).
 		{"/panic", 500, "ERROR", ""},
-		{"/forbidden", 403, "INFO", "no"},
-		{"/no-such-route", 404, "INFO", "Not Found"},
+		{"/forbidden", 403, "INFO", "http_error code=403"},
+		{"/no-such-route", 404, "INFO", "http_error code=404"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
@@ -232,8 +234,8 @@ func TestAccessLog_ErrorHandledOnce(t *testing.T) {
 			}
 			if s, _ := got["error"].(string); tc.errSubstr == "" && s != "" {
 				t.Errorf("error = %q, want none", s)
-			} else if !strings.Contains(s, tc.errSubstr) {
-				t.Errorf("error = %q, want it to contain %q", s, tc.errSubstr)
+			} else if s != tc.errSubstr {
+				t.Errorf("error = %q, want %q", s, tc.errSubstr)
 			}
 		})
 	}
@@ -312,57 +314,62 @@ func TestAccessLog_NonSecretPathsUntouched(t *testing.T) {
 	}
 }
 
-// Codex R4 High: the error text can carry credentials (an outbound
-// *url.Error with ?apiKey=, a Bearer token, a DSN password); it is scrubbed
-// with internal/redact before it reaches the access log.
-func TestAccessLog_ErrorFieldIsRedacted(t *testing.T) {
-	e, buf, _ := accessLogServer(t)
-	e.GET("/leaky", func(c echo.Context) error {
-		inner := &url.Error{Op: "Get", URL: "https://example.backlog.com/api/v2/issues/1?apiKey=APIKEYSECRET123", Err: errors.New("connection refused")}
-		return echo.NewHTTPError(http.StatusInternalServerError,
-			"sync failed: "+inner.Error()+"; Authorization: Bearer BEARERSECRET.abc123; postgres://u:DSNPASSWORD99@db:5432/x")
-	})
-	got, _ := serveAndDecode(t, e, buf, httptest.NewRequest(http.MethodGet, "/leaky", nil))
-	for _, secret := range []string{"APIKEYSECRET123", "BEARERSECRET", "DSNPASSWORD99"} {
-		if strings.Contains(buf.String(), secret) {
-			t.Errorf("secret %q reached the access log: %s", secret, buf.String())
-		}
+// Codex R4-R7: free error text carries credentials in more shapes than any
+// scrubber anticipates (query names nobody listed, webhook path segments,
+// %q-quoted URLs, url.Parse diagnostics that repeat the bad port outside the
+// URL). The error field therefore holds a classification only — the HTTP
+// status for an *echo.HTTPError, otherwise the Go type chain — and no text.
+func TestAccessLog_ErrorFieldIsClassificationOnly(t *testing.T) {
+	// Deliberately malformed (the real url.Parse diagnostics are the point);
+	// held in a slice so they are inputs, not URL literals to validate.
+	badURLs := []string{"https://user:DSNPASSWORD@[bad", "https://user:PORTPASSWORD"}
+	_, parseErr := url.Parse(badURLs[0])
+	_, parseErr2 := url.Parse(badURLs[1])
+	if parseErr == nil || parseErr2 == nil {
+		t.Fatal("fixture URLs unexpectedly parsed")
 	}
-	if s, _ := got["error"].(string); !strings.Contains(s, "sync failed") {
-		t.Errorf("error field lost its non-secret text: %q", s)
+	wrapped := fmt.Errorf("kev sync: %w", &url.Error{Op: "Get",
+		URL: "https://hooks.slack.com/services/T0/B0/SLACKPATHSECRET?client_secret=CS1&X-Amz-Signature=SIG1",
+		Err: errors.New(`dial tcp: lookup h: Bearer eyJhbGciOiJIUzI1NiJ9.BEARERX1 postgres://u:DSNPW2@db/x`)})
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"url.Parse userinfo", parseErr, "*url.Error > *errors.errorString"},
+		{"url.Parse invalid port", parseErr2, "*url.Error > *errors.errorString"},
+		{"wrapped url.Error", wrapped, "*fmt.wrapError > *url.Error > *errors.errorString"},
+		{"http error with internal", echo.NewHTTPError(http.StatusBadGateway, "upstream https://x/?k=MSGSECRET").SetInternal(wrapped),
+			"http_error code=502 internal=*fmt.wrapError > *url.Error > *errors.errorString"},
+		{"promoted internal http error", echo.NewHTTPError(http.StatusBadRequest).SetInternal(echo.NewHTTPError(http.StatusInternalServerError, "pq: PROMOTEDSECRET")),
+			"http_error code=500"},
+		{"joined", errors.Join(errors.New("JOINSECRET"), parseErr), "*errors.joinError > [*errors.errorString, *url.Error > *errors.errorString]"},
 	}
-}
-
-// Codex R5 High: pattern-based scrubbing missed credentials it has no name
-// for. Every URL in the error text is cut to scheme://host, whatever its
-// query parameter names or path shape.
-func TestAccessLog_ErrorFieldURLsCutToHost(t *testing.T) {
-	cases := map[string]struct{ in, secret, keep string }{
-		"client_secret":   {`Post "https://idp.example.com/token?client_secret=CLIENTSECRET42&x=1": EOF`, "CLIENTSECRET42", "https://idp.example.com"},
-		"aws signature":   {`Get "https://b.s3.amazonaws.com/o?X-Amz-Signature=AMZSIG0987abc": timeout`, "AMZSIG0987abc", "https://b.s3.amazonaws.com"},
-		"encoded name":    {`Get "https://api.example.com/v1?api%5Fkey=ENCNAMESECRET": refused`, "ENCNAMESECRET", "https://api.example.com"},
-		"slack webhook":   {`Post "https://hooks.slack.com/services/T000/B000/SLACKPATHSECRET": 404`, "SLACKPATHSECRET", "https://hooks.slack.com"},
-		"discord webhook": {"post https://discord.com/api/webhooks/123/DISCORDPATHSECRET failed", "DISCORDPATHSECRET", "https://discord.com"},
-		"fragment":        {"see https://x.example.com/#access_token=FRAGSECRET77", "FRAGSECRET77", "https://x.example.com"},
-		"userinfo":        {"dial postgres://app:USERINFOPW@db:5432/sbomhub failed", "USERINFOPW", "postgres://db:5432"},
-		"bearer no url":   {"upstream said: Bearer eyJhbGciOiJIUzI1NiJ9.BEARERX1", "BEARERX1", "upstream said"},
-		// Codex R6 High: quotes are legal inside a URL, and Go renders URLs
-		// in errors with %q (escaped \" and raw spaces inside the quotes).
-		"slash in userinfo": {"dial postgres://app:SLA/SHPW@db:5432/x failed", "SLA", "postgres://"},
-		"apostrophe":        {"get https://api.example/a'?opaque=APOSTSECRET1 failed", "APOSTSECRET1", "https://api.example"},
-		"apostrophe host":   {"get https://api.example'?opaque=APOSTSECRET2 failed", "APOSTSECRET2", "https://api.example"},
-		"quoted escaped":    {fmt.Sprintf("Get %q: EOF", `https://h.example/a"b?opaque=QESCSECRET`), "QESCSECRET", "https://h.example"},
-		"quoted space":      {`parse "https://h.example/?k=a b&opaque=QSPACESECRET": invalid character`, "QSPACESECRET", "https://h.example"},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			got := accessLogErrorText(errors.New(tc.in))
-			if strings.Contains(got, tc.secret) {
-				t.Fatalf("secret %q survived: %q", tc.secret, got)
+	secrets := []string{"DSNPASSWORD", "PORTPASSWORD", "SLACKPATHSECRET", "CS1", "SIG1", "BEARERX1", "DSNPW2", "MSGSECRET", "PROMOTEDSECRET", "JOINSECRET"}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := accessLogErrorText(tc.err)
+			if got != tc.want {
+				t.Errorf("accessLogErrorText = %q, want %q", got, tc.want)
 			}
-			if !strings.Contains(got, tc.keep) {
-				t.Fatalf("lost the non-secret part %q: %q", tc.keep, got)
+			for _, sec := range secrets {
+				if strings.Contains(got, sec) {
+					t.Fatalf("secret %q reached the error field: %q", sec, got)
+				}
 			}
 		})
+	}
+
+	// End to end through the middleware.
+	e, buf, _ := accessLogServer(t)
+	e.GET("/leaky", func(c echo.Context) error { return wrapped })
+	got, _ := serveAndDecode(t, e, buf, httptest.NewRequest(http.MethodGet, "/leaky", nil))
+	for _, sec := range secrets {
+		if strings.Contains(buf.String(), sec) {
+			t.Fatalf("secret %q reached the access log: %s", sec, buf.String())
+		}
+	}
+	if got["error"] != "*fmt.wrapError > *url.Error > *errors.errorString" {
+		t.Errorf("error field = %v", got["error"])
 	}
 }

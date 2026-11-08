@@ -1063,8 +1063,9 @@ func main() {
 
 	// Access log via slog (echo's middleware.Logger is deprecated). Same
 	// fields and error-handler timing as before, but the query string is no
-	// longer logged and public-link tokens in the path are redacted; see
-	// appmw.AccessLog.
+	// longer logged, public-link tokens in the path are redacted, and
+	// `error` is a classification (status / Go type chain), not the error
+	// text; see appmw.AccessLog.
 	e.Use(appmw.AccessLog(slog.Default()))
 	e.Use(middleware.Recover())
 	// SECURITY: Limit request body size to prevent memory exhaustion DoS attacks
