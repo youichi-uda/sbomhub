@@ -5,7 +5,7 @@ const API_BASE_URL =
 
 // SSO settings page (src/app/[locale]/(dashboard)/settings/sso/page.tsx).
 //
-// The page is a static, Japanese-only information page: no API calls, no
+// The page is a Japanese-only information page: one API call (GET /subscription, for the plan / self-host notice), no
 // configuration form, no LDAP/OIDC tabs. SSO itself is configured in the
 // Clerk dashboard. The strings below are copied from the page.
 //
@@ -42,22 +42,65 @@ test.describe('SSO Settings', () => {
         await page.goto('/en/settings/sso');
         await expect(page.getByText('認証設定', { exact: true })).toBeVisible({ timeout: 15000 });
 
+        // The hermetic stack is self-hosted (SBOMHUB_AUTH_MODE=anonymous): no
+        // user authentication, and the page says so (M65 bug 6) instead of
+        // claiming e-mail/password sign-in is enabled.
         const standard = page.locator('div.rounded-lg.border', { has: page.getByRole('heading', { name: '標準認証' }) });
-        await expect(standard.getByText('有効', { exact: true })).toBeVisible();
+        await expect(standard.getByText('なし', { exact: true })).toBeVisible();
+        await expect(standard.getByText('セルフホスト環境のため、ユーザー認証はありません')).toBeVisible();
+        await expect(standard.getByText('有効', { exact: true })).toHaveCount(0);
         const enterprise = page.locator('div.rounded-lg.border', { has: page.getByRole('heading', { name: 'Enterprise SSO', exact: true }) });
         await expect(enterprise.getByText('未設定', { exact: true })).toBeVisible();
     });
 
     test('should not show the enterprise plan requirement to an enterprise tenant', async ({ page, request }) => {
-        test.fixme(true, 'BUG: settings/sso/page.tsx hard-codes isEnterprise=false, so the "Enterprise プランが必要です" alert shows for the enterprise tenant; its upgrade link (/settings/billing) is also a 404 (billing lives at /billing)');
-
+        // M65 bug 6: isEnterprise was hard-coded to false.
         const sub = await request.get(`${API_BASE_URL}/api/v1/subscription`);
         expect(sub.status()).toBe(200);
-        expect((await sub.json()).plan).toBe('enterprise');
+        const body = await sub.json();
+        expect(body.plan).toBe('enterprise');
+        expect(body.is_self_hosted).toBe(true);
 
+        const answered = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/v1/subscription');
         await page.goto('/en/settings/sso');
         await expect(page.getByRole('heading', { level: 1, name: TITLE })).toBeVisible({ timeout: 15000 });
+        expect((await answered).status()).toBe(200);
+        // Self-host: the honest notice instead of an upgrade prompt.
+        const notice = page.getByTestId('sso-self-hosted-notice');
+        await expect(notice).toBeVisible();
+        await expect(notice.getByRole('link', { name: 'デプロイモードのドキュメント' })).toHaveAttribute(
+            'href',
+            /github\.com\/youichi-uda\/sbomhub\/blob\/main\/docs\/configuration\.ja\.md#/,
+        );
         await expect(page.getByText('Enterprise プランが必要です', { exact: true })).toHaveCount(0);
+    });
+
+    test('should send a non-enterprise SaaS tenant to the real billing page', async ({ page }) => {
+        // Stubbed: the hermetic stack is self-hosted, so a Clerk-mode tenant on
+        // a lower plan can only be shown with a stubbed subscription.
+        await page.route(`${API_BASE_URL}/api/v1/subscription`, (route) =>
+            route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({
+                    has_subscription: true,
+                    plan: 'pro',
+                    limits: { features: {} },
+                    billing_enabled: true,
+                    is_self_hosted: false,
+                }),
+            }),
+        );
+        await page.goto('/en/settings/sso');
+        const alert = page.getByTestId('sso-enterprise-required');
+        await expect(alert).toBeVisible({ timeout: 15000 });
+        await expect(alert.getByText('Enterprise プランが必要です', { exact: true })).toBeVisible();
+        const link = alert.getByRole('link', { name: '料金プラン' });
+        // The old link pointed at /settings/billing, which does not exist.
+        await expect(link).toHaveAttribute('href', '/billing');
+        await link.click();
+        await expect(page).toHaveURL(/\/en\/billing$/);
+        await expect(page.getByTestId('sso-self-hosted-notice')).toHaveCount(0);
     });
 
     test('should handle Clerk Enterprise SSO info', async ({ page }) => {

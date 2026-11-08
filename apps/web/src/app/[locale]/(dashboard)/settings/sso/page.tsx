@@ -1,7 +1,9 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -68,8 +70,26 @@ const SSO_PROVIDERS = [
   },
 ];
 
+// Self-host operators: the authentication-mode section of the configuration
+// docs (SAAS_SUNSET: self-host is the only supported distribution).
+const SELF_HOST_AUTH_DOCS_URL =
+  "https://github.com/youichi-uda/sbomhub/blob/main/docs/configuration.ja.md#%E3%83%87%E3%83%97%E3%83%AD%E3%82%A4%E3%83%A2%E3%83%BC%E3%83%89";
+
 export default function SSOSettingsPage() {
-  const [isEnterprise] = useState(false); // This would be fetched from the subscription status
+  // M65 bug 6: the plan used to be hard-coded (`isEnterprise = false`), so
+  // an enterprise tenant was told it needed the Enterprise plan and sent to
+  // /settings/billing (a 404). The plan now comes from GET /subscription —
+  // shared cache entry with the billing / audit pages — which answers
+  // plan=enterprise + is_self_hosted=true on a self-hosted instance.
+  // Nothing plan-related is claimed until it has loaded, or if it failed.
+  const subscriptionQuery = useQuery({
+    queryKey: queryKeys.billing.subscription(),
+    queryFn: () => api.billing.getSubscription(),
+  });
+  const subscription = subscriptionQuery.data;
+  const isSelfHosted = subscription?.is_self_hosted === true;
+  const needsEnterprise =
+    subscription !== undefined && !isSelfHosted && subscription.plan !== "enterprise";
 
   return (
     <div className="space-y-6">
@@ -80,14 +100,34 @@ export default function SSOSettingsPage() {
         </p>
       </div>
 
-      {!isEnterprise && (
-        <Alert>
+      {isSelfHosted && (
+        <Alert data-testid="sso-self-hosted-notice">
+          <Info className="h-4 w-4" />
+          <AlertTitle>セルフホスト環境では SSO を利用できません</AlertTitle>
+          <AlertDescription>
+            このインスタンスはセルフホスト (SBOMHUB_AUTH_MODE=anonymous) で動作しており、
+            ユーザー認証がありません。VPN や認証付きリバースプロキシなどのネットワーク境界で保護してください。
+            以下の Clerk による SSO 設定手順は Clerk モード (SBOMHUB_AUTH_MODE=clerk) でのみ有効です。
+            <a
+              href={SELF_HOST_AUTH_DOCS_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary hover:underline ml-1"
+            >
+              デプロイモードのドキュメント
+            </a>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {needsEnterprise && (
+        <Alert data-testid="sso-enterprise-required">
           <Info className="h-4 w-4" />
           <AlertTitle>Enterprise プランが必要です</AlertTitle>
           <AlertDescription>
             SSO 機能は Enterprise プランでご利用いただけます。
             プランのアップグレードについては、
-            <Link href="/settings/billing" className="text-primary hover:underline ml-1">
+            <Link href="/billing" className="text-primary hover:underline ml-1">
               料金プラン
             </Link>
             をご確認ください。
@@ -109,17 +149,23 @@ export default function SSOSettingsPage() {
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between p-4 rounded-lg border">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-green-100 text-green-600">
-                <CheckCircle2 className="h-5 w-5" />
+              <div
+                className={`p-2 rounded-lg ${isSelfHosted ? "bg-muted text-muted-foreground" : "bg-green-100 text-green-600"}`}
+              >
+                {isSelfHosted ? <Shield className="h-5 w-5" /> : <CheckCircle2 className="h-5 w-5" />}
               </div>
               <div>
                 <h4 className="font-medium">標準認証</h4>
                 <p className="text-sm text-muted-foreground">
-                  メールアドレスとパスワードによる認証が有効
+                  {isSelfHosted
+                    ? "セルフホスト環境のため、ユーザー認証はありません"
+                    : "メールアドレスとパスワードによる認証が有効"}
                 </p>
               </div>
             </div>
-            <Badge variant="secondary">有効</Badge>
+            <Badge variant={isSelfHosted ? "outline" : "secondary"}>
+              {isSelfHosted ? "なし" : "有効"}
+            </Badge>
           </div>
 
           <div className="flex items-center justify-between p-4 rounded-lg border">
