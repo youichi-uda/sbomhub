@@ -18,21 +18,25 @@ package service
 //     taken from the CPE names the SBOM declared, in SBOM order. Syft's
 //     FIRST candidate is often not NVD's product (measured: log4j-core ->
 //     apache:log4j-core, NVD uses apache:log4j, Syft's third candidate).
-//  2. For a candidate, NVD is asked `cpeName=<part:vendor:product:version:*...>`
-//     (exact name, NVD evaluates the version ranges server-side) and the walk
-//     pages exactly like the keyword walk (same budget, same truncation and
-//     page-identity checks).
+//  2. For a candidate with a plain dotted-numeric version, NVD is asked
+//     `cpeName=<part:vendor:product:version:*...>` (exact name, NVD evaluates
+//     the version ranges server-side); the walk pages exactly like the
+//     keyword walk (same budget, same truncation and page-identity checks).
 //  3. Every returned CVE is VERIFIED locally against its configurations
 //     (verifyCPEMatch). Measured: cpeName for openssl 1.1.1k returned 47
 //     CVEs, 5 of them only because openssl appears as a vulnerable=false
 //     PLATFORM in an AND configuration (Mutt CVE-2009-1390 etc., httpd
 //     CVE-2019-0190). Those are not openssl vulnerabilities.
-//  4. A cpeName answer of ZERO is ambiguous: NVD answers 0, with no error, for
-//     a product it has never heard of (measured: apache:log4j-core) exactly
-//     as it does for a known product whose version is unaffected. A second,
-//     one-record request (`virtualMatchString=cpe:2.3:part:vendor:product`)
-//     tells them apart. Known product -> the verified answer is "none" and it
-//     is final. Unknown product -> try the next candidate.
+//  4. A cpeName answer of ZERO is never taken as "clean": NVD answers 0, with
+//     no error, for a product it has never heard of (measured:
+//     apache:log4j-core), for a known product whose version is unaffected,
+//     AND for a version written differently from NVD's encoding of the
+//     release (2.0-beta9 vs NVD's 2.0 + update beta9; Codex M60 R10). The
+//     product-level walk (`virtualMatchString=cpe:2.3:part:vendor:product`),
+//     verified locally, decides instead: zero records -> unknown product,
+//     try the next candidate; otherwise the locally verified records are the
+//     answer. Versions that are not plain dotted numbers skip the cpeName
+//     query altogether (lookupCPECandidate).
 //  5. No candidate names a product NVD knows -> fall back to the keyword
 //     search, and the links are labelled nvd_keyword (low confidence). A wrong
 //     CPE therefore never turns into a silent "clean".
@@ -177,6 +181,26 @@ type cpeCandidate struct {
 	// ("beta9" in log4j:2.0:beta9), else "". It is part of the release the
 	// CPE names (Codex M60 R1 High-1).
 	update string
+}
+
+// plainVersion reports whether the candidate's version is dotted numbers
+// only, with no update — the one shape whose cpeName encoding is unambiguous.
+func (c cpeCandidate) plainVersion() bool {
+	if c.update != "" || c.version == "" {
+		return false
+	}
+	prevDot := true
+	for _, r := range c.version {
+		switch {
+		case r >= '0' && r <= '9':
+			prevDot = false
+		case r == '.' && !prevDot:
+			prevDot = true
+		default:
+			return false
+		}
+	}
+	return !prevDot
 }
 
 // effectiveVersion is the release the candidate names, in the single-string
@@ -666,6 +690,20 @@ func versionCharsSupported(v string) bool {
 	return true
 }
 
+func sameKind(ta []versionToken, i int, tb []versionToken, j int) bool {
+	if ta[i].num || tb[j].num {
+		return ta[i].num && tb[j].num
+	}
+	return tokenKindAt(ta, i) == tokenKindAt(tb, j)
+}
+
+func normSep(r rune) rune {
+	if r == '_' {
+		return '.'
+	}
+	return r
+}
+
 // isZero is a zero that can be read as padding — never a dash-number.
 func isZero(t versionToken) bool {
 	return t.num && !t.dashNum && strings.TrimLeft(t.value, "0") == ""
@@ -688,6 +726,14 @@ func compareVersions(a, b string) (int, bool) {
 func compareTokens(ta, tb []versionToken) (int, bool) {
 	for i := 0; i < len(ta) && i < len(tb); i++ {
 		x, y := ta[i], tb[i]
+		// Corresponding tokens OF THE SAME KIND must be joined the same way:
+		// "rc.1" is two SemVer identifiers and "rc1" one, so they are not
+		// equal and their order is scheme-dependent (Codex M60 R10 High-2).
+		// A pre-release against a post-release letter is ordered alike by
+		// every scheme whatever joins them. '_' reads as '.'.
+		if normSep(x.sep) != normSep(y.sep) && sameKind(ta, i, tb, i) {
+			return 0, false
+		}
 		switch {
 		case x.num && y.num:
 			if x.dashNum != y.dashNum {
@@ -912,54 +958,76 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 		}
 	}
 
-	q := url.Values{}
-	q.Set("cpeName", c.query())
-	res, err := s.walkNVD(ctx, q, pace, paceFirst)
-	if err != nil {
-		return nvdLookup{requests: res.pages}, false, err
+	// Step 1: the exact cpeName query, only for a plain dotted-numeric
+	// version (Codex M60 R10 High-1). Its answer depends on the version being
+	// written exactly as NVD writes the release; for anything with letters or
+	// qualifiers that encoding is ambiguous (NVD stores 2.0-beta9 as version
+	// 2.0 + update beta9), so such versions go straight to step 2.
+	spent := 0
+	if c.plainVersion() {
+		q := url.Values{}
+		q.Set("cpeName", c.query())
+		res, err := s.walkNVD(ctx, q, pace, paceFirst)
+		spent += res.pages
+		if err != nil {
+			return nvdLookup{requests: spent}, false, err
+		}
+		if res.total > 0 || len(res.entries) > 0 {
+			out := s.verifyCPEAnswer(res, c, method)
+			out.requests = spent
+			if !out.uncacheable {
+				s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
+			}
+			return out, true, nil
+		}
+		// A zero is NOT taken as "clean": it is equally the answer for a
+		// version encoded differently from NVD's. Step 2 decides.
 	}
+
+	// Step 2: the product-level walk (virtualMatchString=part:vendor:product,
+	// same page budget, truncation reported as for every walk), verified
+	// locally against each record's configurations. Zero records means NVD
+	// configures no CVE for this product: try the next candidate. Otherwise
+	// "none at this version" comes from local verification of NVD's own
+	// configurations, never from an encoding-dependent zero. For a product
+	// with up to nvdPageSize CVEs this costs the one request the old
+	// one-record probe did.
+	pq := url.Values{}
+	pq.Set("virtualMatchString", c.productQuery())
+	res, err := s.walkNVD(ctx, pq, pace, paceFirst || spent > 0)
+	spent += res.pages
+	if err != nil {
+		return nvdLookup{requests: spent}, false, err
+	}
+	if res.total == 0 && len(res.entries) == 0 {
+		s.cacheVulns(ctx, nvdNoCPECacheName(c), c.String(), nil)
+		return nvdLookup{requests: spent}, false, nil
+	}
+	// The answer must be ABOUT the product (Codex M60 R6 High-3): a mirror
+	// that ignored virtualMatchString would otherwise make an unknown
+	// product "known" and every record unverifiable noise.
+	if !recordNamesProduct(res.entries, c) {
+		return nvdLookup{requests: spent}, false, fmt.Errorf("nvd: product query for %s answered with records that do not name the product; "+
+			"cannot tell whether NVD knows it", c.productQuery())
+	}
+	out := s.verifyCPEAnswer(res, c, method)
+	out.requests = spent
+	if !out.uncacheable {
+		s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
+	}
+	return out, true, nil
+}
+
+// verifyCPEAnswer keeps the records of one walk that verifyCPEMatch does not
+// reject, labelling each, and carries the walk's completeness.
+func (s *NVDService) verifyCPEAnswer(res nvdSearchResult, c cpeCandidate, method model.MatchMethod) nvdLookup {
 	out := nvdLookup{
-		requests:  res.pages,
 		truncated: res.truncated,
 		shifted:   res.shifted,
 		total:     res.total,
 		fetched:   res.fetched,
 		method:    method,
 	}
-
-	if res.total == 0 && len(res.entries) == 0 {
-		// Ambiguous zero: unknown product, or known product with no CVE at
-		// this version. One record of the version-less product query decides.
-		if pace != nil {
-			if err := pace(ctx); err != nil {
-				return out, false, err
-			}
-		}
-		pq := url.Values{}
-		pq.Set("virtualMatchString", c.productQuery())
-		page, err := s.fetchPage(ctx, pq, 0, 1)
-		out.requests++
-		if err != nil {
-			return out, false, err
-		}
-		if *page.TotalResults == 0 {
-			s.cacheVulns(ctx, nvdNoCPECacheName(c), c.String(), nil)
-			return nvdLookup{requests: out.requests}, false, nil
-		}
-		// "Known product" ends the candidate walk with a final, cached
-		// "no CVE at this version", so the probe's answer must be ABOUT the
-		// product (Codex M60 R6 High-3): a mirror that ignored
-		// virtualMatchString and returned some unrelated record would
-		// otherwise make an unknown product known. Neither known nor
-		// unknown can be concluded then, so the lookup fails.
-		if !recordNamesProduct(page.entries(), c) {
-			return out, false, fmt.Errorf("nvd: product probe for %s answered with a record that does not name the product; "+
-				"cannot tell whether NVD knows it", c.productQuery())
-		}
-		s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), nil)
-		return out, true, nil
-	}
-
 	for i, e := range res.entries {
 		switch verifyCPEMatch(e.CVE, c) {
 		case cpeMatched:
@@ -980,10 +1048,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 	// Nor is an answer holding an unverified CVE: the cache carries no
 	// per-CVE provenance, so a hit would relabel it as verified.
 	out.uncacheable = res.truncated || out.cpeUndecidable > 0
-	if !out.uncacheable {
-		s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
-	}
-	return out, true, nil
+	return out
 }
 
 // recordNamesProduct reports whether any configuration criterion of the

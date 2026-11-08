@@ -402,12 +402,15 @@ func normaliseSBOMCPEs(in []string) []string {
 		// requires a valid part and a concrete vendor and product.
 		// A version-NA CPE never becomes a candidate either (Codex M60 R7
 		// Low).
-		if n, ok := parseCPE(c); !ok || n.Version == "-" {
+		n, ok := parseCPE(c)
+		if !ok || n.Version == "-" {
 			continue
 		}
-		// CPE matching is case-insensitive, so case variants are ONE CPE
-		// and must not use up the cap (Codex M60 R4 Medium).
-		key := strings.ToLower(c)
+		// Dedupe on the product identity the scanner uses (it tries the
+		// first CPE of each product only), so case variants and CPEs that
+		// differ only in ignored attributes do not use up the cap (Codex
+		// M60 R4 / R10 Medium).
+		key := cpeCandidate{part: n.Part, vendor: n.Vendor, product: n.Product}.productKey()
 		if _, dup := seen[key]; dup {
 			continue
 		}

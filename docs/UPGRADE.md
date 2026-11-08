@@ -1623,21 +1623,28 @@ For each component with CPE names in the SBOM (Syft emits them; CycloneDX
 SPDX 3 `cpe23`/`cpe22` identifiers):
 
 1. up to 3 distinct `part:vendor:product` candidates are tried, in SBOM order;
-2. NVD is asked `cpeName=<candidate at the component's version>`;
+2. for a plain dotted-numeric version, NVD is asked
+   `cpeName=<candidate at the component's version>`;
 3. each returned CVE is **verified** against its `configurations`: it must have a
    `vulnerable: true` criterion for the same product whose version (or
    `versionStart*`/`versionEnd*` range) contains the component's version;
-4. if NVD answers zero, one extra one-record request asks whether NVD knows
-   the product at all. Known → the answer "no CVE at this version" is final.
-   Unknown → the next candidate; no candidate known → the old keyword search.
+4. if that answer is empty — or the version is not plain dotted numbers
+   (`1.1.1k`, `2.0-beta9`), whose encoding in NVD is ambiguous — NVD is asked
+   for the whole product (`virtualMatchString=<part:vendor:product>`, same page
+   budget) and every record is verified the same way. No records → NVD does not
+   know the product → the next candidate; no candidate known → the old keyword
+   search. "No CVE at this version" therefore always comes from checking NVD's
+   own configurations, never from an empty `cpeName` answer.
 
 Step 3 matters: NVD's `cpeName` also returns CVEs in which the product is only
 the **platform** something else runs on. Measured 2026-11-08: openssl 1.1.1k →
 5 of 47 (Mutt, Apache httpd); Linux 5.10.46 → 504 of the first 997 (Flash
 Player "on Linux" and similar). Those are now dropped.
 
-Step 4 matters too: NVD answers `cpeName` for a product it has never heard of
-with an ordinary empty result, no error. Syft's first CPE guess is often such a
+Step 4 matters too: NVD answers `cpeName` with an ordinary empty result, no
+error, both for a product it has never heard of and for a version written
+differently from NVD's encoding of the release (NVD stores log4j 2.0-beta9 as
+version `2.0` + update `beta9`). Syft's first CPE guess is often such a
 product (`apache:log4j-core`; NVD's product is `apache:log4j`, Syft's third
 guess), so trusting the first candidate would have turned a wrong guess into a
 silent "no vulnerabilities".

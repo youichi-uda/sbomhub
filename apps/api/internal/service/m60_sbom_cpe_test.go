@@ -107,7 +107,9 @@ func TestM60ParseSPDX3_ReadsCPEExternalIdentifiers(t *testing.T) {
 	if len(comps) != 1 {
 		t.Fatalf("got %d components", len(comps))
 	}
-	want := []string{"cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*", "cpe:/a:apache:log4j:2.14.1"}
+	// The cpe22 form names the same product; since Codex M60 R10 only the
+	// first CPE per product is stored (the scanner only ever tries that one).
+	want := []string{"cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"}
 	if !reflect.DeepEqual(comps[0].CPEs, want) {
 		t.Errorf("CPEs = %q, want %q", comps[0].CPEs, want)
 	}

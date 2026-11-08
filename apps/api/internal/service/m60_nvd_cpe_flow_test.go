@@ -44,7 +44,11 @@ func (r *replayNVD) start() *httptest.Server {
 			http.Error(w, "boom", code)
 			return
 		}
-		name, ok := r.routes[key]
+		// A multi-page answer is routed per page: "<key>@<startIndex>".
+		name, ok := r.routes[key+"@"+q.Get("startIndex")]
+		if !ok {
+			name, ok = r.routes[key]
+		}
 		if !ok {
 			// Unknown query: NVD's real answer for a product/keyword it has
 			// nothing for (measured shape, 146 bytes).
@@ -152,19 +156,33 @@ func TestM60Lookup_Log4jCoreReachesNVDProductThroughThirdCandidate(t *testing.T)
 // Debian openssl 1.1.1k-1: matched on the upstream version, labelled
 // nvd_cpe_distro, and the 5 platform-only CVEs NVD returned are dropped.
 func TestM60Lookup_DebianOpenSSLIsDistroLabelledAndVerified(t *testing.T) {
+	// 1.1.1k is not a plain dotted-numeric version, so (Codex M60 R10) the
+	// lookup skips cpeName and walks openssl's whole product-level answer —
+	// 321 records over two pages, recorded live 2026-11-08 — verifying each.
 	r := &replayNVD{t: t, routes: map[string]string{
-		"cpeName=cpe:2.3:a:openssl:openssl:1.1.1k:*:*:*:*:*:*:*": "p06_cpename_openssl",
+		"virtualMatchString=cpe:2.3:a:openssl:openssl@0":   "v01_vms_openssl_p0",
+		"virtualMatchString=cpe:2.3:a:openssl:openssl@199": "v01_vms_openssl_p1",
 	}}
 	svc := NewNVDService(nil, nil, "", r.start().URL, false)
 	l, err := svc.lookupComponent(context.Background(), m60Item(t, "openssl"), nil)
+	t.Logf("product-level openssl@1.1.1k: kept=%d rejected=%d undecidable=%d requests=%d truncated=%v",
+		len(l.vulns), l.cpeRejected, l.cpeUndecidable, l.requests, l.truncated)
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
 	if l.method != model.MatchNVDCPEDistro {
 		t.Errorf("method = %q, want nvd_cpe_distro", l.method)
 	}
-	if len(l.vulns) != 42 || l.cpeRejected != 5 || l.cpeUndecidable != 0 {
-		t.Errorf("kept=%d rejected=%d undecidable=%d, want 42/5/0", len(l.vulns), l.cpeRejected, l.cpeUndecidable)
+	// Measured: the same 42 CVEs the cpeName query verified (all 42 in the
+	// openssl.org ground truth for 1.1.1k) plus CVE-2019-1543, kept as
+	// nvd_cpe_unverified because its range ends at "1.1.1b" (a bare "b" is
+	// scheme-dependent). 278 records rejected on positive evidence.
+	if len(l.vulns) != 43 || l.cpeRejected != 278 || l.cpeUndecidable != 1 || l.requests != 2 || l.truncated {
+		t.Errorf("kept=%d rejected=%d undecidable=%d requests=%d truncated=%v, want 43/278/1/2/false",
+			len(l.vulns), l.cpeRejected, l.cpeUndecidable, l.requests, l.truncated)
+	}
+	if !l.uncacheable {
+		t.Errorf("an answer holding an unverified CVE was cacheable")
 	}
 	for _, v := range l.vulns {
 		if v.CVEID == "CVE-2009-1390" || v.CVEID == "CVE-2019-0190" {
@@ -199,12 +217,41 @@ func TestM60Lookup_UnknownProductFallsBackToKeyword(t *testing.T) {
 	}
 }
 
-// A known product whose version is unaffected: cpeName answers 0, the probe
-// says the product exists, and that is a FINAL verified "none" — no keyword
-// request, links labelled nvd_cpe.
+// A known product whose version is unaffected: cpeName answers 0, the
+// product-level walk returns log4j's 20 CVEs, local verification rejects
+// them all on positive evidence, and that is a FINAL verified "none" — no
+// keyword request, links labelled nvd_cpe. 2.25.5 is past every recorded
+// range (the newest, CVE-2026-49844, ends before 2.25.5).
 func TestM60Lookup_KnownProductUnaffectedVersionIsFinal(t *testing.T) {
 	r := &replayNVD{t: t, routes: map[string]string{
-		"virtualMatchString=cpe:2.3:a:apache:log4j": "p03_vms_log4j",
+		"virtualMatchString=cpe:2.3:a:apache:log4j": "v02_vms_log4j",
+	}}
+	svc := NewNVDService(nil, nil, "", r.start().URL, false)
+	item := nvdWorkItem{
+		key:        nvdComponentKey{Name: "log4j-core", Version: "2.25.5"},
+		candidates: cpeCandidates([]string{"cpe:2.3:a:apache:log4j:2.25.5:*:*:*:*:*:*:*"}, "2.25.5", ""),
+	}
+	l, err := svc.lookupComponent(context.Background(), item, nil)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if l.method != model.MatchNVDCPE || len(l.vulns) != 0 || l.cpeRejected != 20 {
+		t.Errorf("method=%q vulns=%d rejected=%d, want nvd_cpe / 0 / 20", l.method, len(l.vulns), l.cpeRejected)
+	}
+	for _, q := range r.requests() {
+		if strings.HasPrefix(q, "keywordSearch=") {
+			t.Errorf("keyword fallback issued for a known product: %q", q)
+		}
+	}
+}
+
+// Codex M60 R10 High-1: a cpeName ZERO is not a verified "clean". Here the
+// cpeName answer is empty (as it is when the SBOM's version is encoded
+// differently from NVD's release), yet 2.25.3 is inside six 2026 ranges;
+// the product-level walk finds and verifies them.
+func TestM60R10_ZeroCPENameIsNotTakenAsClean(t *testing.T) {
+	r := &replayNVD{t: t, routes: map[string]string{
+		"virtualMatchString=cpe:2.3:a:apache:log4j": "v02_vms_log4j",
 	}}
 	svc := NewNVDService(nil, nil, "", r.start().URL, false)
 	item := nvdWorkItem{
@@ -215,13 +262,45 @@ func TestM60Lookup_KnownProductUnaffectedVersionIsFinal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
-	if l.method != model.MatchNVDCPE || len(l.vulns) != 0 {
-		t.Errorf("method=%q vulns=%d, want nvd_cpe / 0", l.method, len(l.vulns))
+	var ids []string
+	for _, v := range l.vulns {
+		ids = append(ids, v.CVEID)
 	}
-	for _, q := range r.requests() {
-		if strings.HasPrefix(q, "keywordSearch=") {
-			t.Errorf("keyword fallback issued for a known product: %q", q)
+	want := "CVE-2026-34477 CVE-2026-34478 CVE-2026-34479 CVE-2026-34480 CVE-2026-34481 CVE-2026-49844"
+	if got := strings.Join(ids, " "); got != want {
+		t.Errorf("kept %q, want %q", got, want)
+	}
+	if got := r.requests(); len(got) != 2 || !strings.HasPrefix(got[0], "cpeName=") || !strings.HasPrefix(got[1], "virtualMatchString=") {
+		t.Errorf("requests = %q, want cpeName then the product walk", got)
+	}
+}
+
+// A version that is not plain dotted numbers skips cpeName entirely: its
+// encoding in NVD is ambiguous (NVD stores 2.0-beta9 as 2.0 + update beta9).
+func TestM60R10_QualifiedVersionSkipsCPEName(t *testing.T) {
+	r := &replayNVD{t: t, routes: map[string]string{
+		"virtualMatchString=cpe:2.3:a:apache:log4j": "v02_vms_log4j",
+	}}
+	svc := NewNVDService(nil, nil, "", r.start().URL, false)
+	item := nvdWorkItem{
+		key:        nvdComponentKey{Name: "log4j-core", Version: "2.0-beta9"},
+		candidates: cpeCandidates([]string{"cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*"}, "2.0-beta9", ""),
+	}
+	l, err := svc.lookupComponent(context.Background(), item, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.requests(); len(got) != 1 || !strings.HasPrefix(got[0], "virtualMatchString=") {
+		t.Errorf("requests = %q, want only the product walk", got)
+	}
+	found := false
+	for _, v := range l.vulns {
+		if v.CVEID == "CVE-2021-44228" {
+			found = true
 		}
+	}
+	if !found {
+		t.Errorf("Log4Shell not found for 2.0-beta9 (NVD lists log4j:2.0:beta9)")
 	}
 }
 
