@@ -298,8 +298,10 @@ func asciiLower(s string) string {
 // detail of an *echo.HTTPError is logged separately by the server's error
 // handler.
 func accessLogErrorText(err error) string {
-	var he *echo.HTTPError
-	if errors.As(err, &he) {
+	// A direct assertion, as echo's DefaultHTTPErrorHandler does: a wrapped
+	// *echo.HTTPError is answered 500, so it is classified by its type
+	// chain, not by an inner code the client never saw.
+	if he, ok := err.(*echo.HTTPError); ok {
 		eff := he
 		if inner, ok := he.Internal.(*echo.HTTPError); ok {
 			eff = inner // echo renders the promoted error; mirror its code

@@ -343,6 +343,10 @@ func TestAccessLog_ErrorFieldIsClassificationOnly(t *testing.T) {
 			"http_error code=502 internal=*fmt.wrapError > *url.Error > *errors.errorString"},
 		{"promoted internal http error", echo.NewHTTPError(http.StatusBadRequest).SetInternal(echo.NewHTTPError(http.StatusInternalServerError, "pq: PROMOTEDSECRET")),
 			"http_error code=500"},
+		// Codex R8 Low: echo only recognises a top-level *echo.HTTPError; a
+		// wrapped one is answered 500, so it must not be classified by its
+		// inner code.
+		{"wrapped http error", fmt.Errorf("wrapped: %w", echo.ErrNotFound), "*fmt.wrapError > *echo.HTTPError"},
 		{"joined", errors.Join(errors.New("JOINSECRET"), parseErr), "*errors.joinError > [*errors.errorString, *url.Error > *errors.errorString]"},
 	}
 	secrets := []string{"DSNPASSWORD", "PORTPASSWORD", "SLACKPATHSECRET", "CS1", "SIG1", "BEARERX1", "DSNPW2", "MSGSECRET", "PROMOTEDSECRET", "JOINSECRET"}
