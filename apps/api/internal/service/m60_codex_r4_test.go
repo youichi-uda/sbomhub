@@ -52,7 +52,7 @@ func TestM60R4_StoredCPEDedupeIsCaseInsensitiveBeforeTheCap(t *testing.T) {
 		in = append(in, b.String())
 	}
 	in = append(in, "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*")
-	got := normaliseSBOMCPEs(in)
+	got := normaliseSBOMCPEs(in, "1.0")
 	if got[len(got)-1] != "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*" {
 		t.Errorf("the real candidate was pushed out by case variants: %q", got)
 	}

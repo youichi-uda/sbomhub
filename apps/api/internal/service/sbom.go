@@ -307,7 +307,7 @@ func parseCycloneDX(data []byte) ([]model.Component, error) {
 					}
 				}
 			}
-			comp.CPEs = normaliseSBOMCPEs(cpes)
+			comp.CPEs = normaliseSBOMCPEs(cpes, comp.Version)
 			if c.Licenses != nil && len(*c.Licenses) > 0 {
 				for _, lic := range *c.Licenses {
 					if lic.License != nil && lic.License.ID != "" {
@@ -343,7 +343,7 @@ func parseSPDX(data []byte) ([]model.Component, error) {
 				// M60: externalRefs is an ARRAY in SPDX 2.x JSON. The code
 				// here used to read it with getString, which only accepts a
 				// string, so every SPDX 2 purl was silently dropped.
-				comp.Purl, comp.CPEs = spdx2ExternalRefs(p)
+				comp.Purl, comp.CPEs = spdx2ExternalRefs(p, comp.Version)
 				components = append(components, comp)
 			}
 		}
@@ -355,7 +355,7 @@ func parseSPDX(data []byte) ([]model.Component, error) {
 // spdx2ExternalRefs reads the purl and the CPE names from an SPDX 2.x
 // package's externalRefs array (M60). The first purl wins; CPEs keep document
 // order (Syft lists its candidates most-specific first).
-func spdx2ExternalRefs(pkg map[string]interface{}) (purl string, cpes []string) {
+func spdx2ExternalRefs(pkg map[string]interface{}, version string) (purl string, cpes []string) {
 	refs, _ := pkg["externalRefs"].([]interface{})
 	var raw []string
 	for _, r := range refs {
@@ -373,7 +373,7 @@ func spdx2ExternalRefs(pkg map[string]interface{}) (purl string, cpes []string) 
 			raw = append(raw, loc)
 		}
 	}
-	return purl, normaliseSBOMCPEs(raw)
+	return purl, normaliseSBOMCPEs(raw, version)
 }
 
 // maxStoredCPEsPerComponent bounds the CPE list kept per component. Syft
@@ -389,7 +389,12 @@ const maxStoredCPELength = 512
 // string or a CPE 2.2 URI, drops duplicates (first occurrence wins, so the
 // SBOM's order is preserved) and caps the list. It returns nil when nothing
 // survives, so a component without CPEs is stored as NULL.
-func normaliseSBOMCPEs(in []string) []string {
+//
+// compVersion is the component's version: without one, a CPE whose own
+// version is not concrete can never become a candidate (cpeCandidates), so it
+// is not stored and does not use up the cap (Codex M60 R14 Low).
+func normaliseSBOMCPEs(in []string, compVersion string) []string {
+	noCompVersion := strings.TrimSpace(compVersion) == ""
 	var out []string
 	seen := make(map[string]struct{}, len(in))
 	for _, c := range in {
@@ -403,7 +408,7 @@ func normaliseSBOMCPEs(in []string) []string {
 		// A version-NA CPE never becomes a candidate either (Codex M60 R7
 		// Low).
 		n, ok := parseCPE(c)
-		if !ok || n.Version == "-" {
+		if !ok || n.Version == "-" || (noCompVersion && !cpeConcrete(n.Version)) {
 			continue
 		}
 		// Dedupe on the product identity the scanner uses (it tries the
@@ -475,7 +480,7 @@ func parseSPDX3(data []byte) ([]model.Component, error) {
 				cpes = append(cpes, ext.Identifier)
 			}
 		}
-		comp.CPEs = normaliseSBOMCPEs(cpes)
+		comp.CPEs = normaliseSBOMCPEs(cpes, comp.Version)
 
 		// Extract license if available
 		if elem.DeclaredLicense != "" {

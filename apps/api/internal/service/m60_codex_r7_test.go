@@ -13,7 +13,7 @@ func TestM60R7_VersionNACPEsDoNotUseTheCap(t *testing.T) {
 		in = append(in, "cpe:2.3:a:acme:w"+strings.Repeat("x", i)+":-:*:*:*:*:*:*:*")
 	}
 	in = append(in, "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*")
-	got := normaliseSBOMCPEs(in)
+	got := normaliseSBOMCPEs(in, "1.0")
 	if len(got) != 1 || got[0] != "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*" {
 		t.Errorf("normaliseSBOMCPEs = %q, want only the usable CPE", got)
 	}

@@ -51,6 +51,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -261,11 +262,19 @@ func (c cpeCandidate) query() string {
 // update tri-state. NA and ANY send the same query but verify differently
 // (Codex M60 R11), so they must not share a cache entry or a work item
 // (Codex M60 R12 High).
+//
+// The comparison mode is part of it too (Codex M60 R14 High-1): plain "2.31"
+// and distro "2.31-13" send the same query, but only the plain one may
+// exclude by comparison, so its verified answer is narrower.
 func (c cpeCandidate) identity() string {
+	id := c.query()
 	if c.updateNA {
-		return c.query() + "|na"
+		id += "|na"
 	}
-	return c.query()
+	if !c.plain() {
+		id += "|nonplain"
+	}
+	return id
 }
 
 // productQuery is the version-less virtualMatchString used to ask whether NVD
@@ -412,6 +421,26 @@ type NVDCPEMatch struct {
 	VersionStartExcluding string `json:"versionStartExcluding"`
 	VersionEndIncluding   string `json:"versionEndIncluding"`
 	VersionEndExcluding   string `json:"versionEndExcluding"`
+	// vulnerableMissing: the decoded JSON had no `vulnerable` (or null).
+	// Only an EXPLICIT false is platform evidence that may drop a CVE
+	// (Codex M60 R14 High-2); a missing one is undecidable.
+	vulnerableMissing bool
+}
+
+// UnmarshalJSON records whether `vulnerable` was present.
+func (m *NVDCPEMatch) UnmarshalJSON(b []byte) error {
+	type plain NVDCPEMatch
+	var aux struct {
+		plain
+		Vulnerable *bool `json:"vulnerable"`
+	}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	*m = NVDCPEMatch(aux.plain)
+	m.Vulnerable = aux.Vulnerable != nil && *aux.Vulnerable
+	m.vulnerableMissing = aux.Vulnerable == nil
+	return nil
 }
 
 // cpeVerdict is the outcome of checking one CVE against one candidate.
@@ -465,6 +494,10 @@ func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
 					continue
 				}
 				sawProduct = true
+				if m.vulnerableMissing {
+					undecidable = true
+					continue
+				}
 				if !m.Vulnerable {
 					continue
 				}
@@ -492,23 +525,23 @@ func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
 // as nvd_cpe_unverified and the answer is not cached. A gap in the comparison
 // can therefore never drop a CVE; it can only lower a label.
 func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
+	switch crit.Update {
+	case "", "*", "-":
+	default:
+		// The criterion pins an update ("2.0:beta9", "*:beta"): not plain,
+		// whatever its version attribute (Codex M60 R14 Medium).
+		return cpeUndecidable
+	}
 	if crit.Version == "-" {
 		// NA: a version-less thing. Not a comparison this code may decide.
 		return cpeUndecidable
 	}
 	if cpeConcrete(crit.Version) {
-		switch crit.Update {
-		case "", "*":
-		case "-":
-			// NA names the final release. A candidate with update ANY and a
-			// plain version is taken to BE the final release and matches
-			// (Codex M60 R12 Medium-1, declined: the inclusive direction; a
-			// pre-release writes its qualifier into the version string, which
-			// then is not plain and so is undecidable here).
-		default:
-			// The criterion pins an update ("2.0:beta9", "2.0:sp1"): not plain.
-			return cpeUndecidable
-		}
+		// update is ANY or NA here. NA names the final release; a candidate
+		// with update ANY and a plain version is taken to BE the final
+		// release and matches (Codex M60 R12 Medium-1, declined: the
+		// inclusive direction; a pre-release writes its qualifier into the
+		// version string, which then is not plain and so is undecidable).
 		cmp, ok := compareVersions(c.raw, crit.Version)
 		switch {
 		case !ok || !c.plain():
@@ -609,7 +642,7 @@ func compareNumeric(a, b string) int {
 // `NVDCachePrefix + nvdCacheName(...)` = "nvdv2:m55.<hex>" (M55..M59) or use
 // the legacy "nvd:vuln:" prefix (pre-M55), so neither can write a key here.
 const (
-	nvdCPECacheSchema   = "m60c."
+	nvdCPECacheSchema   = "m60d." // m60c. keyed answers without the comparison mode (R14)
 	nvdNoCPECacheSchema = "m60n."
 )
 

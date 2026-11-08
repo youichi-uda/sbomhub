@@ -48,7 +48,7 @@ func TestM60R11_CandidateUpdateAnyIsNotFinalOnly(t *testing.T) {
 // version, only the versioned one is usable).
 func TestM60R11_VersionlessCPEDoesNotShadowVersionedOne(t *testing.T) {
 	in := []string{"cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*", "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"}
-	if got := normaliseSBOMCPEs(in); !reflect.DeepEqual(got, in) {
+	if got := normaliseSBOMCPEs(in, "1.0"); !reflect.DeepEqual(got, in) {
 		t.Fatalf("normaliseSBOMCPEs = %q, want both", got)
 	}
 	cs := cpeCandidates(in, "", "")
