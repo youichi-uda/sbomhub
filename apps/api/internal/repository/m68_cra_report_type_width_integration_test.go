@@ -105,7 +105,8 @@ func TestM68Schema_GuardSeesQuotedLiterals(t *testing.T) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(`CREATE TABLE m68_guard_probe (
-		c VARCHAR(20) CHECK (c IN ('short', '12345678901234567890''x')))`); err != nil {
+		c VARCHAR(20) CHECK (c IN ('short', '12345678901234567890''x')),
+		d VARCHAR(20) CHECK ('123456789012345678901' = d OR d = 'ok'))`); err != nil {
 		t.Fatal(err)
 	}
 	// Codex R5: no false positives. A multi-column CHECK compares each literal
@@ -119,9 +120,13 @@ func TestM68Schema_GuardSeesQuotedLiterals(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := overlongCheckLiterals(t, tx)
-	want := `m68_guard_probe.c is limited to 20 characters but its CHECK allows "12345678901234567890'x" (22)`
-	if len(got) != 1 || got[0] != want {
-		t.Fatalf("guard found %q, want exactly [%q]", got, want)
+	want := []string{
+		`m68_guard_probe.c is limited to 20 characters but its CHECK allows "12345678901234567890'x" (22)`,
+		// Codex R6: the literal on the LEFT of the comparison.
+		`m68_guard_probe.d is limited to 20 characters but its CHECK allows "123456789012345678901" (21)`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("guard found %q, want exactly %q", got, want)
 	}
 }
 
@@ -184,22 +189,44 @@ func overlongCheckLiterals(t *testing.T, db catalogueQueryer) []string {
 
 // sqlValueLiterals returns the literals of def that are VALUES the column is
 // compared with: an operand of = / <> or an element of an IN / ARRAY list
-// (deparsed as `= ANY ((ARRAY['a'::…, 'b'::…])::text[])`). Pattern operands
+// (deparsed as `= ANY ((ARRAY['a'::…, 'b'::…])::text[])`), on either side of
+// the operator. Pattern operands
 // (~, LIKE / ~~) are skipped — a regex is not a value the column holds.
 func sqlValueLiterals(def string) []string {
 	var out []string
 	for _, l := range sqlStringLiterals(def) {
 		before := strings.TrimRight(def[:l.start], " (")
+		after := strings.TrimLeft(skipCast(def[l.end:]), " )")
 		if strings.HasSuffix(before, "=") || strings.HasSuffix(before, "<>") ||
-			strings.HasSuffix(before, "ARRAY[") || strings.HasSuffix(before, ",") {
+			strings.HasSuffix(before, "ARRAY[") || strings.HasSuffix(before, ",") ||
+			strings.HasPrefix(after, "=") || strings.HasPrefix(after, "<>") {
 			out = append(out, l.text)
 		}
 	}
 	return out
 }
 
+// skipCast drops a leading `::type` cast (possibly `::character varying`,
+// possibly followed by `)` and further casts) from s.
+func skipCast(s string) string {
+	for {
+		t := strings.TrimLeft(s, ")")
+		if !strings.HasPrefix(t, "::") {
+			return s
+		}
+		t = t[2:]
+		i := 0
+		for i < len(t) && (t[i] == '_' || t[i] == ' ' || t[i] == '[' || t[i] == ']' ||
+			(t[i] >= 'a' && t[i] <= 'z') || (t[i] >= '0' && t[i] <= '9')) {
+			i++
+		}
+		s = t[i:]
+	}
+}
+
 type sqlLiteral struct {
 	start int // offset of the opening quote
+	end   int // offset just past the closing quote
 	text  string
 }
 
@@ -222,7 +249,7 @@ func sqlStringLiterals(def string) []sqlLiteral {
 			}
 			b.WriteByte(def[j])
 		}
-		out = append(out, sqlLiteral{start: i, text: b.String()})
+		out = append(out, sqlLiteral{start: i, end: j + 1, text: b.String()})
 		i = j
 	}
 	return out

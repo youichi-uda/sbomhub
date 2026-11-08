@@ -314,3 +314,63 @@ func TestCLIUpload_SBOMWithNULOrInvalidUTF8Is400(t *testing.T) {
 		})
 	}
 }
+
+// Codex R6: names created before the validation existed may hold characters
+// a NEW name may not (a newline, a control character, a 300-character name
+// cannot exist — VARCHAR(255) — but the others can). The CLI routes resolve
+// an EXISTING project by name, and must keep resolving such a project: only
+// creating one is held to the new rules. NUL / invalid UTF-8 still cannot be
+// looked up (PostgreSQL refuses them in the query) and stay a 400.
+func TestCLIProjectCreate_ResolvesExistingLegacyNamedProject(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenantID, projectID := uuid.New(), uuid.New()
+	legacy := "legacy\nproject\x1f"
+	mock.ExpectQuery(`SELECT id, name, COALESCE\(description, ''\), COALESCE\(created_at, NOW\(\)\), COALESCE\(updated_at, NOW\(\)\) FROM projects WHERE tenant_id = \$1 AND name = \$2`).
+		WithArgs(tenantID, legacy).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "description", "created_at", "updated_at"}).
+			AddRow(projectID, legacy, "", time.Now(), time.Now()))
+	h := NewCLIHandler(service.NewCLIService(repository.NewProjectRepository(db), repository.NewSbomRepository(db), repository.NewComponentRepository(db)))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/projects", strings.NewReader(mustJSON(t, map[string]string{"name": legacy})))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := newProjectTestEcho().NewContext(req, rec)
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	if err := h.CreateProject(c); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s; want 200 (existing project resolved)", rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCLIProjectCreate_LegacyStyleNameIsStillRefusedForANewProject(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tenantID := uuid.New()
+	mock.ExpectQuery(`SELECT id, name`).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "description", "created_at", "updated_at"}))
+	h := NewCLIHandler(service.NewCLIService(repository.NewProjectRepository(db), repository.NewSbomRepository(db), repository.NewComponentRepository(db)))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/projects", strings.NewReader(`{"name":"new\nproject"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := newProjectTestEcho().NewContext(req, rec)
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	if err := h.CreateProject(c); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s; want 400", rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

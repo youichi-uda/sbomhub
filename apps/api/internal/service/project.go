@@ -42,6 +42,21 @@ func ValidateProjectName(name string) error {
 	return nil
 }
 
+// ValidateProjectNameLookup checks a name that is only LOOKED UP (the CLI
+// routes resolve an existing project by name before creating one): it must be
+// something PostgreSQL can compare — valid UTF-8, no NUL — and no longer than
+// projects.name can be. It deliberately does
+// not apply ValidateProjectName's rules, so a project created before those
+// rules existed (a name with a newline or a control character) can still be
+// resolved; only creating such a name is refused.
+func ValidateProjectNameLookup(name string) error {
+	// The length limit is safe here: no stored name can exceed the column.
+	if err := validation.CheckTextField("name", name, validation.TextRule{MaxChars: ProjectNameMaxChars}); err != nil {
+		return ValidationErrorf("%s", err.Error())
+	}
+	return nil
+}
+
 // ValidateProjectInput checks the name (see ValidateProjectName) and the
 // optional description: at most ProjectDescriptionMaxChars characters, valid
 // UTF-8, no NUL (the only character TEXT cannot store); every other character,

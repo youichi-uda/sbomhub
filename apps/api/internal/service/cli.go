@@ -109,7 +109,7 @@ var ErrCLIProjectOutOfScope = errors.New("project is outside the api key's scope
 func (s *CLIService) ResolveProjectForScopedKey(
 	ctx context.Context, tenantID, keyProjectID uuid.UUID, name string,
 ) (*model.Project, error) {
-	if err := ValidateProjectName(name); err != nil {
+	if err := ValidateProjectNameLookup(name); err != nil {
 		return nil, err
 	}
 	existing, err := s.projectRepo.GetByName(ctx, tenantID, name)
@@ -128,10 +128,11 @@ func (s *CLIService) ResolveProjectForScopedKey(
 // project_id — the create-on-unknown-name half is the escape hatch out of the
 // key's scope. Use ResolveProjectForScopedKey for those callers.
 func (s *CLIService) GetOrCreateProject(ctx context.Context, tenantID uuid.UUID, name, description string) (*model.Project, bool, error) {
-	// The name is checked before the lookup (a NUL in it fails the SELECT
-	// too); the description only matters, and is only checked, when the
-	// project is created.
-	if err := ValidateProjectName(name); err != nil {
+	// Before the lookup the name only has to be comparable (a NUL fails the
+	// SELECT too). The creation rules — and the description — are checked
+	// only when the project is created, so an existing project whose name
+	// predates them still resolves (Codex R6).
+	if err := ValidateProjectNameLookup(name); err != nil {
 		return nil, false, err
 	}
 	// Try to find existing project
