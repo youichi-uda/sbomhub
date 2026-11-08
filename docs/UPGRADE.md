@@ -1969,3 +1969,28 @@ Reason codes: `deadline_exceeded`, `cancelled`, `fetch_failed`, `truncated`,
 - The deadline bounds fetching. A scan that fetched everything in time but
   whose final write finished after the deadline (it waits at most 5 minutes)
   has complete results and is reported `completed`.
+
+## 16. Go 1.27 toolchain and access-log format
+
+**Who must act:** operators who build the API from source, and anyone who parses the API's access log.
+
+- **Go toolchain go1.27.3** for the API image (`golang:1.27.3-alpine`) and the
+  release `llm-bench` binaries. Building from source needs go1.27.3, or any
+  Go 1.26.1+ with automatic toolchain download allowed (the default
+  `GOTOOLCHAIN=auto`). With `GOTOOLCHAIN=local` on an older Go the build still
+  works (the `go` floor is unchanged at 1.26.1) but does not use the pinned
+  1.27.3 standard library.
+- **The access log is now a slog JSON line** on stdout, alongside the rest of
+  the server log (`"msg":"http request"`), replacing echo's own JSON line:
+  - `uri` is the path only. The query string is no longer logged, and
+    public-link tokens are redacted (`/api/v1/public/[REDACTED]`). The matched
+    route template is in the new `route` field.
+  - `id` is renamed `request_id` and only appears when the request carries
+    `X-Request-ID`.
+  - `error` no longer contains the error text: it is `http_error code=<status>`
+    for HTTP errors, otherwise the Go error type chain (for example
+    `*fmt.wrapError > *url.Error > *net.OpError`). 5xx details are still logged
+    separately as `"http 5xx error"`.
+  - 5xx requests are logged at ERROR, everything else at INFO. `method`,
+    `status`, `latency` (ns), `latency_human`, `remote_ip`, `host`,
+    `user_agent`, `bytes_in`, `bytes_out` keep their names and types.
