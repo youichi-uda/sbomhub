@@ -36,10 +36,11 @@ export default function ProjectsPage() {
     },
   });
   const projects = projectsQuery.data ?? [];
-  // Failed with nothing to show (first load) vs. a failed refetch while the
-  // previous rows are still on screen.
-  const loadFailed = projectsQuery.isError && projectsQuery.data === undefined;
-  const refetchFailed = projectsQuery.isError && projectsQuery.data !== undefined;
+  // Nothing to show (never loaded, or the last good answer was empty) ->
+  // full error instead of the empty state; rows on screen -> banner above
+  // them (Codex R3: an empty list whose refetch failed kept saying "none").
+  const loadFailed = projectsQuery.isError && (projectsQuery.data?.length ?? 0) === 0;
+  const refetchFailed = projectsQuery.isError && !loadFailed;
   const retry = () => void projectsQuery.refetch();
 
   // Create / delete patch the cached list in place (no refetch), exactly as

@@ -198,6 +198,24 @@ export default function CRAReportsPage() {
       return next;
     });
   }, []);
+  /**
+   * The server confirmed `op`: write it into every cached filter entry,
+   * reconcile, then drop the overlay. Writing it first means a failed
+   * reconcile GET (react-query keeps the old page) still cannot bring the
+   * pre-action row back (Codex R3).
+   */
+  const settlePendingOp = useCallback(
+    (reportId: string, op: PendingOp) => {
+      queryClient.setQueriesData<ReportPage>(
+        { queryKey: queryKeys.projects.craReportsAll(projectId) },
+        (old) => applyPendingOps(old, new Map([[reportId, op]])),
+      );
+      void queryClient
+        .invalidateQueries({ queryKey: queryKeys.projects.craReportsAll(projectId) })
+        .finally(() => setPendingOp(reportId, null));
+    },
+    [queryClient, projectId, setPendingOp],
+  );
   const shownPage = useMemo(
     () => applyPendingOps(reportsQuery.data, pendingOps),
     [reportsQuery.data, pendingOps],
@@ -213,7 +231,7 @@ export default function CRAReportsPage() {
   // A failed load with nothing to show is an error, not "no reports"
   // (AI-disabled keeps its own banner and the empty queue, as before).
   const loadFailed =
-    reportsQuery.isError && reportsQuery.data === undefined && !loadAIDisabled;
+    reportsQuery.isError && (reportsQuery.data?.data.length ?? 0) === 0 && !loadAIDisabled;
 
   /**
    * Submission timelines for the approved reports on screen (non-approved
@@ -283,7 +301,7 @@ export default function CRAReportsPage() {
       try {
         await api.craReports.decide(projectId, report.id, input);
         // background refresh so e.g. server-side state mutations land
-        void reloadReports().finally(() => setPendingOp(report.id, null));
+        settlePendingOp(report.id, { kind: "remove" });
       } catch (err) {
         setPendingOp(report.id, null);
         void reloadReports();
@@ -292,7 +310,7 @@ export default function CRAReportsPage() {
         setBusyReportId(null);
       }
     },
-    [projectId, reloadReports, setPendingOp, handleError, t],
+    [projectId, reloadReports, setPendingOp, settlePendingOp, handleError, t],
   );
 
   const handleApprove = useCallback(
@@ -407,7 +425,7 @@ export default function CRAReportsPage() {
           ...(prev ?? []),
         ]);
         // Background reconcile so the authoritative state lands.
-        void reloadReports().finally(() => setPendingOp(report.id, null));
+        settlePendingOp(report.id, { kind: "state", state: "submitted" });
         void queryClient.invalidateQueries({ queryKey: subsKey, exact: true });
       } catch (err) {
         // Drop only this report's overlay, then reconcile with the server.
@@ -418,7 +436,7 @@ export default function CRAReportsPage() {
         setBusyReportId(null);
       }
     },
-    [queryClient, projectId, reloadReports, setPendingOp, handleError, t],
+    [queryClient, projectId, reloadReports, setPendingOp, settlePendingOp, handleError, t],
   );
 
   // F4 carry-over: drop evidence-less reports from the visible queue,

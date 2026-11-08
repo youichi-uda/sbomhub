@@ -145,8 +145,11 @@ export default function IntegrationsPage() {
   const connections = connectionsQuery.data ?? [];
   const loading = connectionsQuery.isPending;
   const loadConnections = () => connectionsQuery.refetch();
-  const loadFailed = connectionsQuery.isError && connectionsQuery.data === undefined;
-  const refetchFailed = connectionsQuery.isError && connectionsQuery.data !== undefined;
+  // Nothing to show (never loaded, or the last good answer was empty) ->
+  // full error instead of the empty state; rows on screen -> banner above
+  // them (Codex R3: an empty list whose refetch failed kept saying "none").
+  const loadFailed = connectionsQuery.isError && (connectionsQuery.data?.length ?? 0) === 0;
+  const refetchFailed = connectionsQuery.isError && !loadFailed;
 
   const resetForm = () => {
     setTrackerType("jira");

@@ -71,8 +71,11 @@ export default function APIKeysPage() {
   const keys = keysQuery.data ?? [];
   const loading = keysQuery.isPending;
   const loadKeys = () => keysQuery.refetch();
-  const loadFailed = keysQuery.isError && keysQuery.data === undefined;
-  const refetchFailed = keysQuery.isError && keysQuery.data !== undefined;
+  // Nothing to show (never loaded, or the last good answer was empty) ->
+  // full error instead of the empty state; rows on screen -> banner above
+  // them (Codex R3: an empty list whose refetch failed kept saying "none").
+  const loadFailed = keysQuery.isError && (keysQuery.data?.length ?? 0) === 0;
+  const refetchFailed = keysQuery.isError && !loadFailed;
 
   const resetForm = () => {
     setName("");

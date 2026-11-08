@@ -97,13 +97,15 @@ test.describe('SSO Settings', () => {
         const alert = page.getByTestId('sso-enterprise-required');
         await expect(alert).toBeVisible({ timeout: 15000 });
         await expect(alert.getByText('Enterprise プランが必要です', { exact: true })).toBeVisible();
+        // Clerk mode: no self-host notice next to the upgrade prompt (asserted
+        // on this page, before navigating away — Codex R3 Low).
+        await expect(page.getByTestId('sso-self-hosted-notice')).toHaveCount(0);
         const link = alert.getByRole('link', { name: '料金プラン' });
         // The old link pointed at /settings/billing, which does not exist.
         await expect(link).toHaveAttribute('href', '/billing');
         await expect(page.getByRole('heading', { name: 'Enterprise プランにアップグレード' })).toBeVisible();
         await link.click();
         await expect(page).toHaveURL(/\/en\/billing$/);
-        await expect(page.getByTestId('sso-self-hosted-notice')).toHaveCount(0);
     });
 
     test('should not guess the auth mode when the subscription cannot be loaded', async ({ page }) => {

@@ -183,6 +183,42 @@ test.describe('Error Handling', () => {
         });
     }
 
+    // Codex R3 Medium: an empty list whose refetch then fails (here: after
+    // creating the first key) must not keep saying "No API Keys".
+    test('should not show the empty state when the refetch after the first create fails', async ({ page }) => {
+        const A = en.Settings.APIKeys;
+        let gets = 0;
+        await page.route(`${API_BASE_URL}/api/v1/apikeys`, (route) => {
+            if (route.request().method() === 'POST') {
+                return route.fulfill({
+                    status: 201,
+                    contentType: 'application/json',
+                    body: JSON.stringify({
+                        id: '00000000-0000-0000-0000-00000000c0de', name: 'stub', key: 'sbh_stub', key_prefix: 'sbh_stu',
+                        permissions: 'write', created_at: new Date().toISOString(),
+                    }),
+                });
+            }
+            gets += 1;
+            return gets === 1
+                ? route.fulfill({ status: 200, contentType: 'application/json', body: '[]' })
+                : route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'boom' }) });
+        });
+        await page.goto('/en/settings/apikeys');
+        await expect(page.getByText(A.noKeys, { exact: true })).toBeVisible({ timeout: 15000 });
+
+        await page.getByRole('button', { name: A.createFirstKey, exact: true }).click();
+        const dialog = page.getByRole('dialog');
+        await dialog.getByLabel(A.nameLabel).fill('stub');
+        await dialog.getByRole('button', { name: A.create, exact: true }).click();
+        await expect(dialog.getByText(A.keyCreated)).toBeVisible();
+        await dialog.getByRole('button', { name: A.close, exact: true }).click();
+
+        expect(gets).toBe(2);
+        await expect(page.getByTestId('apikeys-load-error')).toBeVisible();
+        await expect(page.getByText(A.noKeys, { exact: true })).toHaveCount(0);
+    });
+
     test("should show a load error on a project's API keys tab", async ({ page, request }) => {
         const project = await createProject(request, uniqueName('API Keys Load Error'), 'load error');
         try {
