@@ -1,7 +1,8 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,6 +15,8 @@ import { KEVBadge } from "@/components/vulnerability/kev-badge";
 import { EOLBadge } from "@/components/component/eol-badge";
 import { DependencyPathPanel } from "@/components/component/dependency-path";
 import Link from "next/link";
+import { queryKeys } from "@/lib/query/keys";
+import { useRetainedData } from "@/lib/query/use-retained-data";
 
 // M13-1 #87 / F174: "apikeys" rejoined the Tab union so the project
 // detail page surfaces project-scoped API key CRUD again.
@@ -33,6 +36,17 @@ import Link from "next/link";
 //   3. the tenant-wide alternative remains at /settings/apikeys.
 type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "notifications" | "apikeys";
 
+// Loader helper: log a failed fetch under the same message the hand-written
+// loaders used, then rethrow so react-query keeps the previous data.
+async function logged<T>(message: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    console.error(message, error);
+    throw error;
+  }
+}
+
 export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.id as string;
@@ -40,31 +54,17 @@ export default function ProjectDetailPage() {
   const tp = useTranslations("ProjectDetail");
   const tc = useTranslations("Common");
 
-  const [project, setProject] = useState<Project | null>(null);
-  const [components, setComponents] = useState<Component[]>([]);
-  const [vulnerabilities, setVulnerabilities] = useState<Vulnerability[]>([]);
-  // vulnTotalCount carries the server-side X-Total-Count (M1 Codex
-  // review #F28). Without it we previously used vulnerabilities.length
-  // as the tab counter — silently truncated to the default page size
-  // (100) for projects with more matched vulns. The truncation banner
-  // below trips when this value exceeds the page we actually loaded.
-  const [vulnTotalCount, setVulnTotalCount] = useState<number>(0);
   // M38-B (F447 #159): vulnerabilities list sort key. Default "cvss"
   // mirrors the frozen backend contract default (no silent behaviour
   // change vs pre-M38). Toggling to "epss" re-fetches the list ordered
   // by exploitation probability (EPSS) so operators can triage by
   // likelihood-of-exploit instead of raw severity.
   const [vulnSort, setVulnSort] = useState<"cvss" | "epss">("cvss");
-  const [vexStatements, setVexStatements] = useState<VEXStatementWithDetails[]>([]);
-  const [licensePolicies, setLicensePolicies] = useState<LicensePolicy[]>([]);
-  const [licenseViolations, setLicenseViolations] = useState<LicenseViolation[]>([]);
   const [activeTab, setActiveTab] = useState<Tab>("upload");
-  const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [showVexForm, setShowVexForm] = useState(false);
   const [selectedVulnForVex, setSelectedVulnForVex] = useState<Vulnerability | null>(null);
   const [showLicenseForm, setShowLicenseForm] = useState(false);
-  const [sbomId, setSbomId] = useState<string | null>(null);
   // M29-B (F398 #137): the component whose transitive dependency
   // path-to-root is currently expanded in the components tab. Single
   // selection keeps the wiring minimal — clicking a different row's
@@ -75,8 +75,6 @@ export default function ProjectDetailPage() {
     name: string;
     version: string;
   } | null>(null);
-  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
-  const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
   // M13-1 #87 (F174): project-scoped API keys state. The full lifecycle
   // is inline (no Dialog) so it mirrors the existing VEX / License form
   // pattern in this file and avoids depending on the custom Dialog shim
@@ -85,7 +83,6 @@ export default function ProjectDetailPage() {
   // holds the one-time secret returned from the create endpoint; the
   // server never echoes the secret again, hence the bg-green-50 banner
   // patterned after the equivalent affordance on /settings/apikeys.
-  const [apiKeys, setApiKeys] = useState<APIKey[]>([]);
   const [showCreateApiKey, setShowCreateApiKey] = useState(false);
   const [apiKeyJustCreated, setApiKeyJustCreated] = useState<APIKeyWithSecret | null>(null);
   const [apiKeyName, setApiKeyName] = useState("");
@@ -106,154 +103,160 @@ export default function ProjectDetailPage() {
   // zip`). "markdown" keeps the original single-file bundle one click away.
   const [evidencePackFormat, setEvidencePackFormat] = useState<"zip" | "markdown">("zip");
 
-  const loadProject = useCallback(async () => {
-    try {
-      const data = await api.projects.get(projectId);
-      setProject(data);
-    } catch (error) {
-      console.error("Failed to load project:", error);
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId]);
+  // ---- data loading (react-query) ----------------------------------
+  //
+  // Every list loads on mount. Switching to a tab refetches that tab's data
+  // (selectTab below) — the effect-based version did the same from an
+  // [activeTab] effect. License violations and notification logs are only
+  // fetched while their tab is open (the `enabled` flags), as before; once
+  // fetched they stay on screen when the operator leaves the tab.
+  //
+  // Failures are logged and leave the previous data on screen (react-query
+  // keeps a key's last data when a refetch fails), which is what the
+  // try/catch-and-log loaders did.
+  const projectQuery = useQuery({
+    queryKey: queryKeys.projects.detail(projectId),
+    queryFn: () => logged("Failed to load project:", () => api.projects.get(projectId)),
+  });
+  const project: Project | null = projectQuery.data ?? null;
+  const loading = projectQuery.isPending;
 
-  const loadComponents = useCallback(async () => {
-    try {
-      const data = await api.projects.getComponents(projectId);
-      setComponents(data || []);
-    } catch (error) {
-      console.error("Failed to load components:", error);
-    }
-  }, [projectId]);
+  const componentsQuery = useQuery({
+    queryKey: queryKeys.projects.components(projectId),
+    queryFn: () =>
+      logged("Failed to load components:", async (): Promise<Component[]> =>
+        (await api.projects.getComponents(projectId)) || []),
+  });
+  const components = componentsQuery.data ?? [];
 
-  // M38 Phase D (F448): monotonic request sequence so a slow in-flight
-  // vulnerabilities fetch cannot overwrite the list with a stale order —
-  // toggling CVSS→EPSS quickly, an older CVSS response must not win over
-  // the newer EPSS one. Only the latest request applies its result.
-  const vulnReqSeq = useRef(0);
+  // #F28: the meta variant reads X-Total-Count instead of inferring the
+  // count from the (page-truncated) array length. vulnTotalCount carries
+  // that server-side total (M1 Codex review #F28): the tab counter and the
+  // truncation banner below trip when it exceeds the page we loaded.
+  // M38-B (F447 #159): the sort key is part of the query key, so a toggle
+  // to EPSS re-fetches with the exploitation-probability ordering, and a
+  // slow response for the previous sort can never be shown for the new one
+  // (this replaces the M38 Phase D F448 request-sequence guard). The
+  // previous order stays on screen until the new one arrives (or fails).
+  const vulnerabilitiesQuery = useQuery({
+    queryKey: queryKeys.projects.vulnerabilities(projectId, vulnSort),
+    queryFn: () =>
+      logged("Failed to load vulnerabilities:", async (): Promise<{ data: Vulnerability[]; totalCount: number }> => {
+        const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId, {
+          sort: vulnSort,
+        });
+        return { data: data || [], totalCount };
+      }),
+  });
+  const vulnerabilitiesPage = useRetainedData(vulnerabilitiesQuery.data, projectId);
+  const vulnerabilities: Vulnerability[] = vulnerabilitiesPage?.data ?? [];
+  const vulnTotalCount = vulnerabilitiesPage?.totalCount ?? 0;
 
-  const loadVulnerabilities = useCallback(async () => {
-    const seq = ++vulnReqSeq.current;
-    try {
-      // #F28: use the meta variant so we read X-Total-Count instead
-      // of inferring the count from the (page-truncated) array length.
-      // M38-B (F447 #159): thread the selected sort key so a toggle to
-      // EPSS re-fetches with the exploitation-probability ordering.
-      const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId, {
-        sort: vulnSort,
-      });
-      if (seq !== vulnReqSeq.current) return; // superseded by a newer request
-      setVulnerabilities(data || []);
-      setVulnTotalCount(totalCount);
-    } catch (error) {
-      if (seq !== vulnReqSeq.current) return;
-      console.error("Failed to load vulnerabilities:", error);
-    }
-  }, [projectId, vulnSort]);
+  const vexQuery = useQuery({
+    queryKey: queryKeys.projects.vex(projectId),
+    queryFn: () =>
+      logged("Failed to load VEX statements:", async (): Promise<VEXStatementWithDetails[]> =>
+        (await api.projects.getVEXStatements(projectId)) || []),
+  });
+  const vexStatements = vexQuery.data ?? [];
 
-  const loadVexStatements = useCallback(async () => {
-    try {
-      const data = await api.projects.getVEXStatements(projectId);
-      setVexStatements(data || []);
-    } catch (error) {
-      console.error("Failed to load VEX statements:", error);
-    }
-  }, [projectId]);
+  const licensePoliciesQuery = useQuery({
+    queryKey: queryKeys.projects.licensePolicies(projectId),
+    queryFn: () =>
+      logged("Failed to load license policies:", async (): Promise<LicensePolicy[]> =>
+        (await api.projects.getLicensePolicies(projectId)) || []),
+  });
+  const licensePolicies = licensePoliciesQuery.data ?? [];
 
-  const loadLicensePolicies = useCallback(async () => {
-    try {
-      const data = await api.projects.getLicensePolicies(projectId);
-      setLicensePolicies(data || []);
-    } catch (error) {
-      console.error("Failed to load license policies:", error);
-    }
-  }, [projectId]);
-
-  const loadLicenseViolations = useCallback(async () => {
-    if (!sbomId) return;
-    try {
-      const data = await api.projects.checkLicenseViolations(projectId, sbomId);
-      setLicenseViolations(data || []);
-    } catch (error) {
-      console.error("Failed to load license violations:", error);
-    }
-  }, [projectId, sbomId]);
-
-  const loadSbomId = useCallback(async () => {
-    try {
-      const sbom = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/api/v1/projects/${projectId}/sbom`);
-      if (sbom.ok) {
-        const data = await sbom.json();
-        setSbomId(data.id);
+  // Latest SBOM id, used to check license violations. NOTE: plain fetch
+  // without the API client's auth headers — unchanged from before, kept as
+  // is (behaviour-preserving migration).
+  const sbomIdQuery = useQuery({
+    queryKey: queryKeys.projects.latestSbomId(projectId),
+    queryFn: async (): Promise<string | null> => {
+      try {
+        const sbom = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/api/v1/projects/${projectId}/sbom`);
+        if (sbom.ok) {
+          const data = await sbom.json();
+          return data.id;
+        }
+      } catch (error) {
+        console.error("Failed to load SBOM ID:", error);
       }
-    } catch (error) {
-      console.error("Failed to load SBOM ID:", error);
-    }
-  }, [projectId]);
+      return null;
+    },
+  });
+  const sbomId = sbomIdQuery.data ?? null;
 
-  const loadNotificationSettings = useCallback(async () => {
-    try {
-      const data = await api.projects.getNotificationSettings(projectId);
-      setNotificationSettings(data);
-    } catch (error) {
-      console.error("Failed to load notification settings:", error);
-    }
-  }, [projectId]);
+  const licenseViolationsQuery = useQuery({
+    queryKey: queryKeys.projects.licenseViolations(projectId, sbomId),
+    queryFn: () =>
+      logged("Failed to load license violations:", async (): Promise<LicenseViolation[]> =>
+        (await api.projects.checkLicenseViolations(projectId, sbomId as string)) || []),
+    enabled: activeTab === "licenses" && !!sbomId,
+  });
+  const licenseViolations = licenseViolationsQuery.data ?? [];
 
-  const loadNotificationLogs = useCallback(async () => {
-    try {
-      const data = await api.projects.getNotificationLogs(projectId);
-      setNotificationLogs(data || []);
-    } catch (error) {
-      console.error("Failed to load notification logs:", error);
-    }
-  }, [projectId]);
+  const notificationSettingsQuery = useQuery({
+    queryKey: queryKeys.projects.notificationSettings(projectId),
+    queryFn: () =>
+      logged("Failed to load notification settings:", () =>
+        api.projects.getNotificationSettings(projectId)),
+  });
+  const notificationSettings: NotificationSettings | null = notificationSettingsQuery.data ?? null;
 
-  // M13-1 #87 (F174): load project-scoped API keys via the deprecated
-  // (but still validated + audit-logged) `/projects/:id/apikeys` route.
-  // F164 normalisation (`data || []`) keeps the array shape stable when
-  // the backend emits a JSON null for the empty case.
-  const loadApiKeys = useCallback(async () => {
-    try {
-      const data = await api.projects.getAPIKeys(projectId);
-      setApiKeys(data || []);
-    } catch (error) {
-      console.error("Failed to load API keys:", error);
-      setApiKeys([]);
-    }
-  }, [projectId]);
+  const notificationLogsQuery = useQuery({
+    queryKey: queryKeys.projects.notificationLogs(projectId),
+    queryFn: () =>
+      logged("Failed to load notification logs:", async (): Promise<NotificationLog[]> =>
+        (await api.projects.getNotificationLogs(projectId)) || []),
+    enabled: activeTab === "notifications",
+  });
+  const notificationLogs = notificationLogsQuery.data ?? [];
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    loadProject();
-    loadComponents();
-    loadVulnerabilities();
-    loadVexStatements();
-    loadLicensePolicies();
-    loadSbomId();
-    loadNotificationSettings();
-    // Preload API keys so the tab counter renders an accurate badge
-    // before the operator switches tabs. The page-level fetch failures
-    // are swallowed inside loadApiKeys (logged + reset to []) so they
-    // do not block project-level rendering.
-    loadApiKeys();
-  }, [loadProject, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadSbomId, loadNotificationSettings, loadApiKeys]);
+  // M13-1 #87 (F174): project-scoped API keys via the deprecated (but still
+  // validated + audit-logged) `/projects/:id/apikeys` route. Preloaded on
+  // mount so the tab counter renders an accurate badge before the operator
+  // switches tabs. F164 normalisation (`data || []`) keeps the array shape
+  // stable when the backend emits a JSON null; a failure is logged and
+  // resets the list to [] (it does not block project-level rendering).
+  const apiKeysQuery = useQuery({
+    queryKey: queryKeys.projects.apiKeys(projectId),
+    queryFn: async (): Promise<APIKey[]> => {
+      try {
+        return (await api.projects.getAPIKeys(projectId)) || [];
+      } catch (error) {
+        console.error("Failed to load API keys:", error);
+        return [];
+      }
+    },
+  });
+  const apiKeys = apiKeysQuery.data ?? [];
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    if (activeTab === "components") loadComponents();
-    if (activeTab === "vulnerabilities") loadVulnerabilities();
-    if (activeTab === "vex") loadVexStatements();
-    if (activeTab === "licenses") {
-      loadLicensePolicies();
-      loadLicenseViolations();
-    }
-    if (activeTab === "notifications") {
-      loadNotificationSettings();
-      loadNotificationLogs();
-    }
-    if (activeTab === "apikeys") loadApiKeys();
-  }, [activeTab, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadLicenseViolations, loadNotificationSettings, loadNotificationLogs, loadApiKeys]);
+  const loadComponents = () => void componentsQuery.refetch();
+  const loadVexStatements = () => void vexQuery.refetch();
+  const loadLicensePolicies = () => void licensePoliciesQuery.refetch();
+  // Only meaningful while the licenses tab is open with a known SBOM, which
+  // is the only place it is called from; same guard the old loader had.
+  const loadLicenseViolations = () => {
+    if (sbomId) void licenseViolationsQuery.refetch();
+  };
+  const loadNotificationSettings = () => void notificationSettingsQuery.refetch();
+  const loadApiKeys = () => apiKeysQuery.refetch();
+
+  // Tab switch = refetch that tab's data. A tab whose query is gated on
+  // `enabled` (violations, notification logs) fetches by itself when the
+  // gate opens, so it is not refetched here a second time.
+  function selectTab(tab: Tab) {
+    if (tab === activeTab) return;
+    setActiveTab(tab);
+    if (tab === "components") loadComponents();
+    if (tab === "vulnerabilities") void vulnerabilitiesQuery.refetch();
+    if (tab === "vex") loadVexStatements();
+    if (tab === "licenses") loadLicensePolicies();
+    if (tab === "notifications") loadNotificationSettings();
+    if (tab === "apikeys") void loadApiKeys();
+  }
 
   // handleBuildEvidencePack drives the M2-6 (issue #34) bundle download,
   // now format-aware (M31 F406 #141): "markdown" downloads the original
@@ -378,8 +381,7 @@ export default function ProjectDetailPage() {
       const content = await file.text();
       await api.projects.uploadSbom(projectId, content);
       alert(tp("uploadSuccess"));
-      loadComponents();
-      setActiveTab("components");
+      selectTab("components");
     } catch (error) {
       console.error("Failed to upload SBOM:", error);
       alert(tp("uploadFailed"));
@@ -464,21 +466,21 @@ export default function ProjectDetailPage() {
       <div className="flex gap-2 mb-6">
         <Button
           variant={activeTab === "upload" ? "default" : "outline"}
-          onClick={() => setActiveTab("upload")}
+          onClick={() => selectTab("upload")}
         >
           <Upload className="h-4 w-4 mr-2" />
           {t("Projects.upload")}
         </Button>
         <Button
           variant={activeTab === "components" ? "default" : "outline"}
-          onClick={() => setActiveTab("components")}
+          onClick={() => selectTab("components")}
         >
           <Package className="h-4 w-4 mr-2" />
           {t("Components.title")} ({components.length})
         </Button>
         <Button
           variant={activeTab === "vulnerabilities" ? "default" : "outline"}
-          onClick={() => setActiveTab("vulnerabilities")}
+          onClick={() => selectTab("vulnerabilities")}
         >
           <AlertTriangle className="h-4 w-4 mr-2" />
           {/* #F28: render the server-side total, not the visible page
@@ -489,28 +491,28 @@ export default function ProjectDetailPage() {
         </Button>
         <Button
           variant={activeTab === "vex" ? "default" : "outline"}
-          onClick={() => setActiveTab("vex")}
+          onClick={() => selectTab("vex")}
         >
           <Shield className="h-4 w-4 mr-2" />
           VEX ({vexStatements.length})
         </Button>
         <Button
           variant={activeTab === "licenses" ? "default" : "outline"}
-          onClick={() => setActiveTab("licenses")}
+          onClick={() => selectTab("licenses")}
         >
           <FileCheck className="h-4 w-4 mr-2" />
           {t("Components.license")} ({licensePolicies.length})
         </Button>
         <Button
           variant={activeTab === "notifications" ? "default" : "outline"}
-          onClick={() => setActiveTab("notifications")}
+          onClick={() => selectTab("notifications")}
         >
           <Bell className="h-4 w-4 mr-2" />
           {tp("notifications")}
         </Button>
         <Button
           variant={activeTab === "apikeys" ? "default" : "outline"}
-          onClick={() => setActiveTab("apikeys")}
+          onClick={() => selectTab("apikeys")}
         >
           <Key className="h-4 w-4 mr-2" />
           {tp("apiKeys")} ({apiKeys.length})
@@ -817,7 +819,7 @@ export default function ProjectDetailPage() {
                           onClick={() => {
                             setSelectedVulnForVex(vuln);
                             setShowVexForm(true);
-                            setActiveTab("vex");
+                            selectTab("vex");
                           }}
                         >
                           <Shield className="h-3 w-3 mr-1" />
@@ -1039,8 +1041,12 @@ export default function ProjectDetailPage() {
           </CardHeader>
           <CardContent>
             <NotificationSettingsForm
+              key={projectId}
+              // key: a different project gets a fresh form (Codex R3) — never
+              // the previous project's webhook URLs while its own settings load.
               projectId={projectId}
               settings={notificationSettings}
+              settingsUpdatedAt={notificationSettingsQuery.dataUpdatedAt}
               onSuccess={() => {
                 loadNotificationSettings();
               }}
@@ -1287,10 +1293,12 @@ export default function ProjectDetailPage() {
 interface NotificationSettingsFormProps {
   projectId: string;
   settings: NotificationSettings | null;
+  /** react-query dataUpdatedAt of `settings`: changes on every successful (re)fetch. */
+  settingsUpdatedAt: number;
   onSuccess: () => void;
 }
 
-function NotificationSettingsForm({ projectId, settings, onSuccess }: NotificationSettingsFormProps) {
+function NotificationSettingsForm({ projectId, settings, settingsUpdatedAt, onSuccess }: NotificationSettingsFormProps) {
   const tp = useTranslations("ProjectDetail");
   const tc = useTranslations("Common");
   const tv = useTranslations("Vulnerabilities");
@@ -1304,18 +1312,22 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
   const [submitting, setSubmitting] = useState(false);
   const [testingNotification, setTestingNotification] = useState(false);
 
-  useEffect(() => {
-    if (settings) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- re-seeds the editable form fields when the server-fetched settings prop arrives.
-      setSlackWebhookUrl(settings.slack_webhook_url || "");
-      setDiscordWebhookUrl(settings.discord_webhook_url || "");
-      setEmailAddresses(settings.email_addresses || "");
-      setNotifyCritical(settings.notify_critical);
-      setNotifyHigh(settings.notify_high);
-      setNotifyMedium(settings.notify_medium);
-      setNotifyLow(settings.notify_low);
-    }
-  }, [settings]);
+  // Re-seed the editable fields from the server copy every time it is
+  // (re)fetched — e.g. right after a save — which the old [settings] effect
+  // did. Done during render ("storing information from previous renders"
+  // in the React docs) instead of in an effect; the fields keep their DOM
+  // nodes, so focus is not lost the way a key-remount would lose it.
+  const [seededAt, setSeededAt] = useState(settingsUpdatedAt);
+  if (settings && settingsUpdatedAt !== seededAt) {
+    setSeededAt(settingsUpdatedAt);
+    setSlackWebhookUrl(settings.slack_webhook_url || "");
+    setDiscordWebhookUrl(settings.discord_webhook_url || "");
+    setEmailAddresses(settings.email_addresses || "");
+    setNotifyCritical(settings.notify_critical);
+    setNotifyHigh(settings.notify_high);
+    setNotifyMedium(settings.notify_medium);
+    setNotifyLow(settings.notify_low);
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

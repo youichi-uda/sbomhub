@@ -1,10 +1,14 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslations, useLocale } from 'next-intl';
 import { Download, Loader2, ChevronLeft, ChevronRight, Filter, X, Lock } from 'lucide-react';
 import { api, AuditLog, AuditListResponse, AuditFilter, ActionInfo, ResourceTypeInfo } from '@/lib/api';
 import { useAuth, useOrganization } from '@/lib/auth';
+import { queryKeys } from '@/lib/query/keys';
+import { useRetainedData } from '@/lib/query/use-retained-data';
+import { errorSlot, resolveErrorSlot, type ErrorSlot } from '@/lib/query/error-slot';
 import Link from 'next/link';
 
 export default function AuditLogPage() {
@@ -13,90 +17,81 @@ export default function AuditLogPage() {
     const locale = useLocale();
     const { getToken } = useAuth();
     const { organization } = useOrganization();
-    const [logs, setLogs] = useState<AuditLog[]>([]);
-    const [total, setTotal] = useState(0);
     const [page, setPage] = useState(1);
-    const [totalPages, setTotalPages] = useState(1);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
-    const [hasFeature, setHasFeature] = useState<boolean | null>(null);
+    // Export failures share the banner with load failures (see error-slot.ts).
+    const [actionError, setActionError] = useState<ErrorSlot | null>(null);
 
     // Filter states
     const [showFilters, setShowFilters] = useState(false);
-    const [actions, setActions] = useState<ActionInfo[]>([]);
-    const [resourceTypes, setResourceTypes] = useState<ResourceTypeInfo[]>([]);
     const [filter, setFilter] = useState<AuditFilter>({
         page: 1,
         limit: 50,
     });
 
-    // Check if the feature is available for the current plan
-    const checkFeatureAccess = useCallback(async () => {
-        try {
-            const subscription = await api.billing.getSubscription();
-            if (subscription.is_self_hosted) {
-                setHasFeature(true);
-                return;
+    // Check if the feature is available for the current plan. Shares the
+    // subscription cache entry with the billing page; failures allow access
+    // (the backend still enforces the plan).
+    const subscriptionQuery = useQuery({
+        queryKey: queryKeys.billing.subscription(),
+        queryFn: async () => {
+            try {
+                return await api.billing.getSubscription();
+            } catch (err) {
+                console.error('Failed to check feature access:', err);
+                throw err;
             }
-            const hasAuditLogs = subscription.limits?.features?.audit_logs ?? false;
-            setHasFeature(hasAuditLogs);
-        } catch (err) {
-            console.error('Failed to check feature access:', err);
-            // On error, allow access (handled by backend)
-            setHasFeature(true);
-        }
-    }, []);
+        },
+    });
+    let hasFeature: boolean | null = null;
+    if (subscriptionQuery.isError) {
+        hasFeature = true;
+    } else if (subscriptionQuery.data) {
+        hasFeature = subscriptionQuery.data.is_self_hosted
+            ? true
+            : (subscriptionQuery.data.limits?.features?.audit_logs ?? false);
+    }
 
-    const loadFilterOptions = useCallback(async () => {
-        try {
-            const [actionsData, resourceTypesData] = await Promise.all([
-                api.auditLogs.getActions(),
-                api.auditLogs.getResourceTypes(),
-            ]);
-            setActions(actionsData);
-            setResourceTypes(resourceTypesData);
-        } catch (err) {
-            console.error('Failed to load filter options:', err);
-        }
-    }, []);
+    const filterOptionsQuery = useQuery({
+        queryKey: queryKeys.audit.filterOptions(),
+        queryFn: async (): Promise<{ actions: ActionInfo[]; resourceTypes: ResourceTypeInfo[] }> => {
+            try {
+                const [actionsData, resourceTypesData] = await Promise.all([
+                    api.auditLogs.getActions(),
+                    api.auditLogs.getResourceTypes(),
+                ]);
+                return { actions: actionsData, resourceTypes: resourceTypesData };
+            } catch (err) {
+                console.error('Failed to load filter options:', err);
+                throw err;
+            }
+        },
+        enabled: hasFeature === true,
+    });
+    const actions = filterOptionsQuery.data?.actions ?? [];
+    const resourceTypes = filterOptionsQuery.data?.resourceTypes ?? [];
 
-    const loadLogs = useCallback(async () => {
-        setLoading(true);
-        setError(null);
-        try {
-            const response: AuditListResponse = await api.auditLogs.list({
-                ...filter,
-                page,
-            });
-            setLogs(response.logs || []);
-            setTotal(response.total);
-            setTotalPages(response.total_pages);
-        } catch (err) {
-            setError(t("loadFailed"));
-            console.error(err);
-        } finally {
-            setLoading(false);
-        }
-    }, [filter, page, t]);
-
-    useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-        checkFeatureAccess();
-    }, [checkFeatureAccess]);
-
-    useEffect(() => {
-        if (hasFeature === true) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-            loadFilterOptions();
-        }
-    }, [hasFeature, loadFilterOptions]);
-
-    useEffect(() => {
-        if (hasFeature === true) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-            loadLogs();
-        }
-    }, [hasFeature, loadLogs]);
+    const queryClient = useQueryClient();
+    const logsKey = queryKeys.audit.logs(filter, page);
+    const logsQuery = useQuery({
+        queryKey: logsKey,
+        queryFn: async (): Promise<AuditListResponse> => {
+            try {
+                return await api.auditLogs.list({ ...filter, page });
+            } catch (err) {
+                console.error(err);
+                throw err;
+            }
+        },
+        enabled: hasFeature === true,
+    });
+    // Paging / filtering keeps the previous rows on screen while the next
+    // page loads and after it fails, as the state-based loader did.
+    const logsResponse = useRetainedData(logsQuery.data, "audit");
+    const logs: AuditLog[] = logsResponse?.logs || [];
+    const total = logsResponse?.total ?? 0;
+    const totalPages = logsResponse?.total_pages ?? 1;
+    const loading = hasFeature !== true || logsQuery.isFetching;
+    const error = resolveErrorSlot(actionError, logsKey, logsQuery.errorUpdateCount, t("loadFailed"));
 
     const handleExport = async () => {
         try {
@@ -126,12 +121,21 @@ export default function AuditLogPage() {
                 a.remove();
             }, 100);
         } catch (err) {
-            setError(t("exportFailed"));
+            setActionError(errorSlot(t("exportFailed"), logsKey, queryClient));
             console.error(err);
         }
     };
 
+    // The old loader cleared the banner when it started (and every filter /
+    // page change started one): record that clear in the shared slot.
+    const clearBannerForReload = () => setActionError(errorSlot(null, logsKey, queryClient));
+    const goToPage = (next: (p: number) => number) => {
+        clearBannerForReload();
+        setPage(next);
+    };
+
     const handleFilterChange = (key: keyof AuditFilter, value: string) => {
+        clearBannerForReload();
         setFilter(prev => ({
             ...prev,
             [key]: value || undefined,
@@ -140,6 +144,7 @@ export default function AuditLogPage() {
     };
 
     const clearFilters = () => {
+        clearBannerForReload();
         setFilter({
             page: 1,
             limit: 50,
@@ -388,7 +393,7 @@ export default function AuditLogPage() {
                     </p>
                     <div className="flex items-center gap-2">
                         <button
-                            onClick={() => setPage(p => Math.max(1, p - 1))}
+                            onClick={() => goToPage(p => Math.max(1, p - 1))}
                             disabled={page === 1}
                             className="flex items-center gap-1 px-3 py-2 border border-border rounded-lg hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
                         >
@@ -399,7 +404,7 @@ export default function AuditLogPage() {
                             {t("pageNumber", { current: page, total: totalPages })}
                         </span>
                         <button
-                            onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                            onClick={() => goToPage(p => Math.min(totalPages, p + 1))}
                             disabled={page === totalPages}
                             className="flex items-center gap-1 px-3 py-2 border border-border rounded-lg hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
                         >

@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,13 +35,12 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { api, APIKey, APIKeyWithSecret } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
 import { Plus, Trash2, RefreshCw, Copy, Check, Key, Terminal, Server } from "lucide-react";
 import { useTranslations } from "next-intl";
 
 export default function APIKeysPage() {
   const t = useTranslations("Settings.APIKeys");
-  const [keys, setKeys] = useState<APIKey[]>([]);
-  const [loading, setLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,21 +52,22 @@ export default function APIKeysPage() {
   const [permissions, setPermissions] = useState("write");
   const [expiresInDays, setExpiresInDays] = useState<string>("");
 
-  const loadKeys = async () => {
-    try {
-      const data = await api.apiKeys.list();
-      setKeys(data || []);
-    } catch (error) {
-      console.error("Failed to load API keys:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    loadKeys();
-  }, []);
+  // A failed load leaves the previous list (or the empty state) on screen
+  // and is only logged, as before; the mutations below refetch the list.
+  const keysQuery = useQuery({
+    queryKey: queryKeys.apiKeys.list(),
+    queryFn: async (): Promise<APIKey[]> => {
+      try {
+        return (await api.apiKeys.list()) || [];
+      } catch (error) {
+        console.error("Failed to load API keys:", error);
+        throw error;
+      }
+    },
+  });
+  const keys = keysQuery.data ?? [];
+  const loading = keysQuery.isPending;
+  const loadKeys = () => keysQuery.refetch();
 
   const resetForm = () => {
     setName("");

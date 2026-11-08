@@ -120,3 +120,27 @@ test("page.tsx imports from ./diff-helpers", () => {
   const pageSrc = readFileSync(join(__dirname, "page.tsx"), "utf8");
   assert.match(pageSrc, /from\s+["']\.\/diff-helpers["']/);
 });
+
+// Codex R1 Medium (react-query migration): within detail mode the previous
+// diff stays on screen while a new (from, to) pair loads and after it fails
+// — what the state-based loader did — but it is dropped on leaving detail
+// mode and never shown for another project.
+test("retainDetail keeps the last diff across pair changes inside detail mode only", async () => {
+  const { retainDetail } = await import("./diff-helpers.ts");
+  const A = { id: "A" };
+  const B = { id: "B" };
+  let r = retainDetail(null, { detailMode: true, projectId: "p1", data: A });
+  assert.deepEqual(r, { projectId: "p1", data: A });
+  // pair change: new key has no data yet (loading) or failed -> keep A
+  assert.equal(retainDetail(r, { detailMode: true, projectId: "p1", data: undefined }), r);
+  // new pair resolves -> B
+  r = retainDetail(r, { detailMode: true, projectId: "p1", data: B });
+  assert.deepEqual(r, { projectId: "p1", data: B });
+  // leaving detail mode clears
+  assert.equal(retainDetail(r, { detailMode: false, projectId: "p1", data: undefined }), null);
+  // another project never inherits it
+  assert.equal(
+    retainDetail({ projectId: "p1", data: A }, { detailMode: true, projectId: "p2", data: undefined }),
+    null,
+  );
+});

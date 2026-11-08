@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useParams } from "next/navigation";
 import { api, PublicSbomView } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FormatBadge } from "@/components/sbom/format-badge";
@@ -10,28 +12,20 @@ import { FormatBadge } from "@/components/sbom/format-badge";
 export default function PublicSbomPage() {
   const params = useParams();
   const token = params.token as string;
-  const [view, setView] = useState<PublicSbomView | null>(null);
-  const [loading, setLoading] = useState(true);
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  // Each "Access" click is a new attempt. The password travels in this
+  // state (read by the queryFn) rather than in the query key, so it never
+  // ends up in the cache key.
+  const [attempt, setAttempt] = useState<{ n: number; password?: string }>({ n: 0 });
 
-  const load = useCallback(async (pwd?: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await api.publicLinks.publicView(token, pwd);
-      setView(data);
-    } catch {
-      setError("Access denied. Password may be required.");
-    } finally {
-      setLoading(false);
-    }
-  }, [token]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    load();
-  }, [load]);
+  const viewQuery = useQuery({
+    queryKey: queryKeys.publicView(token, attempt.n),
+    queryFn: (): Promise<PublicSbomView> => api.publicLinks.publicView(token, attempt.password),
+  });
+  const view = viewQuery.data ?? null;
+  const loading = viewQuery.isFetching;
+  const error = viewQuery.isError ? "Access denied. Password may be required." : null;
+  const load = (pwd: string) => setAttempt((prev) => ({ n: prev.n + 1, password: pwd }));
 
   if (loading) {
     return <div className="flex items-center justify-center h-64">Loading...</div>;

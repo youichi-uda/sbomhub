@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useTranslations, useLocale } from "next-intl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { api, IssueTrackerConnection, TrackerType } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
 import { Plus, Trash2, RefreshCw, ExternalLink, CheckCircle2 } from "lucide-react";
 
 // Per-tracker display copy, keyed by the TrackerType union so that adding a
@@ -93,8 +95,6 @@ export default function IntegrationsPage() {
   const tCommon = useTranslations("Common");
   const locale = useLocale();
 
-  const [connections, setConnections] = useState<IssueTrackerConnection[]>([]);
-  const [loading, setLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -126,21 +126,23 @@ export default function IntegrationsPage() {
     });
   };
 
-  const loadConnections = async () => {
-    try {
-      const data = await api.integrations.list();
-      setConnections(data.connections || []);
-    } catch (error) {
-      console.error("Failed to load connections:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    loadConnections();
-  }, []);
+  // A failed load leaves the previous list (or the empty state) on screen
+  // and is only logged, as before; create / delete refetch the list.
+  const connectionsQuery = useQuery({
+    queryKey: queryKeys.integrations.list(),
+    queryFn: async (): Promise<IssueTrackerConnection[]> => {
+      try {
+        const data = await api.integrations.list();
+        return data.connections || [];
+      } catch (error) {
+        console.error("Failed to load connections:", error);
+        throw error;
+      }
+    },
+  });
+  const connections = connectionsQuery.data ?? [];
+  const loading = connectionsQuery.isPending;
+  const loadConnections = () => connectionsQuery.refetch();
 
   const resetForm = () => {
     setTrackerType("jira");

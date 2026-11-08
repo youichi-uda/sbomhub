@@ -80,3 +80,29 @@ export function normaliseSeverity(sev: string | undefined | null): string {
 export function isInitialBaseline(d: { from: unknown; to: unknown }): boolean {
   return d.from === null && d.to !== null;
 }
+
+/**
+ * Detail-mode retention (react-query migration, Codex R1). The state-based
+ * loader kept the previous diff on screen while a new (from, to) pair
+ * loaded and after that load failed; leaving detail mode cleared it. Given
+ * the previously retained value and the current query data, returns what to
+ * retain now. Same-reference result when nothing changes, so the caller can
+ * use it as a "set state during render" guard without looping.
+ */
+export interface RetainedDetail<T> {
+  projectId: string;
+  data: T;
+}
+
+export function retainDetail<T>(
+  prev: RetainedDetail<T> | null,
+  cur: { detailMode: boolean; projectId: string; data: T | undefined },
+): RetainedDetail<T> | null {
+  if (!cur.detailMode) return null;
+  if (cur.data !== undefined) {
+    return prev && prev.projectId === cur.projectId && prev.data === cur.data
+      ? prev
+      : { projectId: cur.projectId, data: cur.data };
+  }
+  return prev && prev.projectId === cur.projectId ? prev : null;
+}

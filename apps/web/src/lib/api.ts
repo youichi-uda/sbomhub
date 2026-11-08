@@ -1858,6 +1858,21 @@ export class APIError extends Error {
   }
 }
 
+/**
+ * User-facing message for a failed load, shared by the panels that show the
+ * backend's own explanation (dependency path / dependency graph): an
+ * APIError shows the backend's `error` string when it sent one and the
+ * caller's (i18n) fallback otherwise — never the generic "API error: 500"
+ * — and any other Error shows its message.
+ */
+export function loadErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof APIError) {
+    return err.body && typeof err.body.error === "string" ? err.body.error : fallback;
+  }
+  if (err instanceof Error) return err.message;
+  return fallback;
+}
+
 // Token getter function - will be set by AuthProvider
 let getAuthToken: (() => Promise<string | null>) | null = null;
 let getOrgId: (() => string | null) | null = null;

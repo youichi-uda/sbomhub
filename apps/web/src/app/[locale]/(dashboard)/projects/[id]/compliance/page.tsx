@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { queryKeys } from "@/lib/query/keys";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -542,55 +544,61 @@ function VisualizationSettingsComponent({
 export default function CompliancePage() {
   const params = useParams();
   const projectId = params.id as string;
-  const [result, setResult] = useState<ComplianceResult | null>(null);
-  const [checklist, setChecklist] = useState<ChecklistResult | null>(null);
-  const [visualization, setVisualization] =
-    useState<VisualizationFramework | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("overview");
 
-  const loadAllData = useCallback(async () => {
-    try {
-      setLoading(true);
-      const [complianceData, checklistData, visualizationData] =
-        await Promise.all([
-          api.projects.getCompliance(projectId),
-          api.projects.getChecklist(projectId).catch(() => null),
-          api.projects.getVisualization(projectId).catch(() => null),
-        ]);
-      setResult(complianceData);
-      setChecklist(checklistData);
-      setVisualization(visualizationData);
-    } catch (err) {
-      setError("コンプライアンスチェックの読み込みに失敗しました");
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    loadAllData();
-  }, [loadAllData]);
+  const complianceQuery = useQuery({
+    queryKey: queryKeys.projects.compliance(projectId),
+    queryFn: async (): Promise<ComplianceResult> => {
+      try {
+        return await api.projects.getCompliance(projectId);
+      } catch (err) {
+        console.error(err);
+        throw err;
+      }
+    },
+  });
+  // The checklist and the visualization settings are optional extras: a
+  // failure leaves them null (first load) or keeps the previous copy (a
+  // reload after an edit), exactly like the `.catch(() => null)` /
+  // reloadChecklist pair this replaces.
+  const checklistQuery = useQuery({
+    queryKey: queryKeys.projects.checklist(projectId),
+    queryFn: async (): Promise<ChecklistResult> => {
+      try {
+        return await api.projects.getChecklist(projectId);
+      } catch (err) {
+        console.error("Failed to load checklist:", err);
+        throw err;
+      }
+    },
+  });
+  const visualizationQuery = useQuery({
+    queryKey: queryKeys.projects.visualization(projectId),
+    queryFn: async (): Promise<VisualizationFramework> => {
+      try {
+        return await api.projects.getVisualization(projectId);
+      } catch (err) {
+        console.error("Failed to load visualization:", err);
+        throw err;
+      }
+    },
+  });
+  const result = complianceQuery.data ?? null;
+  const checklist = checklistQuery.data ?? null;
+  const visualization = visualizationQuery.data ?? null;
+  // The old loader was a Promise.all: the skeleton stayed up until all three
+  // settled, except that a compliance failure rejected it immediately.
+  const loading =
+    complianceQuery.isPending ||
+    (complianceQuery.isSuccess && (checklistQuery.isPending || visualizationQuery.isPending));
+  const error = complianceQuery.isError ? "コンプライアンスチェックの読み込みに失敗しました" : null;
 
   const reloadChecklist = async () => {
-    try {
-      const data = await api.projects.getChecklist(projectId);
-      setChecklist(data);
-    } catch (err) {
-      console.error("Failed to reload checklist:", err);
-    }
+    await checklistQuery.refetch();
   };
 
   const reloadVisualization = async () => {
-    try {
-      const data = await api.projects.getVisualization(projectId);
-      setVisualization(data);
-    } catch (err) {
-      console.error("Failed to reload visualization:", err);
-    }
+    await visualizationQuery.refetch();
   };
 
   if (loading) {

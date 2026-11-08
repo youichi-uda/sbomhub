@@ -1,9 +1,12 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslations, useLocale } from 'next-intl';
 import { Loader2, Save, ArrowLeft } from 'lucide-react';
 import { api, ReportSettings } from '@/lib/api';
+import { queryKeys } from '@/lib/query/keys';
+import { errorSlot, resolveErrorSlot, type ErrorSlot } from '@/lib/query/error-slot';
 import Link from 'next/link';
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -12,33 +15,36 @@ export default function ReportSettingsPage() {
     const t = useTranslations("Settings.Reports");
     const tCommon = useTranslations("Common");
     const locale = useLocale();
-    const [settings, setSettings] = useState<ReportSettings[]>([]);
 
     const WEEKDAYS = locale === 'ja'
         ? ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日']
         : ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState<string | null>(null);
-    const [error, setError] = useState<string | null>(null);
+    const [actionError, setActionError] = useState<ErrorSlot | null>(null);
     const [success, setSuccess] = useState<string | null>(null);
 
-    const loadSettings = useCallback(async () => {
-        setLoading(true);
-        try {
-            const data = await api.reports.getSettings() as ReportSettings[];
-            setSettings(Array.isArray(data) ? data : [data]);
-        } catch (err) {
-            setError(t('loadError'));
-            console.error(err);
-        } finally {
-            setLoading(false);
-        }
-    }, [t]);
-
-    useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-        loadSettings();
-    }, [loadSettings]);
+    const queryClient = useQueryClient();
+    const settingsKey = queryKeys.reports.settings();
+    const settingsQuery = useQuery({
+        queryKey: settingsKey,
+        queryFn: async (): Promise<ReportSettings[]> => {
+            try {
+                const data = await api.reports.getSettings() as ReportSettings[];
+                return Array.isArray(data) ? data : [data];
+            } catch (err) {
+                console.error(err);
+                throw err;
+            }
+        },
+    });
+    const loading = settingsQuery.isPending;
+    // Load failures and save failures share one banner; a save clears it.
+    const error = resolveErrorSlot(actionError, settingsKey, settingsQuery.errorUpdateCount, t('loadError'));
+    const setError = (message: string | null) => setActionError(errorSlot(message, settingsKey, queryClient));
+    // Per-row edits are a local draft over the server copy (the page only
+    // ever saved row-by-row and never reloaded, so the draft is the list).
+    const [draft, setDraft] = useState<ReportSettings[] | null>(null);
+    const settings = draft ?? settingsQuery.data ?? [];
 
     const handleSave = async (setting: ReportSettings) => {
         setSaving(setting.report_type);
@@ -68,7 +74,7 @@ export default function ReportSettingsPage() {
     };
 
     const updateSetting = (reportType: string, updates: Partial<ReportSettings>) => {
-        setSettings(prev => prev.map(s =>
+        setDraft(prev => (prev ?? settingsQuery.data ?? []).map(s =>
             s.report_type === reportType ? { ...s, ...updates } : s
         ));
     };

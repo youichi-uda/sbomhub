@@ -22,7 +22,8 @@
  * No AI is involved here — the diff is a mechanical comparison.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
@@ -53,7 +54,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AiSummaryPanel } from "@/components/diff/ai-summary";
 import { DependencyGraphPanel } from "@/components/diff/dependency-graph";
 import { ExportButtons } from "@/components/diff/export-buttons";
-import { buildDiffQuery, normaliseSeverity } from "./diff-helpers";
+import { buildDiffQuery, normaliseSeverity, retainDetail, type RetainedDetail } from "./diff-helpers";
+import { queryKeys } from "@/lib/query/keys";
+
+// Stable empty list so the timeline fan-out effect below (which depends on
+// the list identity) does not re-run on every render before the list loads.
+const NO_SBOMS: Sbom[] = [];
 
 // M10-6 #74 + Phase D F164 + M11-1 #76: the CI playwright run on
 // commit d6f759c surfaced "Application error: a client-side exception
@@ -87,72 +93,58 @@ export default function ProjectDiffPage() {
   const to = searchParams.get("to") ?? undefined;
   const detailMode = Boolean(from || to);
 
-  // Timeline mode state.
-  const [sboms, setSboms] = useState<Sbom[]>([]);
+  // Load the SBOM list once for the timeline. Detail mode also benefits
+  // from it (for the back-to-timeline navigation).
+  const sbomsQuery = useQuery({
+    queryKey: queryKeys.projects.sboms(projectId),
+    queryFn: async (): Promise<Sbom[]> => (await api.projects.getSboms(projectId)) ?? [],
+  });
+  const sboms = sbomsQuery.data ?? NO_SBOMS;
+  const sbomsLoading = sbomsQuery.isPending;
+  const sbomsError = sbomsQuery.isError
+    ? sbomsQuery.error instanceof Error
+      ? sbomsQuery.error.message
+      : t("loadFailed")
+    : null;
+
+  // Timeline badge diffs, keyed by the newer SBOM's id.
   const [timelineDiffs, setTimelineDiffs] = useState<
     Record<string, ProjectDiffResponse>
   >({});
-  const [sbomsLoading, setSbomsLoading] = useState(true);
-  const [sbomsError, setSbomsError] = useState<string | null>(null);
+  // Mirror of timelineDiffs for the fan-out's cache-hit check. The effect
+  // reads this instead of the state so it does not have to re-run (and
+  // restart its sequential loop) every time a row lands.
+  const fetchedTimelineDiffs = useRef<Record<string, ProjectDiffResponse>>({});
 
-  // Detail mode state.
-  const [detail, setDetail] = useState<ProjectDiffResponse | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  // Detail mode: fetch the diff for the (from, to) pair. Disabled (and
+  // therefore rendered as "no diff") outside detail mode, which is what the
+  // old effect's `setDetail(null)` on leaving detail mode achieved.
+  const detailQuery = useQuery({
+    queryKey: queryKeys.projects.diff(projectId, from, to),
+    queryFn: (): Promise<ProjectDiffResponse> => api.projects.getDiff(projectId, { from, to }),
+    enabled: detailMode,
+  });
+  // Inside detail mode the previous diff stays up while a new pair loads and
+  // after it fails (as with the old state-based loader); leaving detail mode
+  // or switching project drops it. Set during render, guarded by identity.
+  const [retainedDetail, setRetainedDetail] = useState<RetainedDetail<ProjectDiffResponse> | null>(null);
+  const nextRetainedDetail = retainDetail(retainedDetail, {
+    detailMode,
+    projectId,
+    data: detailQuery.data,
+  });
+  if (nextRetainedDetail !== retainedDetail) {
+    setRetainedDetail(nextRetainedDetail);
+  }
+  const detail = nextRetainedDetail?.data ?? null;
+  const detailLoading = detailMode && detailQuery.isFetching;
+  const detailError =
+    detailMode && detailQuery.isError && !detailQuery.isFetching
+      ? detailQuery.error instanceof Error
+        ? detailQuery.error.message
+        : t("diffLoadFailed")
+      : null;
   const [activeTab, setActiveTab] = useState<string>("components");
-
-  // Load the SBOM list once for the timeline. Detail mode also benefits
-  // from it (for the back-to-timeline navigation).
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setSbomsLoading(true);
-      try {
-        const list = await api.projects.getSboms(projectId);
-        if (cancelled) return;
-        setSboms(list ?? []);
-      } catch (err) {
-        if (cancelled) return;
-        setSbomsError(
-          err instanceof Error ? err.message : t("loadFailed"),
-        );
-      } finally {
-        if (!cancelled) setSbomsLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId, t]);
-
-  // Detail mode: fetch the diff for the (from, to) pair.
-  useEffect(() => {
-    if (!detailMode) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- leaving detail mode (URL-driven) must clear the previously fetched diff.
-      setDetail(null);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      setDetailLoading(true);
-      setDetailError(null);
-      try {
-        const res = await api.projects.getDiff(projectId, { from, to });
-        if (!cancelled) setDetail(res);
-      } catch (err) {
-        if (!cancelled) {
-          setDetailError(
-            err instanceof Error ? err.message : t("diffLoadFailed"),
-          );
-        }
-      } finally {
-        if (!cancelled) setDetailLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId, from, to, detailMode, t]);
 
   // Timeline mode: lazily fan out a diff per SBOM pair so each row gets
   // its "vs previous" badge counts. This is best-effort — failures on
@@ -169,7 +161,7 @@ export default function ProjectDiffPage() {
         const current = sboms[i];
         const previous = i + 1 < sboms.length ? sboms[i + 1] : null;
         const cacheKey = current.id;
-        if (timelineDiffs[cacheKey]) continue;
+        if (fetchedTimelineDiffs.current[cacheKey]) continue;
 
         try {
           const res = await api.projects.getDiff(projectId, {
@@ -177,6 +169,7 @@ export default function ProjectDiffPage() {
             to: current.id,
           });
           if (cancelled) return;
+          fetchedTimelineDiffs.current[cacheKey] = res;
           setTimelineDiffs((prev) => ({ ...prev, [cacheKey]: res }));
         } catch {
           // Non-fatal — just leave the row unbadged.
@@ -186,10 +179,8 @@ export default function ProjectDiffPage() {
     return () => {
       cancelled = true;
     };
-    // We deliberately depend only on sboms identity + projectId so the
-    // effect re-runs when the list reloads, not on every state change.
-    // timelineDiffs is checked inside the loop for cache hits.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Re-runs when the list (re)loads or the mode / project changes, not when
+    // a row lands: rows already fetched are skipped via the ref above.
   }, [sboms, projectId, detailMode]);
 
   const localePrefix = `/${locale}`;

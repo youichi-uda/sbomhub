@@ -1,10 +1,14 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslations, useLocale } from 'next-intl';
 import { Loader2, FileText, Download, Plus, RefreshCw, Clock, CheckCircle2, AlertTriangle, Settings } from 'lucide-react';
 import { api, GeneratedReport, ReportListResponse } from '@/lib/api';
 import { useAuth, useOrganization } from '@/lib/auth';
+import { queryKeys } from '@/lib/query/keys';
+import { useRetainedData } from '@/lib/query/use-retained-data';
+import { errorSlot, resolveErrorSlot, type ErrorSlot } from '@/lib/query/error-slot';
 import Link from 'next/link';
 
 export default function ReportsPage() {
@@ -13,13 +17,10 @@ export default function ReportsPage() {
     const locale = useLocale();
     const { getToken } = useAuth();
     const { organization } = useOrganization();
-    const [reports, setReports] = useState<GeneratedReport[]>([]);
-    const [total, setTotal] = useState(0);
     const [page, setPage] = useState(1);
-    const [totalPages, setTotalPages] = useState(1);
-    const [loading, setLoading] = useState(true);
     const [generating, setGenerating] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+    // Generate / download failures share the banner with load failures.
+    const [actionError, setActionError] = useState<ErrorSlot | null>(null);
 
     // Generate modal state
     const [showGenerateModal, setShowGenerateModal] = useState(false);
@@ -28,26 +29,38 @@ export default function ReportsPage() {
         format: 'pdf',
     });
 
-    const loadReports = useCallback(async () => {
-        setLoading(true);
-        setError(null);
-        try {
-            const response: ReportListResponse = await api.reports.list(page, 20);
-            setReports(response.reports || []);
-            setTotal(response.total);
-            setTotalPages(response.total_pages);
-        } catch (err) {
-            setError(t("loadFailed"));
-            console.error(err);
-        } finally {
-            setLoading(false);
-        }
-    }, [page, t]);
-
-    useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-        loadReports();
-    }, [loadReports]);
+    const queryClient = useQueryClient();
+    const reportsKey = queryKeys.reports.list(page);
+    const reportsQuery = useQuery({
+        queryKey: reportsKey,
+        queryFn: async (): Promise<ReportListResponse> => {
+            try {
+                return await api.reports.list(page, 20);
+            } catch (err) {
+                console.error(err);
+                throw err;
+            }
+        },
+    });
+    // Paging keeps the previous rows on screen while the next page loads
+    // and after it fails, as the state-based loader did.
+    const reportsResponse = useRetainedData(reportsQuery.data, "reports");
+    const reports: GeneratedReport[] = reportsResponse?.reports || [];
+    const total = reportsResponse?.total ?? 0;
+    const totalPages = reportsResponse?.total_pages ?? 1;
+    const loading = reportsQuery.isFetching;
+    const error = resolveErrorSlot(actionError, reportsKey, reportsQuery.errorUpdateCount, t("loadFailed"));
+    const setError = (message: string | null) => setActionError(errorSlot(message, reportsKey, queryClient));
+    // The old loader cleared the banner when it started: every handler that
+    // (re)loads the list records that clear in the shared slot.
+    const loadReports = () => {
+        setActionError(errorSlot(null, reportsKey, queryClient));
+        void reportsQuery.refetch();
+    };
+    const goToPage = (next: (p: number) => number) => {
+        setActionError(errorSlot(null, reportsKey, queryClient));
+        setPage(next);
+    };
 
     const handleGenerate = async () => {
         setGenerating(true);
@@ -264,7 +277,7 @@ export default function ReportsPage() {
                     </p>
                     <div className="flex items-center gap-2">
                         <button
-                            onClick={() => setPage(p => Math.max(1, p - 1))}
+                            onClick={() => goToPage(p => Math.max(1, p - 1))}
                             disabled={page === 1}
                             className="px-3 py-2 border border-border rounded-lg hover:bg-muted disabled:opacity-50"
                         >
@@ -272,7 +285,7 @@ export default function ReportsPage() {
                         </button>
                         <span className="text-sm">{page} / {totalPages}</span>
                         <button
-                            onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                            onClick={() => goToPage(p => Math.min(totalPages, p + 1))}
                             disabled={page === totalPages}
                             className="px-3 py-2 border border-border rounded-lg hover:bg-muted disabled:opacity-50"
                         >

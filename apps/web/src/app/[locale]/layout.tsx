@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 import { NextIntlClientProvider } from "next-intl";
 import { getMessages, getTranslations } from "next-intl/server";
 import { routing } from "@/i18n/routing";
+import { QueryProvider } from "@/components/providers/query-provider";
 import { notFound } from "next/navigation";
 import "../globals.css";
 
@@ -90,7 +91,7 @@ export default async function RootLayout({ children, params }: Props) {
     <html lang={locale}>
       <body className={inter.className}>
         <NextIntlClientProvider messages={messages}>
-          {children}
+          <QueryProvider>{children}</QueryProvider>
         </NextIntlClientProvider>
       </body>
     </html>

@@ -23,7 +23,8 @@
  * are safe even on an empty / baseline response.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
 import { Loader2, GitGraph } from "lucide-react";
 import {
@@ -38,10 +39,11 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import {
-  APIError,
+  loadErrorMessage,
   getDiffGraph,
   type ProjectDiffGraphResponse,
 } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
@@ -109,37 +111,16 @@ export function DependencyGraphPanel({
 }: DependencyGraphPanelProps) {
   const t = useTranslations("SbomDiff.Graph");
 
-  const [graph, setGraph] = useState<ProjectDiffGraphResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await getDiffGraph(projectId, from, to);
-      setGraph(res);
-    } catch (err) {
-      if (err instanceof APIError) {
-        const msg =
-          (err.body && typeof err.body.error === "string"
-            ? (err.body.error as string)
-            : null) ?? t("loadFailed");
-        setError(msg);
-      } else if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError(t("loadFailed"));
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId, from, to, t]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    void load();
-  }, [load]);
+  const graphQuery = useQuery({
+    queryKey: queryKeys.projects.diffGraph(projectId, from, to),
+    queryFn: (): Promise<ProjectDiffGraphResponse> => getDiffGraph(projectId, from, to),
+  });
+  const graph = graphQuery.data ?? null;
+  const loading = graphQuery.isFetching;
+  const error =
+    graphQuery.isError && !graphQuery.isFetching
+      ? loadErrorMessage(graphQuery.error, t("loadFailed"))
+      : null;
 
   const { nodes, edges, summary } = useMemo(() => {
     if (!graph) {

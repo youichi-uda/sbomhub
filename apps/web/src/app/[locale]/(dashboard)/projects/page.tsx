@@ -5,41 +5,45 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, Project } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
 import { Plus, Trash2, Upload, FolderOpen } from "lucide-react";
 import Link from "next/link";
 
 export default function ProjectsPage() {
   const t = useTranslations("Projects");
   const tc = useTranslations("Common");
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
 
-  async function loadProjects() {
-    try {
-      const data = await api.projects.list();
-      setProjects(data || []);
-    } catch (error) {
-      console.error("Failed to load projects:", error);
-      setProjects([]);
-    } finally {
-      setLoading(false);
-    }
-  }
+  const projectsQuery = useQuery({
+    queryKey: queryKeys.projects.list(),
+    queryFn: async () => {
+      try {
+        return (await api.projects.list()) || [];
+      } catch (error) {
+        // A failed load renders the empty state, as before.
+        console.error("Failed to load projects:", error);
+        return [] as Project[];
+      }
+    },
+  });
+  const projects = projectsQuery.data ?? [];
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    loadProjects();
-  }, []);
+  // Create / delete patch the cached list in place (no refetch), exactly as
+  // the previous local-state version did.
+  function setProjects(update: (prev: Project[]) => Project[]) {
+    queryClient.setQueryData<Project[]>(queryKeys.projects.list(), (prev) => update(prev ?? []));
+  }
 
   async function handleCreate() {
     try {
       const project = await api.projects.create({ name, description });
-      setProjects([project, ...projects]);
+      setProjects((prev) => [project, ...prev]);
       setDialogOpen(false);
       setName("");
       setDescription("");
@@ -52,13 +56,13 @@ export default function ProjectsPage() {
     if (!confirm(t("deleteConfirm"))) return;
     try {
       await api.projects.delete(id);
-      setProjects(projects.filter((p) => p.id !== id));
+      setProjects((prev) => prev.filter((p) => p.id !== id));
     } catch (error) {
       console.error("Failed to delete project:", error);
     }
   }
 
-  if (loading) {
+  if (projectsQuery.isPending) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="text-muted-foreground">{tc("loading")}</div>

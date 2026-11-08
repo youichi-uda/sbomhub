@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslations, useLocale } from "next-intl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,6 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { api, IPASyncSettings } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
 import { RefreshCw, Shield, Bell, AlertTriangle, AlertCircle, Info } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
@@ -22,27 +24,29 @@ const SEVERITY_OPTIONS = [
 export default function IPASettingsPage() {
   const t = useTranslations("Settings.IPA");
   const locale = useLocale();
-  const [settings, setSettings] = useState<IPASyncSettings | null>(null);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const settingsQuery = useQuery({
+    queryKey: queryKeys.ipa.settings(),
+    queryFn: async (): Promise<IPASyncSettings | null> => {
+      try {
+        return await api.ipa.getSettings();
+      } catch (error) {
+        // A failed load renders the page without settings, as before.
+        console.error("Failed to load IPA settings:", error);
+        return null;
+      }
+    },
+  });
+  const loading = settingsQuery.isPending;
+  // Unsaved edits live in `draft`; until the operator touches a control the
+  // form shows the server copy. Saving writes the server's answer back to
+  // the cache and drops the draft, which is what `setSettings(updated)` did.
+  const [draft, setDraft] = useState<IPASyncSettings | null>(null);
+  const settings = draft ?? settingsQuery.data ?? null;
+  const setSettings = (next: IPASyncSettings | null) => setDraft(next);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<{ new: number; updated: number } | null>(null);
-
-  const loadSettings = async () => {
-    try {
-      const data = await api.ipa.getSettings();
-      setSettings(data);
-    } catch (error) {
-      console.error("Failed to load IPA settings:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    loadSettings();
-  }, []);
 
   const handleSave = async () => {
     if (!settings) return;
@@ -54,7 +58,8 @@ export default function IPASettingsPage() {
         notify_on_new: settings.notify_on_new,
         notify_severity: settings.notify_severity,
       });
-      setSettings(updated);
+      queryClient.setQueryData(queryKeys.ipa.settings(), updated);
+      setDraft(null);
     } catch (error) {
       console.error("Failed to save IPA settings:", error);
     } finally {

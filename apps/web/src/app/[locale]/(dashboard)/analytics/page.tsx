@@ -1,36 +1,35 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useTranslations } from 'next-intl';
 import { Loader2, Clock, Target, TrendingUp, ShieldCheck, AlertTriangle, CheckCircle2, MinusCircle } from 'lucide-react';
 import { api, AnalyticsSummary, MTTRResult, SLOAchievement } from '@/lib/api';
+import { queryKeys } from '@/lib/query/keys';
+import { useRetainedData } from '@/lib/query/use-retained-data';
 
 export default function AnalyticsPage() {
     const t = useTranslations("Analytics");
     const tc = useTranslations("Common");
-    const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
     const [days, setDays] = useState(30);
 
-    const loadData = useCallback(async () => {
-        setLoading(true);
-        setError(null);
-        try {
-            const data = await api.analytics.getSummary(days);
-            setSummary(data);
-        } catch (err) {
-            setError(tc("error"));
-            console.error(err);
-        } finally {
-            setLoading(false);
-        }
-    }, [days, tc]);
-
-    useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-        loadData();
-    }, [loadData]);
+    const summaryQuery = useQuery({
+        queryKey: queryKeys.analytics.summary(days),
+        queryFn: async (): Promise<AnalyticsSummary> => {
+            try {
+                return await api.analytics.getSummary(days);
+            } catch (err) {
+                console.error(err);
+                throw err;
+            }
+        },
+    });
+    // Switching the period keeps the previous period's numbers on screen
+    // while the new one loads, and also after it fails (error banner above
+    // them) — same as the state-based loader.
+    const summary = useRetainedData(summaryQuery.data, "analytics") ?? null;
+    const loading = summaryQuery.isFetching;
+    const error = summaryQuery.isError && !summaryQuery.isFetching ? tc("error") : null;
 
     const formatHours = (hours: number) => {
         if (hours < 24) return `${hours.toFixed(1)} ${t("hours")}`;

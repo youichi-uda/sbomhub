@@ -32,7 +32,8 @@
  * `?? []`-normalised), so the .map / .length calls below are safe.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
 import { Loader2, Route, ChevronRight, Info, GitGraph, List } from "lucide-react";
 import {
@@ -46,11 +47,12 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import {
-  APIError,
+  loadErrorMessage,
   api,
   type ComponentPathsResponse,
   type ComponentPathNode,
 } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -193,42 +195,19 @@ export function DependencyPathPanel({
 }: DependencyPathPanelProps) {
   const t = useTranslations("DependencyPath");
 
-  const [data, setData] = useState<ComponentPathsResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<"list" | "graph">("list");
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await api.projects.getComponentPaths(
-        projectId,
-        componentId,
-        sbomId,
-      );
-      setData(res);
-    } catch (err) {
-      if (err instanceof APIError) {
-        const msg =
-          err.body && typeof err.body.error === "string"
-            ? (err.body.error as string)
-            : t("loadFailed");
-        setError(msg);
-      } else if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError(t("loadFailed"));
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId, componentId, sbomId, t]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    void load();
-  }, [load]);
+  const pathsQuery = useQuery({
+    queryKey: queryKeys.projects.componentPaths(projectId, componentId, sbomId),
+    queryFn: (): Promise<ComponentPathsResponse> =>
+      api.projects.getComponentPaths(projectId, componentId, sbomId),
+  });
+  const data = pathsQuery.data ?? null;
+  const loading = pathsQuery.isFetching;
+  const error =
+    pathsQuery.isError && !pathsQuery.isFetching
+      ? loadErrorMessage(pathsQuery.error, t("loadFailed"))
+      : null;
 
   const targetId = useMemo(() => {
     if (!data || data.paths.length === 0) return null;

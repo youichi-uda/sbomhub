@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useParams } from "next/navigation";
 import { api, PublicLink, Sbom } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -16,9 +18,6 @@ export default function ProjectSharePage() {
   const locale = params.locale as string | undefined;
   const publicBaseUrl = locale ? `${BASE_URL}/${locale}/public` : `${BASE_URL}/public`;
 
-  const [links, setLinks] = useState<PublicLink[]>([]);
-  const [sboms, setSboms] = useState<Sbom[]>([]);
-  const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
 
   const [name, setName] = useState("");
@@ -28,24 +27,25 @@ export default function ProjectSharePage() {
   const [password, setPassword] = useState("");
   const [isActive, setIsActive] = useState(true);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
+  // Links and the SBOM picker load (and reload) as one unit, as before:
+  // the page shows "Loading..." for the initial load and for the reload
+  // after a create / delete, and a failure of either leaves both as they were.
+  const shareQuery = useQuery({
+    queryKey: queryKeys.projects.publicLinks(projectId),
+    queryFn: async (): Promise<{ links: PublicLink[]; sboms: Sbom[] }> => {
       const [linkList, sbomList] = await Promise.all([
         api.publicLinks.list(projectId),
         api.projects.getSboms(projectId),
       ]);
-      setLinks(linkList || []);
-      setSboms(sbomList || []);
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    load();
-  }, [load]);
+      return { links: linkList || [], sboms: sbomList || [] };
+    },
+  });
+  const links = shareQuery.data?.links ?? [];
+  const sboms = shareQuery.data?.sboms ?? [];
+  const loading = shareQuery.isFetching;
+  const load = async () => {
+    await shareQuery.refetch();
+  };
 
   const handleCreate = async () => {
     if (!name || !expiresAt) return;

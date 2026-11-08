@@ -61,10 +61,16 @@ const config = [
       // loader functions, surfacing 28 pre-existing hits. Fixed in code:
       // 5 `immutability` (effect declared above the loader it calls →
       // moved below) and 1 `refs` (settings/scan ref write moved out of
-      // render). The remaining 26 `set-state-in-effect` hits are the
-      // fetch-on-mount pattern (plus 2 prop→state re-seeds) and carry an
-      // inline disable with rationale; migrating those loaders to
-      // @tanstack/react-query is the tracked follow-up.
+      // render). The remaining 26 `set-state-in-effect` hits were the
+      // fetch-on-mount pattern (plus 2 prop→state re-seeds) and carried an
+      // inline disable with rationale.
+      //
+      // 2026-11 react-query migration: those loaders (and kev-badge's, plus
+      // the two settings forms' and the diff timeline's `exhaustive-deps`
+      // disables) moved to @tanstack/react-query (src/lib/query/) or to
+      // event handlers, so every one of those inline disables is gone. What
+      // remains is the two external-state sync sites (api-auth-provider,
+      // subscription-guard) and the build-time auth branch in lib/auth.ts.
       //
       // With every existing violation either fixed or explicitly disabled
       // with rationale, promoting these to `error` means any NEW violation

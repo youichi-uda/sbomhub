@@ -21,7 +21,8 @@
  * the API).
  */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useTranslations } from "next-intl";
@@ -34,6 +35,8 @@ import {
 } from "lucide-react";
 
 import { useApi } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
+import { errorSlot, resolveErrorSlot, type ErrorSlot } from "@/lib/query/error-slot";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -93,33 +96,34 @@ interface TestFireResponse {
   error_message: string;
 }
 
+const SETTINGS_KEY = queryKeys.tenantSettings.diffWebhook();
+
 export default function DiffWebhookSettingsPage() {
-  const t = useTranslations("SettingsDiffWebhook");
-  const tCommon = useTranslations("Common");
   const api = useApi();
+  // Pure queryFn: the form is seeded from the result by mounting it only
+  // once the query has settled (Codex R3 — a queryFn is shared cache code,
+  // not a per-component callback, so it must not reset a particular form).
+  const settingsQuery = useQuery({
+    queryKey: SETTINGS_KEY,
+    queryFn: () =>
+      api.get<SettingsDiffWebhookResponse>("/api/v1/tenant/settings/diff-webhook"),
+  });
 
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
-  const [secretConfigured, setSecretConfigured] = useState(false);
-  const [lastFire, setLastFire] = useState<{
-    at?: string;
-    status?: number;
-    error?: string;
-  } | null>(null);
+  if (settingsQuery.isPending) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      </div>
+    );
+  }
 
-  const {
-    register,
-    handleSubmit,
-    reset,
-    control,
-    setValue,
-    formState: { errors },
-  } = useForm<FormInput, unknown, FormValues>({
-    resolver: zodResolver(schema),
-    defaultValues: {
+  return <DiffWebhookSettingsForm loaded={settingsQuery.data ?? null} loadState={settingsQuery} />;
+}
+
+function toFormValues(data: SettingsDiffWebhookResponse | null): FormInput {
+  if (!data) {
+    // Load failed: the form shows these (the old pre-reset defaults).
+    return {
       enabled: false,
       webhook_url: "",
       webhook_secret: "",
@@ -127,7 +131,54 @@ export default function DiffWebhookSettingsPage() {
       critical_threshold: 1,
       high_threshold: 5,
       license_violation_threshold: 0,
-    },
+    };
+  }
+  return {
+    enabled: !!data.enabled,
+    webhook_url: data.webhook_url || "",
+    webhook_secret: data.webhook_secret || "",
+    format: (FORMATS as readonly string[]).includes(data.format)
+      ? (data.format as Format)
+      : "json",
+    critical_threshold: data.critical_threshold ?? 1,
+    high_threshold: data.high_threshold ?? 5,
+    license_violation_threshold: data.license_violation_threshold ?? 0,
+  };
+}
+
+function DiffWebhookSettingsForm({
+  loaded,
+  loadState,
+}: {
+  loaded: SettingsDiffWebhookResponse | null;
+  loadState: { errorUpdateCount: number };
+}) {
+  const t = useTranslations("SettingsDiffWebhook");
+  const tCommon = useTranslations("Common");
+  const api = useApi();
+
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const queryClient = useQueryClient();
+  const [actionError, setActionError] = useState<ErrorSlot | null>(null);
+  const setError = (message: string | null) => setActionError(errorSlot(message, SETTINGS_KEY, queryClient));
+  const [success, setSuccess] = useState<string | null>(null);
+  // The last PUT response, once the operator has saved. Until then the
+  // secret / last-fire panels read the loaded settings.
+  const [saved, setSaved] = useState<SettingsDiffWebhookResponse | null>(null);
+  // Computed once per mount: RHF reads defaultValues only on the first
+  // render, so the stored values are in the very first painted frame.
+  const [initialValues] = useState(() => toFormValues(loaded));
+
+  const {
+    register,
+    handleSubmit,
+    control,
+    setValue,
+    formState: { errors },
+  } = useForm<FormInput, unknown, FormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: initialValues,
   });
 
   // M14-4 (#96, F215): migrated from `watch("enabled") / watch("format")`
@@ -138,37 +189,12 @@ export default function DiffWebhookSettingsPage() {
   const enabled = useWatch({ control, name: "enabled" });
   const format = useWatch({ control, name: "format" });
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const data = await api.get<SettingsDiffWebhookResponse>(
-          "/api/v1/tenant/settings/diff-webhook",
-        );
-        setSecretConfigured(!!data.secret_configured);
-        reset({
-          enabled: !!data.enabled,
-          webhook_url: data.webhook_url || "",
-          webhook_secret: data.webhook_secret || "",
-          format: (FORMATS as readonly string[]).includes(data.format)
-            ? (data.format as Format)
-            : "json",
-          critical_threshold: data.critical_threshold ?? 1,
-          high_threshold: data.high_threshold ?? 5,
-          license_violation_threshold: data.license_violation_threshold ?? 0,
-        });
-        setLastFire({
-          at: data.last_fired_at,
-          status: data.last_response_status,
-          error: data.last_error,
-        });
-      } catch {
-        setError(t("loadError"));
-      } finally {
-        setLoading(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const error = resolveErrorSlot(actionError, SETTINGS_KEY, loadState.errorUpdateCount, t("loadError"));
+  const current = saved ?? loaded;
+  const secretConfigured = !!current?.secret_configured;
+  const lastFire = current
+    ? { at: current.last_fired_at, status: current.last_response_status, error: current.last_error }
+    : null;
 
   const onSubmit = async (values: FormValues) => {
     setSaving(true);
@@ -184,17 +210,12 @@ export default function DiffWebhookSettingsPage() {
         high_threshold: values.high_threshold,
         license_violation_threshold: values.license_violation_threshold,
       };
-      const saved = await api.put<SettingsDiffWebhookResponse>(
+      const res = await api.put<SettingsDiffWebhookResponse>(
         "/api/v1/tenant/settings/diff-webhook",
         body,
       );
-      setSecretConfigured(!!saved.secret_configured);
-      setValue("webhook_secret", saved.webhook_secret || "");
-      setLastFire({
-        at: saved.last_fired_at,
-        status: saved.last_response_status,
-        error: saved.last_error,
-      });
+      setSaved(res);
+      setValue("webhook_secret", res.webhook_secret || "");
       setSuccess(t("saveSuccess"));
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
@@ -230,14 +251,6 @@ export default function DiffWebhookSettingsPage() {
       setTesting(false);
     }
   };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <Loader2 className="w-8 h-8 animate-spin text-primary" />
-      </div>
-    );
-  }
 
   return (
     <div className="max-w-2xl mx-auto py-8 px-4 space-y-6">

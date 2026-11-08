@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
 import { useLocale } from "next-intl";
 import Link from "next/link";
 import { api, DashboardSummary, TopRisk, ProjectScore, TrendPoint, EOLSummary } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
 import {
   Card,
   CardContent,
@@ -258,10 +260,37 @@ export default function DashboardPage() {
   const teol = useTranslations("EOL");
   const tv = useTranslations("Vulnerabilities");
   const locale = useLocale();
-  const [summary, setSummary] = useState<DashboardSummary | null>(null);
-  const [eolSummaries, setEolSummaries] = useState<Record<string, EOLSummary>>({});
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // Summary + per-project EOL summaries load as one unit: the page shows its
+  // skeleton until both are in, exactly as the effect-based loader did.
+  const dashboardQuery = useQuery({
+    queryKey: queryKeys.dashboard.summary(),
+    queryFn: async () => {
+      let data: DashboardSummary;
+      try {
+        data = await api.dashboard.getSummary();
+      } catch (err) {
+        console.error(err);
+        throw err;
+      }
+      const eolSummaries: Record<string, EOLSummary> = {};
+      if (data.project_scores && data.project_scores.length > 0) {
+        await Promise.all(
+          data.project_scores.map(async (project) => {
+            try {
+              eolSummaries[project.project_id] = await api.eol.getProjectEOLSummary(project.project_id);
+            } catch {
+              // Ignore errors for individual projects
+            }
+          })
+        );
+      }
+      return { summary: data, eolSummaries };
+    },
+  });
+  const summary = dashboardQuery.data?.summary ?? null;
+  const eolSummaries = dashboardQuery.data?.eolSummaries ?? {};
+  const loading = dashboardQuery.isPending;
+  const error = dashboardQuery.isError ? tc("error") : null;
 
   // M39-B (F450 #161): Top Risks CVSS⇄EPSS sort toggle. Default `epss` matches
   // the widget's "By EPSS" label (differs intentionally from the M38 per-project
@@ -309,40 +338,6 @@ export default function DashboardPage() {
     },
     [topRisksSort, loadTopRisks],
   );
-
-  const loadDashboard = useCallback(async () => {
-    try {
-      setLoading(true);
-      const data = await api.dashboard.getSummary();
-      setSummary(data);
-
-      // Load EOL summaries for each project
-      if (data.project_scores && data.project_scores.length > 0) {
-        const eolData: Record<string, EOLSummary> = {};
-        await Promise.all(
-          data.project_scores.map(async (project) => {
-            try {
-              const eolSummary = await api.eol.getProjectEOLSummary(project.project_id);
-              eolData[project.project_id] = eolSummary;
-            } catch {
-              // Ignore errors for individual projects
-            }
-          })
-        );
-        setEolSummaries(eolData);
-      }
-    } catch (err) {
-      setError(tc("error"));
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  }, [tc]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    loadDashboard();
-  }, [loadDashboard]);
 
   // Aggregate EOL data across all projects
   const aggregatedEol = Object.values(eolSummaries).reduce(

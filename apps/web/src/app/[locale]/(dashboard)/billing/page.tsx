@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,6 +10,8 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { api, SubscriptionResponse, UsageResponse } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
+import { errorSlot, resolveErrorSlot, type ErrorSlot } from "@/lib/query/error-slot";
 import {
   AlertTriangle,
   ArrowRight,
@@ -60,39 +63,40 @@ export default function BillingPage() {
   const tc = useTranslations("Common");
   const locale = useLocale();
   const PLANS = usePlans();
-  const [subscription, setSubscription] = useState<SubscriptionResponse | null>(null);
-  const [usage, setUsage] = useState<UsageResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const billingKey = queryKeys.billing.overview();
+  const billingQuery = useQuery({
+    queryKey: billingKey,
+    queryFn: async (): Promise<{ subscription: SubscriptionResponse; usage: UsageResponse }> => {
+      try {
+        const [subData, usageData] = await Promise.all([
+          api.billing.getSubscription(),
+          api.billing.getUsage(),
+        ]);
+        return { subscription: subData, usage: usageData };
+      } catch (err) {
+        console.error(err);
+        throw err;
+      }
+    },
+  });
+  const subscription = billingQuery.data?.subscription ?? null;
+  const usage = billingQuery.data?.usage ?? null;
+  // The full-page spinner also covers the reload after a successful sync,
+  // as before.
+  const loading = billingQuery.isFetching;
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [showSyncInput, setShowSyncInput] = useState(false);
   const [subscriptionIdInput, setSubscriptionIdInput] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  // Portal / sync failures share the banner with load failures. The loader
+  // never cleared the banner when it started, so neither does this.
+  const [actionError, setActionError] = useState<ErrorSlot | null>(null);
+  const setError = (message: string | null) => setActionError(errorSlot(message, billingKey, queryClient));
+  const error = resolveErrorSlot(actionError, billingKey, billingQuery.errorUpdateCount, t("loadFailed"));
   // NOTE: checkout / select-free handlers are intentionally removed while
   // the SaaS is sunset. Existing subscriptions continue to display and
   // can be managed through the Lemon Squeezy portal. See sunset/page.tsx.
-
-  const loadData = useCallback(async () => {
-    try {
-      setLoading(true);
-      const [subData, usageData] = await Promise.all([
-        api.billing.getSubscription(),
-        api.billing.getUsage(),
-      ]);
-      setSubscription(subData);
-      setUsage(usageData);
-    } catch (err) {
-      setError(t("loadFailed"));
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change: the loader awaits the API and publishes loading/result state (react-hooks 7.1 now follows the call into the loader). Follow-up: move to @tanstack/react-query.
-    loadData();
-  }, [loadData]);
 
   const handleManageSubscription = async () => {
     try {
@@ -114,7 +118,7 @@ export default function BillingPage() {
         setSyncMessage(t("syncSuccess", { plan: result.plan || "" }));
         setShowSyncInput(false);
         setSubscriptionIdInput("");
-        await loadData();
+        await billingQuery.refetch();
       } else if (result.status === "manual_required") {
         setShowSyncInput(true);
         setSyncMessage(result.message || t("manualSyncRequired"));

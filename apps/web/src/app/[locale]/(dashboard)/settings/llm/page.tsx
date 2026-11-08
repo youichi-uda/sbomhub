@@ -13,13 +13,16 @@
  * (sbomhub/CLAUDE.md: "Frontend ... Form handling: react-hook-form + zod").
  */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useTranslations } from "next-intl";
 import { Loader2, ShieldCheck, AlertTriangle, KeyRound } from "lucide-react";
 
 import { useApi } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
+import { errorSlot, resolveErrorSlot, type ErrorSlot } from "@/lib/query/error-slot";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -86,36 +89,90 @@ interface SettingsLLMResponse {
   updated_at?: string;
 }
 
+const SETTINGS_KEY = queryKeys.tenantSettings.llm();
+
 export default function LLMSettingsPage() {
-  const t = useTranslations("Settings.LLM");
-  const tCommon = useTranslations("Common");
   const api = useApi();
+  // Pure queryFn: the form is seeded from the result by mounting it only
+  // once the query has settled (Codex R3 — a queryFn is shared cache code,
+  // not a per-component callback, so it must not reset a particular form).
+  const settingsQuery = useQuery({
+    queryKey: SETTINGS_KEY,
+    queryFn: () => api.get<SettingsLLMResponse>("/api/v1/settings/llm"),
+  });
 
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
-  const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
+  if (settingsQuery.isPending) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      </div>
+    );
+  }
 
-  const schema = buildSchema(!apiKeyConfigured);
+  return <LLMSettingsForm loaded={settingsQuery.data ?? null} loadState={settingsQuery} />;
+}
 
-  const {
-    register,
-    handleSubmit,
-    reset,
-    control,
-    setValue,
-    formState: { errors },
-  } = useForm<FormInput, unknown, FormValues>({
-    resolver: zodResolver(schema),
-    defaultValues: {
+function toFormValues(data: SettingsLLMResponse | null): FormInput {
+  if (!data) {
+    // Load failed: the form shows these (the old pre-reset defaults).
+    return {
       provider: "openai",
       api_key: "",
       model: "",
       azure_endpoint: "",
       azure_deployment: "",
       ollama_url: "",
-    },
+    };
+  }
+  return {
+    provider: (PROVIDERS as readonly string[]).includes(data.provider)
+      ? (data.provider as Provider)
+      : "openai",
+    api_key: data.api_key || "",
+    model: data.model || "",
+    azure_endpoint: data.azure_endpoint || "",
+    azure_deployment: data.azure_deployment || "",
+    ollama_url: data.ollama_url || "",
+  };
+}
+
+function LLMSettingsForm({
+  loaded,
+  loadState,
+}: {
+  loaded: SettingsLLMResponse | null;
+  loadState: { errorUpdateCount: number };
+}) {
+  const t = useTranslations("Settings.LLM");
+  const tCommon = useTranslations("Common");
+  const api = useApi();
+
+  const [saving, setSaving] = useState(false);
+  const queryClient = useQueryClient();
+  const [actionError, setActionError] = useState<ErrorSlot | null>(null);
+  const setError = (message: string | null) => setActionError(errorSlot(message, SETTINGS_KEY, queryClient));
+  const [success, setSuccess] = useState(false);
+  // Set from the PUT response once the operator saves; until then the
+  // loaded settings decide.
+  const [savedApiKeyConfigured, setApiKeyConfigured] = useState<boolean | null>(null);
+  const error = resolveErrorSlot(actionError, SETTINGS_KEY, loadState.errorUpdateCount, t("loadError"));
+  const apiKeyConfigured = savedApiKeyConfigured ?? !!loaded?.api_key_configured;
+  // Computed once per mount: RHF reads defaultValues only on the first
+  // render, which is the point (the stored values are in the very first
+  // painted frame of the form).
+  const [initialValues] = useState(() => toFormValues(loaded));
+
+  const schema = buildSchema(!apiKeyConfigured);
+
+  const {
+    register,
+    handleSubmit,
+    control,
+    setValue,
+    formState: { errors },
+  } = useForm<FormInput, unknown, FormValues>({
+    resolver: zodResolver(schema),
+    defaultValues: initialValues,
   });
 
   // M14-4 (#96, F215): migrated from `watch("provider")` to useWatch
@@ -125,30 +182,6 @@ export default function LLMSettingsPage() {
   // so this subscription is the form's primary re-render driver —
   // scoping it to just `provider` is also a small perf win.
   const provider = useWatch({ control, name: "provider" });
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const data = await api.get<SettingsLLMResponse>("/api/v1/settings/llm");
-        setApiKeyConfigured(!!data.api_key_configured);
-        reset({
-          provider: (PROVIDERS as readonly string[]).includes(data.provider)
-            ? (data.provider as Provider)
-            : "openai",
-          api_key: data.api_key || "",
-          model: data.model || "",
-          azure_endpoint: data.azure_endpoint || "",
-          azure_deployment: data.azure_deployment || "",
-          ollama_url: data.ollama_url || "",
-        });
-      } catch {
-        setError(t("loadError"));
-      } finally {
-        setLoading(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const onSubmit = async (values: FormValues) => {
     setSaving(true);
@@ -179,14 +212,6 @@ export default function LLMSettingsPage() {
       setSaving(false);
     }
   };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <Loader2 className="w-8 h-8 animate-spin text-primary" />
-      </div>
-    );
-  }
 
   return (
     <div className="max-w-2xl mx-auto py-8 px-4 space-y-6">
