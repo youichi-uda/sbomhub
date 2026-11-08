@@ -1761,6 +1761,86 @@ func scoreToCvss2Severity(score float64) string {
 	}
 }
 
+// NVDUpstreamError is how SearchByCVEID reports that NVD did not give a usable
+// answer, so the search route can say "upstream" instead of 500. Temporary is
+// set when NVD said "not now" — 403 (NVD's documented answer to a client over
+// the public rate limit), 429 or 503 — and RetryAfter then carries how long to
+// wait: the upstream Retry-After when it sent one, clamped to
+// [1s, nvdRetryAfterMax], otherwise nvdRetryAfterDefault (NVD's rate limit is
+// a rolling 30-second window). Everything else — another status, a transport
+// failure, an undecodable body — is not Temporary.
+//
+// Error() never carries the upstream body (only an excerpt is kept, for the
+// server log, in Detail).
+type NVDUpstreamError struct {
+	Status     int // 0 for a transport / decode failure
+	Temporary  bool
+	RetryAfter time.Duration
+	Detail     string // first bytes of the upstream body, for the server log only
+	Err        error  // transport / decode cause, if any
+}
+
+const (
+	nvdRetryAfterDefault = 30 * time.Second
+	nvdRetryAfterMax     = time.Hour
+	nvdErrorBodyExcerpt  = 512
+)
+
+func (e *NVDUpstreamError) Error() string {
+	switch {
+	case e.Err != nil:
+		return e.Err.Error()
+	case e.Temporary:
+		return fmt.Sprintf("NVD API refused the request: %d (retry after %s)", e.Status, e.RetryAfter)
+	default:
+		return fmt.Sprintf("NVD API error: %d", e.Status)
+	}
+}
+
+func (e *NVDUpstreamError) Unwrap() error { return e.Err }
+
+func newNVDStatusError(resp *http.Response, now time.Time) *NVDUpstreamError {
+	excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, nvdErrorBodyExcerpt))
+	e := &NVDUpstreamError{Status: resp.StatusCode, Detail: string(excerpt)}
+	switch resp.StatusCode {
+	case http.StatusForbidden, http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		e.Temporary = true
+		e.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), now)
+	}
+	return e
+}
+
+// parseRetryAfter reads an RFC 9110 Retry-After (delta-seconds or HTTP-date)
+// and clamps it to [1s, nvdRetryAfterMax]; absent or unparsable gives
+// nvdRetryAfterDefault.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nvdRetryAfterDefault
+	}
+	var d time.Duration
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n < 0 {
+			return nvdRetryAfterDefault
+		}
+		if n > int64(nvdRetryAfterMax/time.Second) {
+			return nvdRetryAfterMax
+		}
+		d = time.Duration(n) * time.Second
+	} else if t, err := http.ParseTime(v); err == nil {
+		d = t.Sub(now)
+	} else {
+		return nvdRetryAfterDefault
+	}
+	if d < time.Second {
+		return time.Second
+	}
+	if d > nvdRetryAfterMax {
+		return nvdRetryAfterMax
+	}
+	return d.Round(time.Second)
+}
+
 // SearchByCVEID searches for a specific CVE by ID from NVD API
 // Returns the vulnerability info if found, nil if not found
 func (s *NVDService) SearchByCVEID(ctx context.Context, cveID string) (*model.Vulnerability, error) {
@@ -1783,13 +1863,12 @@ func (s *NVDService) SearchByCVEID(ctx context.Context, cveID string) (*model.Vu
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("NVD API request failed: %w", err)
+		return nil, &NVDUpstreamError{Err: fmt.Errorf("NVD API request failed: %w", err)}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("NVD API error: %d - %s", resp.StatusCode, string(body))
+		return nil, newNVDStatusError(resp, time.Now())
 	}
 
 	// Same decode + envelope contract as searchByKeyword: without it an empty
@@ -1801,7 +1880,7 @@ func (s *NVDService) SearchByCVEID(ctx context.Context, cveID string) (*model.Vu
 	// there is nothing to walk.
 	nvdResp, err := decodeNVDResponse(resp.Body, 0)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode NVD response: %w", err)
+		return nil, &NVDUpstreamError{Err: fmt.Errorf("failed to decode NVD response: %w", err)}
 	}
 
 	if len(nvdResp.entries()) == 0 {
@@ -1828,12 +1907,12 @@ func (s *NVDService) SearchByCVEID(ctx context.Context, cveID string) (*model.Vu
 	}
 	got, err := validation.ValidateCVEID(vulns[0].CVEID)
 	if err != nil {
-		return nil, fmt.Errorf("SearchByCVEID: NVD returned a malformed CVE ID %q for %s",
-			vulns[0].CVEID, want)
+		return nil, &NVDUpstreamError{Err: fmt.Errorf("SearchByCVEID: NVD returned a malformed CVE ID %q for %s",
+			vulns[0].CVEID, want)}
 	}
 	if got != want {
-		return nil, fmt.Errorf("SearchByCVEID: asked NVD for %s and it answered with %s; "+
-			"refusing to serve one CVE under another's identity", want, got)
+		return nil, &NVDUpstreamError{Err: fmt.Errorf("SearchByCVEID: asked NVD for %s and it answered with %s; "+
+			"refusing to serve one CVE under another's identity", want, got)}
 	}
 
 	return &vulns[0], nil
