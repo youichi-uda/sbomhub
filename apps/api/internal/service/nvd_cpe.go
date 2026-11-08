@@ -919,6 +919,7 @@ func partialWalk(ctx context.Context, res *nvdSearchResult, c cpeCandidate, err 
 		return false
 	}
 	res.truncated = true
+	res.partialFailure = true
 	if res.total <= res.fetched {
 		res.total = res.fetched + 1 // at least one record is known to be missing
 	}
@@ -958,12 +959,13 @@ func productHasVulnerableEvidence(cve NVDCVE, c cpeCandidate) bool {
 // reject, labelling each, and carries the walk's completeness.
 func (s *NVDService) verifyCPEAnswer(res nvdSearchResult, c cpeCandidate, method model.MatchMethod) nvdLookup {
 	out := nvdLookup{
-		truncated:  res.truncated,
-		shifted:    res.shifted,
-		total:      res.total,
-		fetched:    res.fetched,
-		method:     method,
-		pageBudget: res.pageBudget,
+		truncated:      res.truncated,
+		shifted:        res.shifted,
+		total:          res.total,
+		fetched:        res.fetched,
+		method:         method,
+		pageBudget:     res.pageBudget,
+		partialFailure: res.partialFailure,
 	}
 	for i, e := range res.entries {
 		if productHasVulnerableEvidence(e.CVE, c) {

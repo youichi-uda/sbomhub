@@ -31,8 +31,14 @@ func TestM60CPEWalk_MidWalkFailureIsTruncationNotLoss(t *testing.T) {
 		t.Errorf("truncated=%v vulns=%d requests=%d uncacheable=%v, want true / 598 / 4 / true",
 			l.truncated, len(l.vulns), l.requests, l.uncacheable)
 	}
-	if l.total-l.fetched <= 0 {
-		t.Errorf("dropped matches not reported: total=%d fetched=%d", l.total, l.fetched)
+	// Codex M60 R23 Low: the high-water mark is the last VALIDATED page's end
+	// (598), not the failed page's overlapping start (597).
+	if l.fetched != 598 || l.total != 7059 {
+		t.Errorf("fetched=%d total=%d, want 598 / 7059", l.fetched, l.total)
+	}
+	// ... and the truncation says WHY (a page failed), not "budget exhausted".
+	if !l.partialFailure {
+		t.Errorf("a mid-walk failure is not marked as such")
 	}
 }
 

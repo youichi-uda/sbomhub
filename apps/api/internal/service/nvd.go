@@ -683,7 +683,10 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 					// thing they need in order to act (pin a version, add a
 					// purl, or accept the noise).
 					reason := "paging budget exhausted"
-					if lookup.shifted {
+					switch {
+					case lookup.partialFailure:
+						reason = "a page failed partway through the walk; the pages before it were kept"
+					case lookup.shifted:
 						reason = "result set changed underneath the page walk"
 					}
 					slog.Warn("nvd: component match set truncated",
@@ -844,7 +847,8 @@ func (r NVDScanReport) incompleteErr() error {
 	if r.TruncatedComponents > 0 {
 		return fmt.Errorf("nvd: %d component(s) could not be enumerated completely "+
 			"(the paging budget ran out — %d pages x %d for a keyword lookup, %d pages for a CPE "+
-			"lookup — or the result set changed underneath the walk); at least %d known "+
+			"lookup — a page failed partway through a CPE walk, or the result set changed "+
+			"underneath the walk); at least %d known "+
 			"match(es) were not retrieved and the findings for those components are incomplete",
 			r.TruncatedComponents, nvdMaxPagesPerComponent, nvdPageSize, nvdCPEMaxPagesPerComponent, r.DroppedMatches)
 	}
@@ -1013,6 +1017,9 @@ type nvdLookup struct {
 	// pageBudget is the page budget of the walk that produced the answer
 	// (keyword or CPE, M60 decision 2); logged with a truncation.
 	pageBudget int
+	// partialFailure: the truncation is a page that failed partway, not the
+	// budget (Codex M60 R23 Low).
+	partialFailure bool
 	// method is how the vulns were matched (M60): nvd_cpe / nvd_cpe_distro
 	// for the CPE path, nvd_keyword for the keyword path. It is what the
 	// links are labelled with, unless methods overrides it per CVE.
@@ -1277,6 +1284,9 @@ type nvdSearchResult struct {
 	pages int
 	// pageBudget is the page limit this walk ran under (M60 decision 2).
 	pageBudget int
+	// partialFailure: a page failed after earlier pages validated and the CPE
+	// path kept those pages as a truncated answer (partialWalk).
+	partialFailure bool
 	// shifted records that the result set moved underneath the walk.
 	//
 	// # Why an offset walk needs this at all (Codex M55 R1/R2, Critical)
@@ -1508,8 +1518,8 @@ func (s *NVDService) walkNVD(ctx context.Context, query url.Values, pace nvdPace
 			// the error too (M60). The keyword path ignores them and fails
 			// the lookup as before; the CPE path turns a mid-walk failure
 			// into an escalated truncation instead of losing every verified
-			// page (lookupCPECandidate).
-			out.fetched = start
+			// page (lookupCPECandidate). out.fetched still marks the end of
+			// the last VALIDATED page (Codex M60 R23 Low).
 			return out, err
 		}
 		out.total = *page.TotalResults
