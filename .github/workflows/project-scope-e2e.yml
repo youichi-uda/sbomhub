@@ -99,7 +99,7 @@ jobs:
         # reading the RUNTIME apiKeyRouteScope (go run -overlay against
         # apps/api). It refuses to run without a Go toolchain rather than
         # skipping that proof, so this step is required, not a convenience.
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: apps/api/go.mod
           cache-dependency-path: apps/api/go.sum

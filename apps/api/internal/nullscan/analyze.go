@@ -714,7 +714,14 @@ func (a *fileAnalyzer) classifyScanDest(arg ast.Expr) (destClass, string, string
 	// byte slices: exact []byte OK; named byte slices (json.RawMessage) NG (measured)
 	if sl, ok := elem.Underlying().(*types.Slice); ok {
 		if b, ok := sl.Elem().(*types.Basic); ok && b.Kind() == types.Uint8 {
-			if _, named := elem.(*types.Named); !named {
+			// Unalias first: since Go 1.27 json.RawMessage is an alias
+			// (= encoding/json/jsontext.Value), so elem is a *types.Alias
+			// whose target is the named type. database/sql still rejects
+			// NULL into it (measured on go1.27.3: "unsupported Scan, storing
+			// driver.Value type <nil> into type *jsontext.Value"). Without
+			// this, the alias fell through to the plain-[]byte branch and
+			// the violation was silently lost.
+			if _, named := types.Unalias(elem).(*types.Named); !named {
 				return destOK, elemStr, "[]byte accepts NULL as nil"
 			}
 			return destNG, elemStr, "named []byte type without Scanner rejects NULL (measured: json.RawMessage)"
@@ -739,7 +746,7 @@ func classifyScannerType(t types.Type, ts string) (destClass, string, string) {
 }
 
 func isNamed(t types.Type, pkgPath, name string) bool {
-	n, ok := t.(*types.Named)
+	n, ok := types.Unalias(t).(*types.Named)
 	if !ok {
 		return false
 	}

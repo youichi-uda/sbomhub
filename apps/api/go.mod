@@ -2,7 +2,7 @@ module github.com/sbomhub/sbomhub
 
 go 1.26.1
 
-toolchain go1.26.10
+toolchain go1.27.3
 
 require (
 	github.com/CycloneDX/cyclonedx-go v0.12.0

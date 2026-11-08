@@ -868,12 +868,12 @@ func TestM55JVN_StatusAttributeNamespaces(t *testing.T) {
   </channel>
   <status:Status %sversion="3.3" %smethod="getVulnOverviewList" %slang="ja" %sretCd="0" retMax="50" errCd="" errMsg="" %stotalRes="0" %stotalResRet="0" %sfirstRes="1" %sfeed="hnd" %skeyword="libfoo" %smaxCountItem="50" %sstartItem="1" %srangeDatePublic="n" %srangeDatePublished="n" %srangeDateFirstPublished="n"/>
 </rdf:RDF>`
+	// Every one of the 14 %s placeholders takes the same prefix, so a
+	// plain replace is exact. (fmt.Sprintf(tmpl, args...) with a
+	// make([]any, 14) slice tripped staticcheck SA5009 in golangci-lint
+	// v2.15.0, which cannot see the slice length.)
 	fill := func(prefix string) string {
-		args := make([]any, 14)
-		for i := range args {
-			args[i] = prefix
-		}
-		return fmt.Sprintf(tmpl, args...)
+		return strings.ReplaceAll(tmpl, "%s", prefix)
 	}
 
 	svc := NewJVNService(nil, nil, "", false)

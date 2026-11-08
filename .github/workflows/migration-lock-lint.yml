@@ -141,7 +141,7 @@ jobs:
         # a "file not found" failure mode when `cache-dependency-path` is
         # wired up without a real lockfile. Same reasoning as the other
         # two lint workflows.
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: tools/lint-migration-locks/go.mod
           cache: false

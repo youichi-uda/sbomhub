@@ -4254,7 +4254,8 @@ func combineOSVVulnFuncs(osvID string, goFlat []string, goScoped []osvScopedVuln
 // goStdlibTopLevelPackages is the allowlist of Go standard-library TOP-LEVEL
 // package path segments, per `go list std` (M43 Phase D R3 finding 1; R4
 // added "simd" — new in go1.26.5, found by Codex 42nd via web check against
-// pkg.go.dev). Drift is enforced by
+// pkg.go.dev; "uuid" — new top-level std package in go1.27, caught by the
+// drift test on the go1.27.3 toolchain bump). Drift is enforced by
 // TestGoStdlibTopLevelPackages_ToolchainDrift, which runs `go list std` on
 // the test toolchain and asserts its top-level segments are a SUBSET of this
 // allowlist — a Go release adding a new top-level std package fails that
@@ -4285,7 +4286,7 @@ var goStdlibTopLevelPackages = map[string]struct{}{
 	"reflect": {}, "regexp": {}, "runtime": {}, "simd": {}, "slices": {},
 	"sort": {}, "strconv": {}, "strings": {}, "structs": {}, "sync": {},
 	"syscall": {}, "testing": {}, "text": {}, "time": {}, "unicode": {},
-	"unique": {}, "unsafe": {}, "weak": {},
+	"unique": {}, "unsafe": {}, "uuid": {}, "weak": {},
 }
 
 // osvImportPathWithinModule reports whether an OSV imports[].path plausibly

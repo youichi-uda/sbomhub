@@ -25,6 +25,12 @@
 # release adds/changes checks. Bump deliberately, together with any new
 # findings it surfaces. v2.12.2 = latest stable at pin time and the
 # exact binary the config was verified against (0 issues, 2026-07-26).
+# 2026-11-08: bumped to v2.15.0 for the Go 1.27 migration (go.mod
+# `toolchain go1.27.3`). v2.12.2 is built with go1.26 and cannot parse the
+# go1.27 standard library (it uses generic methods), so it refuses the
+# toolchain; v2.15.0 is built with go1.27.0. setup-go moved v5 -> v7 in
+# the same change: v6+ selects the go.mod `toolchain` line rather than
+# only the `go` floor (v7 = ESM / node 24, no input changes).
 # Same pin + rationale as sbomhub-cli/.github/workflows/ci.yml `lint`.
 
 name: golangci-lint
@@ -116,7 +122,7 @@ jobs:
 
       - name: Set up Go
         if: steps.probe.outputs.relevant != 'false'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # Pin to whatever apps/api/go.mod declares as the toolchain
           # directive. Mirrors go-test.yml — bump go.mod to bump CI.
@@ -138,5 +144,5 @@ jobs:
         # (v6 predates the v2 CLI surface).
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          version: v2.15.0
           working-directory: apps/api

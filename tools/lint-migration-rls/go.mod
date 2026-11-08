@@ -21,4 +21,4 @@ module github.com/sbomhub/sbomhub/tools/lint-migration-rls
 
 go 1.26
 
-toolchain go1.26.10
+toolchain go1.27.3

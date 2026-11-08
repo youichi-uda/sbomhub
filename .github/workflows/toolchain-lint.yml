@@ -112,7 +112,7 @@ jobs:
         # stdlib-only program adds no measurable savings while
         # introducing a "file not found" failure mode when
         # `cache-dependency-path` is wired up without a real lockfile.
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: tools/lint-toolchain-alignment/go.mod
           cache: false

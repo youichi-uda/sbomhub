@@ -43,10 +43,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # Pin to whatever apps/api/go.mod declares as the toolchain
-          # directive (currently go 1.26.x); bump go.mod to bump CI.
+          # directive (currently go1.27.3); bump go.mod to bump CI.
           # actions/setup-go honors the module's toolchain directive so
           # this line does not need editing on future patch bumps.
           # F241 (M15 Phase D round 3 fix): removed the hard-coded

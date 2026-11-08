@@ -16,11 +16,11 @@
 // module without a covering workspace, so entering the module directory
 // is the most robust invocation. Same posture as the other two lints.
 //
-// The `toolchain go1.26.10` line below is checked by
+// The `toolchain go1.27.3` line below is checked by
 // `tools/lint-toolchain-alignment` layer 1 (it globs `tools/*/go.mod`),
 // so it must track `apps/api/go.mod`'s toolchain directive exactly.
 module github.com/sbomhub/sbomhub/tools/lint-migration-locks
 
 go 1.26
 
-toolchain go1.26.10
+toolchain go1.27.3

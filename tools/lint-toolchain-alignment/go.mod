@@ -19,7 +19,7 @@
 // module without a covering workspace, so `cd` into the module dir is
 // the most robust invocation.
 //
-// The `toolchain go1.26.10` line below is the lint's own dogfood: the
+// The `toolchain go1.27.3` line below is the lint's own dogfood: the
 // tool checks itself, so if this line drifts from `apps/api/go.mod` the
 // tool will flag itself as a drift in the very first run. That is
 // intentional — the lint should be the strictest reader of its own
@@ -28,4 +28,4 @@ module github.com/sbomhub/sbomhub/tools/lint-toolchain-alignment
 
 go 1.26
 
-toolchain go1.26.10
+toolchain go1.27.3

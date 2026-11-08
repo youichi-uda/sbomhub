@@ -178,6 +178,19 @@ func namedByteSlice(ctx context.Context, db *sql.DB) error {
 	).Scan(&payload)
 }
 
+// aliasedNamedByteSlice: an alias of a named byte slice is the same type
+// (json.RawMessage itself became an alias in Go 1.27), so NULL is still
+// rejected => violation, on every toolchain.
+type blob []byte
+type blobAlias = blob
+
+func aliasedNamedByteSlice(ctx context.Context, db *sql.DB) error {
+	var payload blobAlias
+	return db.QueryRowContext(ctx,
+		`SELECT description FROM things`,
+	).Scan(&payload)
+}
+
 // customScanner implements sql.Scanner and is assumed tolerant.
 type customScanner struct{ v string }
 

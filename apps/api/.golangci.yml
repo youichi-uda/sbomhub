@@ -8,7 +8,7 @@
 # hard-errors on the go.mod `go 1.26.0` directive with "the Go language
 # version (go1.24) used to build golangci-lint is lower than the targeted
 # Go version (1.26)" and exits 3 (measured 2026-07-25 with the v1.62 the CI
-# used to pin, and with v1.64.8). CI pins golangci-lint v2.12.2 via
+# used to pin, and with v1.64.8). CI pins golangci-lint v2.15.0 (built with go1.27.0) via
 # golangci/golangci-lint-action@v9 (.github/workflows/golangci-lint.yml,
 # hard gate — no continue-on-error).
 #

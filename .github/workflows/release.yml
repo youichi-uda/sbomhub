@@ -59,13 +59,15 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          # Match apps/api/go.mod (`go 1.26.0`). Bumping go.mod must move
-          # this value in lockstep — goreleaser fails the build silently
-          # with `go: go.mod requires go >= 1.26.0` if the Go toolchain
-          # is older.
-          go-version: '1.26'
+          # Read apps/api/go.mod (the toolchain-alignment truth source)
+          # instead of a hard-coded `go-version`. The old `'1.26'` pin had
+          # to move in lockstep with go.mod by hand; with setup-go v6+ the
+          # `toolchain go1.27.3` line selects the exact release toolchain,
+          # so the llm-bench release binary is built with the same patch
+          # as the API image (Go 1.27 migration, 2026-11-08).
+          go-version-file: apps/api/go.mod
           cache-dependency-path: apps/api/go.sum
 
       - name: Validate operational release artifacts

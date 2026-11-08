@@ -88,6 +88,7 @@ func TestAnalyzeTestdataCorpus(t *testing.T) {
 		"uuidSilentZero":        {"warning|things.owner_id|uuid.UUID"},
 		"uuidPointerOK":         nil,
 		"namedByteSlice":        {"violation|things.description|json.RawMessage"},
+		"aliasedNamedByteSlice": {"violation|things.description|q.blobAlias"},
 		"scannerOK":             nil,
 		"returningViolation":    {"violation|things.deleted_at|time.Time"},
 		"cteFlow":               {"violation|cte:w.d|string"},
