@@ -787,15 +787,17 @@ func (c cpeCandidate) String() string {
 // product probe, the keyword fallback) pays its own. That keeps the pool's
 // invariant from M55: at most one NVD request per tick, whatever the mix.
 func (s *NVDService) lookupComponent(ctx context.Context, item nvdWorkItem, pace nvdPacer) (nvdLookup, error) {
-	spent := 0
+	spent, rejected := 0, 0 // across candidates, decided or not (Codex M60 R25 Low)
 	for _, c := range item.candidates {
 		l, decided, err := s.lookupCPECandidate(ctx, c, item.distro, pace, spent > 0)
 		spent += l.requests
+		rejected += l.cpeRejected
 		if err != nil {
 			return nvdLookup{requests: spent}, err
 		}
 		if decided {
 			l.requests = spent
+			l.cpeRejected = rejected
 			// An answer that cost requests is not a cache hit, even if
 			// its last step was (Codex M60 R4 Low): CacheHits promises
 			// "no HTTP request".
@@ -805,6 +807,7 @@ func (s *NVDService) lookupComponent(ctx context.Context, item nvdWorkItem, pace
 	}
 	l, err := s.keywordLookup(ctx, item.key.Name, item.key.Version, pace, spent > 0)
 	l.requests += spent
+	l.cpeRejected = rejected
 	l.fromCache = l.fromCache && spent == 0
 	l.method = model.MatchNVDKeyword
 	l.keywordFallback = len(item.candidates) > 0
@@ -838,6 +841,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 	// qualifiers that encoding is ambiguous (NVD stores 2.0-beta9 as version
 	// 2.0 + update beta9), so such versions go straight to step 2.
 	spent := 0
+	fellThrough := 0 // records the cpeName answer rejected before falling through
 	if c.plain() {
 		q := url.Values{}
 		q.Set("cpeName", c.query())
@@ -853,6 +857,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 			// CVEs (Codex M60 R17 High): step 2 decides instead.
 			// But anything the answer KEEPS (an unverifiable record) is
 			// returned, not discarded by the fall-through (Codex M60 R20).
+			fellThrough = out.cpeRejected
 			if out.productEvidence > 0 || len(out.vulns) > 0 || res.truncated {
 				out.requests = spent
 				if !out.uncacheable {
@@ -900,9 +905,10 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 		// hold such evidence on an unfetched page, so it stays decided and
 		// is reported as truncated.
 		s.cacheVulns(ctx, nvdNoCPECacheName(c), c.String(), nil)
-		return nvdLookup{requests: spent}, false, nil
+		return nvdLookup{requests: spent, cpeRejected: fellThrough + out.cpeRejected}, false, nil
 	}
 	out.requests = spent
+	out.cpeRejected += fellThrough
 	if !out.uncacheable {
 		s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
 	}

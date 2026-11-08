@@ -56,6 +56,11 @@ func TestM60R17_PlatformOnlyCandidateDoesNotEndTheSearch(t *testing.T) {
 	if len(l.vulns) != 1 || l.vulns[0].CVEID != "CVE-2099-0002" {
 		t.Errorf("vulns = %v (requests %q), want CVE-2099-0002 from the second candidate", l.vulns, seen)
 	}
+	// Codex M60 R25 Low: the platform-only record the first candidate
+	// rejected is still counted (once per walk that saw it: cpeName, product).
+	if l.cpeRejected < 1 {
+		t.Errorf("cpeRejected = %d; rejections of a fallen-through candidate were not counted", l.cpeRejected)
+	}
 }
 
 // Codex M60 R17 Medium: CPE quoting semantics. A quoted special character is

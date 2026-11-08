@@ -1744,7 +1744,8 @@ replaced.
 - **Requests.** Per CPE candidate: a plain dotted-numeric version asks
   `cpeName` first (1 request per page of answers); if that is empty, or the
   version has letters/qualifiers (`1.1.1k`, `2.0-beta9`), the whole product is
-  walked (1 request per 200 of the product's CVEs, up to the 5-page budget). An
+  walked (1 request per ~200 of the product's CVEs, up to the 60-page CPE
+  budget below). An
   unknown product therefore costs 2 requests with a plain version and 1
   otherwise, and a known product whose exact version has no CVE costs 1 plus
   its product walk. Maven packages where Syft guesses `apache:log4j-core` first
