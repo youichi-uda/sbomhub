@@ -289,7 +289,9 @@ function canLeave(node: ts.Node): boolean {
         const stmts = ts.isBlock(list) || ts.isCaseClause(list) || ts.isDefaultClause(list) ? list.statements : undefined;
         if (!stmts) return false;
         const idx = stmts.indexOf(jump as ts.Statement);
-        return stmts.slice(0, idx).some((st) => ts.isExpressionStatement(st) && containsExpect(st));
+        // `asserts`, not `containsExpect`: an expect inside a deferred
+        // callback (a route / event handler) may never run (Codex R9 Medium).
+        return stmts.slice(0, idx).some((st) => ts.isExpressionStatement(st) && asserts(st));
     };
     const visit = (n: ts.Node, breakTargets: number, continueTargets: number): void => {
         if (found) return;
@@ -832,6 +834,30 @@ test('smoke', smoke);`,
         }
         switch (mode) {
             case 'skip':
+                continue;
+        }
+        await expect(row).toContainText('fallback');
+    }
+});`,
+    ],
+    [
+        // Codex R9 Medium: an expect in a route handler before `continue`
+        // may never run.
+        'deferred handler assertion before a continue',
+        'V1',
+        `${HDR}test('t', async ({ page }) => {
+    const mode = process.env.MODE;
+    for (const row of [page.locator('tr')]) {
+        if (await row.getByText('empty').isVisible()) {
+            await expect(row).toContainText('empty');
+            return;
+        }
+        switch (mode) {
+            case 'stubbed':
+                await page.route('**/api/data', (route) => {
+                    expect(route.request().method()).toBe('GET');
+                    return route.continue();
+                });
                 continue;
         }
         await expect(row).toContainText('fallback');
