@@ -1841,3 +1841,131 @@ Not upgraded:
   `eslint-plugin-jsx-a11y` to support it.
 - **TypeScript 7.** It waits for `typescript-eslint` and Next's build
   typecheck to support it.
+
+## 15. Scans no longer hold a database transaction, have a deadline, and report partial failure (M62)
+
+**Who must act:** nobody has to change configuration. Read §15.2 if you run
+without `NVD_API_KEY` and scan large SBOMs, and §15.3 if a CI step branches on
+`sbomhub scan` exit codes or on the scheduled scan log.
+
+### 15.1 No transaction is open while a scan waits on NVD or JVN
+
+Until this release every vulnerability scan — after an upload, from
+`POST /api/v1/projects/:id/scan`, and the scheduled scan (which wrapped *every
+project of a tenant* in one) — ran inside one tenant transaction for its whole
+duration, including every NVD/JVN request. For a cold scan without an API key of
+an SBOM holding a Linux kernel that was about 14 minutes (§13.5). Measured on
+PostgreSQL 15 with the pre-release code, while a scan waited on NVD the API held:
+
+- one connection of its 25-connection pool `idle in transaction`, with a
+  transaction id assigned (it holds back VACUUM's cleanup horizon);
+- 32 locks: `AccessShareLock` / `RowShareLock` on `components`,
+  `vulnerabilities` and their indexes (any migration or `ALTER TABLE` on them
+  queued behind the scan, and every query queued behind that), a
+  `RowExclusiveLock` on `component_vulnerabilities`, the row locks of the links
+  already written and the foreign-key share locks on the rows they reference;
+- no advisory lock.
+
+Scans now read the SBOM's components in a short transaction, talk to NVD/JVN
+with **no transaction open**, and write their findings in one short transaction
+per scanner at the end. Measured with the same probe after the change: no
+app-role backend in a transaction and no locks held while NVD was blocked; the
+write transaction for 2,437 links took 0.2-0.4 s.
+
+Consequences you can observe:
+
+- `GET .../scan-status` counts change twice per scan (after NVD, after JVN)
+  instead of once at the end. As before, trust them only once `status` is
+  `completed`.
+- A single refused database write now costs only the component it belongs to,
+  not the whole scan (each component's links are written under their own
+  savepoint). The scan is still reported failed (`write_refused`). This closes
+  the §9.6 item "a single refused statement still discards a whole sweep".
+- Two scans of the same SBOM (an upload scan and a manual one, or two replicas)
+  now take a per-SBOM advisory lock for their write phase, so they cannot
+  deadlock on each other's links, and the scheduled scan's
+  `new_vulnerabilities` cannot count another scan's findings. (Measured with the
+  lock removed: in 3 runs of two simultaneous scans, one aborted with a refused
+  write and two counted every new finding twice; with the lock, 0 of 6.)
+- Webhook/e-mail notifications from the scheduled scan are sent one finding per
+  short transaction instead of inside the tenant-wide one.
+
+### 15.2 Overall scan deadline: `SBOMHUB_SCAN_DEADLINE` (default `30m`)
+
+A scan (NVD then JVN, for one SBOM; per project for the scheduled scan) now has
+a deadline. Default 30 minutes, accepted `1m`-`24h`; anything else, including
+`off`, stops the API at startup.
+
+Why 30 minutes: the slowest scan measured — cold, no API key, SBOM with a
+Linux kernel — took 68 NVD requests and 14 min 24 s against live NVD
+(2026-11-08). A replay of the same fixture against this release (recorded NVD
+answers, plus a synthetic 7,059-CVE kernel answer served as 36 pages at 17 s of
+latency each; no key) took 71 requests and 13 min 49 s (2026-11-09), during
+which the longest app-role transaction observed was 2.0 s (the final write of
+7,496 links took 0.64 s).
+Without a key NVD requests are paced at 6 s, so 30 minutes holds fewer than
+300 requests; a component costs one request on the keyword path and typically
+1-5 on the CPE path, so **an SBOM beyond roughly 100-250 distinct components
+needs `NVD_API_KEY` (0.7 s per request) or a longer deadline.**
+
+When the deadline fires:
+
+- findings obtained before it are committed; a CPE page walk it interrupts keeps
+  the pages already validated and is reported truncated;
+- nothing partial is cached as a complete answer (truncated and interrupted
+  answers are never cached);
+- the scan is reported failed: `scan-status` returns `"status": "failed"`,
+  `"error": "nvd: scan failed (deadline_exceeded, ...)"` and
+  `"reasons": ["deadline_exceeded", ...]`; JVN is not started if NVD used up the
+  deadline; the scheduled scan's log reads `scan failed (deadline_exceeded)`;
+- the API logs `WARN scan: overall scan deadline exceeded` with the deadline and
+  elapsed time.
+
+The in-memory scan-status tracker keeps a running scan's entry for at least the
+deadline plus 15 minutes (it was a fixed hour), so a long deadline does not turn
+into `unknown` while the scan is still running.
+
+### 15.3 Partial lookup failures fail the scan; the manual route reports status
+
+**Behaviour change.** Until now a scan in which *some* component lookups failed
+(NVD/JVN 5xx, timeouts) was reported `completed` — only a total failure was
+escalated (§9.6). It is now reported `failed` with reason `fetch_failed`, on
+NVD and JVN alike; the findings of the components that did answer are still
+committed. As with truncation (§9.3), `sbomhub scan --fail-on <severity>` exits
+**2** instead of 1 or 0 for such a scan, and the scheduled scan log records
+`failed`. A scan interrupted before it looked every component up (deadline,
+shutdown) was also reported `completed` before; it is now `failed`
+(`deadline_exceeded` / `cancelled`).
+
+While MyJVN is out of service (§13.6) every scan that includes JVN keeps
+reporting `failed` (`jvn: scan failed (fetch_failed)`), as before.
+
+`POST /api/v1/projects/:id/scan` now records its outcome where the upload scan
+does: poll `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` after the 202.
+It reads `running` immediately, then `completed` or `failed` with `reasons`. The
+202 body gained `status_url` (the path to poll). Before this release the route's
+outcome reached the server log only.
+
+API response changes are additive only: `scan-status` gained `reasons`
+(present only when `status` is `failed`), the scan route's 202 gained
+`status_url`; no field was renamed or removed. The `error` string now carries
+the reason codes in parentheses (`nvd: scan failed (fetch_failed)`); it still
+starts with `<scanner>: scan failed`.
+
+Reason codes: `deadline_exceeded`, `cancelled`, `fetch_failed`, `truncated`,
+`write_refused`, `scan_error`.
+
+### 15.4 Not covered
+
+- A scheduled scan of a tenant with many projects is bounded per project, not
+  per tenant run.
+- Two concurrent scans of one SBOM still both fetch from NVD (only their writes
+  are serialised). `scan-status` stays `running` until both have finished and
+  is then `failed` if either failed.
+- A notification's webhook / mail delivery still runs inside that one
+  notification's short transaction (the notification log row is written in it).
+- The scan-status tracker is still in-memory per API process, so a manual scan
+  on one replica and a poll on another still read `unknown`.
+- The deadline bounds fetching. A scan that fetched everything in time but
+  whose final write finished after the deadline (it waits at most 5 minutes)
+  has complete results and is reported `completed`.
