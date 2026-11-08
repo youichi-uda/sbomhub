@@ -75,17 +75,16 @@ export async function createProject(
 
 /**
  * Cleanup that is loud when it does not happen: a leaked project shows up in
- * later specs' tenant-wide lists and searches. A project the test already
- * deleted is fine — but DELETE of an absent project answers 500, not 404
- * (observed 2026-11-09), so "gone" is decided by a follow-up GET, not by the
- * DELETE status.
+ * later specs' tenant-wide lists and searches. "Gone" is always decided by a
+ * follow-up GET returning 404, never by the DELETE status alone: a project the
+ * test already deleted is fine, but DELETE of an absent project answers 500
+ * rather than 404 (observed 2026-11-09), and a 204 is not proof either.
  */
 export async function deleteProject(request: APIRequestContext, projectId: string | null | undefined): Promise<void> {
     if (!projectId) return;
     const res = await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
-    if (res.status() === 204) return;
     const after = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}`);
-    expect(after.status(), `DELETE /projects/${projectId} returned ${res.status()} and the project is still there`).toBe(404);
+    expect(after.status(), `DELETE /projects/${projectId} returned ${res.status()}; the project must be gone`).toBe(404);
 }
 
 /**
@@ -184,11 +183,16 @@ export async function createVulnerableProject(
     let uploaded: { sbomId: string; vulns: ProjectVuln[] };
     try {
         uploaded = await uploadVulnerableSbom(request, project.id, extra);
-    } catch (e) {
+    } catch (setupError) {
         // The caller never receives the id, so it cannot clean up: do it here
-        // before failing, or a retry leaves a stray project behind.
-        await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`).catch(() => undefined);
-        throw e;
+        // before failing, or a retry leaves a stray project behind. A cleanup
+        // failure is reported alongside the setup failure, not instead of it.
+        try {
+            await deleteProject(request, project.id);
+        } catch (cleanupError) {
+            throw new AggregateError([setupError, cleanupError], `fixture setup failed AND project ${project.id} was not cleaned up`);
+        }
+        throw setupError;
     }
     const { sbomId, vulns } = uploaded;
     return {

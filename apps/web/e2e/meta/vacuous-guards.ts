@@ -48,6 +48,10 @@
  *       does, or any imported name). Clicking around and ending is a
  *       smoke test of nothing: the guarded-action version of V1.
  *
+ *   V6  a probe variable (`const has = await x.isVisible()`) that is never
+ *       read: the check was computed and then ignored, usually beside an
+ *       assertion on something that is always there (`<body>`).
+ *
  * ESCAPE HATCH
  * ------------
  * `// vacuous-guard-ok: <reason>` in a comment on or directly above the
@@ -70,7 +74,7 @@ import * as ts from 'typescript';
 export interface VacuousSite {
     file: string;
     line: number;
-    rule: 'V1' | 'V2' | 'V3' | 'V4' | 'V5';
+    rule: 'V1' | 'V2' | 'V3' | 'V4' | 'V5' | 'V6';
     text: string;
     allowed: boolean;
     reason: string;
@@ -142,6 +146,27 @@ function containsDirectProbe(node: ts.Node): boolean {
             return;
         }
         if (ts.isPropertyAccessExpression(n) && n.name.text === 'length') {
+            found = true;
+            return;
+        }
+        ts.forEachChild(n, visit);
+    };
+    visit(node);
+    return found;
+}
+
+/** A probe METHOD call (not a `.length` read) anywhere in `node`. */
+function containsProbeCall(node: ts.Node): boolean {
+    let found = false;
+    const visit = (n: ts.Node): void => {
+        if (found) return;
+        if (
+            ts.isCallExpression(n) &&
+            ts.isPropertyAccessExpression(n.expression) &&
+            PROBE_METHODS.has(n.expression.name.text) &&
+            n.expression.name.text !== 'ok' &&
+            n.expression.name.text !== 'count'
+        ) {
             found = true;
             return;
         }
@@ -267,7 +292,17 @@ function containsExpect(node: ts.Node): boolean {
 }
 
 export function analyzeVacuous(fileName: string, text: string): VacuousSite[] {
-    const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    // Parse with the grammar the extension implies (`<T>` is a cast in .ts and
+    // JSX in .tsx); the wrong kind yields an error-recovered AST in which a
+    // correct test can look empty (Codex R3 Medium).
+    const kind = /\.[cm]?tsx$/.test(fileName)
+        ? ts.ScriptKind.TSX
+        : /\.[cm]?jsx$/.test(fileName)
+          ? ts.ScriptKind.JSX
+          : /\.[cm]?js$/.test(fileName)
+            ? ts.ScriptKind.JS
+            : ts.ScriptKind.TS;
+    const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, kind);
     const out: VacuousSite[] = [];
 
     const markerFor = (node: ts.Node): string | null => {
@@ -399,6 +434,27 @@ export function analyzeVacuous(fileName: string, text: string): VacuousSite[] {
             scopes[scopes.length - 1].set(node.name.text, probe);
         }
 
+        if (
+            ts.isVariableDeclaration(node) &&
+            ts.isIdentifier(node.name) &&
+            node.initializer !== undefined &&
+            containsProbeCall(node.initializer)
+        ) {
+            let fnBody: ts.Node | undefined = node.parent;
+            while (fnBody && !isFunctionLike(fnBody) && !ts.isSourceFile(fnBody)) fnBody = fnBody.parent;
+            const name = node.name.text;
+            let reads = 0;
+            const count = (n: ts.Node): void => {
+                if (ts.isIdentifier(n) && n.text === name && n !== node.name) {
+                    const p = n.parent;
+                    if (!(ts.isPropertyAccessExpression(p) && p.name === n) && !(ts.isPropertyAssignment(p) && p.name === n)) reads++;
+                }
+                ts.forEachChild(n, count);
+            };
+            if (fnBody) count(fnBody);
+            if (reads === 0) report(node, 'V6', `probe \`${name}\` is computed and never read`);
+        }
+
         if (ts.isIfStatement(node) && conditionHasProbe(node.expression)) {
             const cond = node.expression.getText(sf).replace(/\s+/g, ' ').slice(0, 80);
             const thenAsserts = branchAsserts(node.thenStatement);
@@ -407,7 +463,23 @@ export function analyzeVacuous(fileName: string, text: string): VacuousSite[] {
             const elseExpects = branchExpects(node.elseStatement);
             let fn: ts.Node | undefined = node.parent;
             while (fn && !isFunctionLike(fn)) fn = fn.parent;
-            if ((thenExpects && !elseAsserts) || (elseExpects && !thenAsserts)) {
+            // `if (p) { expect…; return; } expect…` asserts on every path: the
+            // guarded branch asserts and leaves, the fall-through asserts
+            // after the if (Codex R3 Medium).
+            const assertsAfter = (): boolean => {
+                const parent = node.parent;
+                if (!ts.isBlock(parent) && !ts.isSourceFile(parent)) return false;
+                const idx = parent.statements.indexOf(node as ts.Statement);
+                return parent.statements.slice(idx + 1).some((st) => branchExpects(st));
+            };
+            const terminates = (st: ts.Statement | undefined): boolean => {
+                if (!st) return false;
+                const last = ts.isBlock(st) ? st.statements[st.statements.length - 1] : st;
+                return last !== undefined && (ts.isReturnStatement(last) || ts.isThrowStatement(last));
+            };
+            const coveredFallthrough =
+                node.elseStatement === undefined && thenExpects && terminates(node.thenStatement) && assertsAfter();
+            if (!coveredFallthrough && ((thenExpects && !elseAsserts) || (elseExpects && !thenAsserts))) {
                 report(node, 'V1', `if (${cond}) guards assertions on one path only`);
             } else if (
                 fn !== undefined &&
@@ -449,13 +521,28 @@ export function analyzeVacuous(fileName: string, text: string): VacuousSite[] {
     };
     visit(sf);
 
+    const sameFileFunctions = new Map<string, ts.Node>();
+    const collectNamed = (n: ts.Node): void => {
+        if (ts.isFunctionDeclaration(n) && n.name) sameFileFunctions.set(n.name.text, n);
+        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && isFunctionLike(unwrap(n.initializer))) {
+            sameFileFunctions.set(n.name.text, unwrap(n.initializer));
+        }
+        ts.forEachChild(n, collectNamed);
+    };
+    collectNamed(sf);
     const visitTests = (n: ts.Node): void => {
         if (
             ts.isCallExpression(n) &&
             /^test(\.(only|slow))?$/.test(calleeName(n.expression) ?? '') &&
             n.arguments.length >= 2
         ) {
-            const body = unwrap(n.arguments[n.arguments.length - 1]);
+            let body: ts.Node = unwrap(n.arguments[n.arguments.length - 1]);
+            // `test('t', smoke)` — resolve a same-file function by name
+            // (Codex R3 Medium). Imported or unresolvable names stay unchecked.
+            if (ts.isIdentifier(body)) {
+                const resolved = sameFileFunctions.get(body.text);
+                if (resolved !== undefined) body = resolved;
+            }
             if (isFunctionLike(body) && !asserts(body) && !callsMayAssert(body, mayAssert)) {
                 report(n, 'V5', `test ${n.arguments[0].getText(sf).slice(0, 70)} asserts nothing`);
             }
@@ -608,6 +695,25 @@ test('t', async ({ page }) => {
     if (await page.locator('tr').isVisible()) await expectRow(page);
 });`,
     ],
+    [
+        // Codex R3 Medium: a test body passed by name.
+        'a named test body that asserts nothing',
+        'V5',
+        `${HDR}async function smoke({ page }: any) {
+    await page.goto('/settings');
+    if (await page.getByLabel('Hour').isVisible()) await page.getByLabel('Hour').selectOption('9');
+}
+test('smoke', smoke);`,
+    ],
+    [
+        // Codex R3 High (auth.spec.ts): probes computed, then ignored.
+        'probe computed and never read',
+        'V6',
+        `${HDR}test('t', async ({ page }) => {
+    const hasButton = await page.getByRole('link', { name: 'Sign In' }).isVisible().catch(() => false);
+    await expect(page.locator('body')).toBeVisible();
+});`,
+    ],
 ];
 
 export const VACUOUS_MUST_BE_CLEAN: ReadonlyArray<readonly [string, string]> = [
@@ -746,6 +852,33 @@ test('b', async () => { test.fixme(\`BUG: #123 renders the wrong total\`); });`,
 test('t', async ({ page, request }) => {
     if (await page.getByText('empty').isVisible()) await uploadSbom(request);
     await expect(page.locator('table')).toBeVisible();
+});`,
+    ],
+    [
+        // Codex R3 Medium: every path asserts — the guarded branch asserts
+        // and returns, the fall-through asserts after it.
+        'asserting early return followed by an assertion',
+        `${HDR}test('t', async ({ page }) => {
+    const rows = page.locator('tr');
+    if (await page.getByText('empty').isVisible()) {
+        await expect(rows).toHaveCount(0);
+        return;
+    }
+    await expect(rows.first()).toBeVisible();
+});`,
+    ],
+    [
+        'a named test body that asserts',
+        `${HDR}async function check({ page }: any) { await expect(page.locator('main')).toBeVisible(); }
+test('check', check);`,
+    ],
+    [
+        // Codex R3 Medium: parsed as TSX because of the extension.
+        'jsx in a component test.tsx',
+        `${HDR}const Widget = () => null;
+test('t', async () => {
+    const view = <Widget />;
+    expect(view).toBeTruthy();
 });`,
     ],
 ];

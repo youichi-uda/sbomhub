@@ -33,24 +33,23 @@ test.describe('KEV (Known Exploited Vulnerabilities)', () => {
       await expectCatalogSeeded(request);
     });
 
-    test('should sync KEV catalog', async ({ request }) => {
-      // NOTE: this fetches the live CISA feed (the CI runner has egress).
-      const syncResponse = await request.post(`${API_BASE_URL}/api/v1/kev/sync`);
-      expect(syncResponse.status(), await syncResponse.text()).toBe(200);
-
-      const result = await syncResponse.json();
-      expect(result.message).toBe('KEV catalog sync completed');
-      expect(result.total_processed).toBeGreaterThan(0);
-      expect(result.new_entries + result.updated_entries).toBe(result.total_processed);
-      expect(typeof result.catalog_version).toBe('string');
-      expect(result.catalog_version).not.toBe('');
-    });
+    // There is deliberately no "POST /kev/sync" test here. Sync downloads the
+    // live CISA feed, so in this REQUIRED suite it made the gate depend on
+    // CISA's availability and let the feed rewrite vulnerabilities.in_kev
+    // under the KEV assertions below. Sync is covered hermetically by
+    // apps/api/internal/service/kev_test.go::TestKEVService_SyncCatalog_InjectedURL
+    // (canned catalogue over httptest). These tests hold for the §9 seed alone
+    // (no egress) and for a catalogue the api's start-up sync filled from
+    // CISA (egress): they assert only what is true of both.
 
     test('should get KEV stats consistent with the catalog', async ({ request }) => {
       const statsResponse = await request.get(`${API_BASE_URL}/api/v1/kev/stats`);
       expect(statsResponse.status()).toBe(200);
       const stats = await statsResponse.json();
       expect(stats.total_entries).toBeGreaterThan(0);
+      // `success` either way: the seed's sync log, or — on a runner with
+      // egress — the api's own start-up sync (scheduler/kev_sync.go runs one
+      // immediately), whichever is later.
       expect(stats.latest_sync_status.status).toBe('success');
 
       const catalogResponse = await request.get(`${API_BASE_URL}/api/v1/kev/catalog?limit=1`);

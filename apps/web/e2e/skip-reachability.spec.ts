@@ -1624,7 +1624,10 @@ test.describe('e2e vacuous guards (hermetic meta-gate)', () => {
             expect(hits.map((v) => v.rule), `MUST BE REPORTED as ${rule}: ${name}`).toContain(rule);
         }
         for (const [name, source] of VACUOUS_MUST_BE_CLEAN) {
-            const hits = analyzeVacuous(`${name}.spec.ts`, source).filter((v) => !v.allowed);
+            // A fixture whose name ends in a test extension is parsed as that
+            // file kind (the `.tsx` one needs the JSX grammar).
+            const file = /\.[cm]?[jt]sx?$/.test(name) ? name : `${name}.spec.ts`;
+            const hits = analyzeVacuous(file, source).filter((v) => !v.allowed);
             expect(hits.map(describeVacuous), `MUST BE CLEAN: ${name}`).toEqual([]);
         }
         // The allowlist fixture is seen AND excused, not merely missed.
