@@ -1770,20 +1770,19 @@ func scoreToCvss2Severity(score float64) string {
 // a rolling 30-second window). Everything else — another status, a transport
 // failure, an undecodable body — is not Temporary.
 //
-// Error() never carries the upstream body (only an excerpt is kept, for the
-// server log, in Detail).
+// Neither Error() nor any field carries the upstream body: the API's logs do
+// not record upstream / error text (UPGRADE §16-§17), and the status says
+// what the caller needs.
 type NVDUpstreamError struct {
 	Status     int // 0 for a transport / decode failure
 	Temporary  bool
 	RetryAfter time.Duration
-	Detail     string // first bytes of the upstream body, for the server log only
-	Err        error  // transport / decode cause, if any
+	Err        error // transport / decode cause, if any
 }
 
 const (
 	nvdRetryAfterDefault = 30 * time.Second
 	nvdRetryAfterMax     = time.Hour
-	nvdErrorBodyExcerpt  = 512
 )
 
 func (e *NVDUpstreamError) Error() string {
@@ -1800,8 +1799,7 @@ func (e *NVDUpstreamError) Error() string {
 func (e *NVDUpstreamError) Unwrap() error { return e.Err }
 
 func newNVDStatusError(resp *http.Response, now time.Time) *NVDUpstreamError {
-	excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, nvdErrorBodyExcerpt))
-	e := &NVDUpstreamError{Status: resp.StatusCode, Detail: string(excerpt)}
+	e := &NVDUpstreamError{Status: resp.StatusCode}
 	switch resp.StatusCode {
 	case http.StatusForbidden, http.StatusTooManyRequests, http.StatusServiceUnavailable:
 		e.Temporary = true

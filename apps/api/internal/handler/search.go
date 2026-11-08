@@ -95,7 +95,7 @@ func (h *SearchHandler) SearchByComponent(c echo.Context) error {
 //     answer): 502 Bad Gateway, as for the billing provider (billing.go).
 //
 // The body carries a stable `code` (`nvd_unavailable` / `nvd_upstream_error`)
-// and never the upstream response; that goes to the server log, truncated.
+// and never the upstream response (nor does the log line).
 func respondNVDUpstream(c echo.Context, cveID string, upstream *service.NVDUpstreamError) error {
 	slog.Warn("search: nvd fallback failed", "cve_id", cveID,
 		"status", upstream.Status, "temporary", upstream.Temporary, "error", upstream)
