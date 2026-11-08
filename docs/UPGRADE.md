@@ -1659,8 +1659,10 @@ numbers, OpenSSL-style patch letters (`1.1.1k`), Maven's `.Final`/`.GA`, and
 pre-releases that every scheme orders alike (`alpha` < `beta` < `rc`, before
 the release) are compared. Where version schemes disagree — a bare `a`/`b`
 (PEP 440 alpha vs OpenSSL patch), a number or word after `-` that is not a
-pre-release word (`1.0.0-1`, `1.0.0-final`), `dev`/`pre`/`snapshot`/`M1`
-against each other, or separators such as `!`, `~`, `^` — the comparison is
+pre-release word (`1.0.0-1`, `1.0.0-final`), `dev`/`pre`/`preview` (Maven
+and PEP 440 put them on opposite sides of the release), a bare `c`, two
+pre-releases other than alpha < beta < rc, `rc.1` vs `rc1`, empty segments
+(`1..0`), or separators such as `!`, `~`, `^` — the comparison is
 **undecidable**: the CVE NVD returned is kept and labelled
 `nvd_cpe_unverified` (low confidence), and that answer is not cached. A
 comparator limit therefore costs a label, never a missed finding. `+build`
@@ -1672,7 +1674,7 @@ metadata is ignored, as SemVer specifies.
 |---|---|---|
 | `nvd_cpe` | high | CPE match verified against NVD configurations |
 | `nvd_cpe_distro` | medium | same, for a distro package, on the **upstream** version — a fix the distro backported without changing the upstream version is NOT seen, so these can be false positives |
-| `nvd_cpe_unverified` | low | NVD returned the CVE for the component's CPE, but its configurations could not be checked against the version (absent, or a version comparison that cannot be decided). Kept rather than dropped; one occurred in the measurement below (³) |
+| `nvd_cpe_unverified` | low | NVD returned the CVE for the component's CPE, but its configurations could not be checked against the version (absent, or a version comparison that cannot be decided). Kept rather than dropped; five occurred in the measurement below (³) |
 | `nvd_keyword` | low | NVD text search (no usable CPE) |
 | `jvn_keyword` | low | MyJVN text search on the component name |
 | `cve_sync_keyword` | low | the daily CVE-sync linker (product names vs component names) |
@@ -1702,19 +1704,21 @@ OSV for Maven/npm/Go, openssl.org's 1.1.1 advisory list for OpenSSL):
 | lodash 4.17.20 | 4 | 1 (0) | 5 (4) | nvd_cpe |
 | golang.org/x/net v0.7.0 | 24 | 0 | 2 (2) | nvd_cpe |
 | gin v1.7.0 | 3 | 0 | 2 (2) | nvd_cpe |
-| openssl 1.1.1k-1 (deb) | 49 | 0 | 43 (42) | 42 nvd_cpe_distro + 1 nvd_cpe_unverified³ |
+| openssl 1.1.1k-1 (deb) | 49 | 0 | 47 (42) | 42 nvd_cpe_distro + 5 nvd_cpe_unverified³ |
 | glibc 2.31 | 26¹ | 3 (0) | 26 (26) | nvd_cpe |
 | libc6 2.31-13 (deb) | 26¹ | 0 | 0 | keyword fallback |
 | linux kernel 5.10.46 | 7,059² | 0 | 493, **truncated** | nvd_cpe |
 
 ¹ NVD's own configurations — not an independent source. ² NVD's count; not
-verified independently. ³ CVE-2019-1543: its range ends at `1.1.1b`, and a bare
-`b` is scheme-dependent, so it is kept unverified; the ground truth says 1.1.1k
-is not affected.
+verified independently. ³ CVE-2019-1543/1547/1549/1552/1563: their ranges end at
+`1.1.1b`/`1.1.1c`, and a bare `b`/`c` is scheme-dependent (PEP 440 beta/rc vs
+OpenSSL patch), so they are kept unverified; the ground truth says 1.1.1k is not
+affected by any of them.
 
-Across the components with ground truth: **before 4 links, 0 true; after 165
-links, 134 true (precision 81%, recall 70%)**; of the 31 false positives, 1 is
-labelled low confidence. The remaining false positives
+Across the components with ground truth: **before 4 links, 0 true; after 169
+links, 134 true (precision 79%, recall 70%)**; of the 35 false positives, 5 are
+labelled low confidence. Counting only high/medium-confidence links: 164 links,
+134 true (precision 82%). The remaining false positives
 are mostly NVD's product granularity (NVD's `apache:tomcat` covers server-only
 issues that do not affect the embedded jar); the remaining misses are CVEs NVD
 has not configured (golang.org/x/net: NVD's CPE data covers 2 of 24) and
@@ -1734,9 +1738,14 @@ replaced.
 
 ### 13.5 Cost, truncation and the kernel
 
-- **Requests.** A component whose first CPE candidate is NVD's product costs one
-  request, as before. Each unknown candidate costs two (query + product probe),
-  so Maven packages where Syft guesses `apache:log4j-core` first cost up to 5.
+- **Requests.** Per CPE candidate: a plain dotted-numeric version asks
+  `cpeName` first (1 request per page of answers); if that is empty, or the
+  version has letters/qualifiers (`1.1.1k`, `2.0-beta9`), the whole product is
+  walked (1 request per 200 of the product's CVEs, up to the 5-page budget). An
+  unknown product therefore costs 2 requests with a plain version and 1
+  otherwise, and a known product whose exact version has no CVE costs 1 plus
+  its product walk. Maven packages where Syft guesses `apache:log4j-core` first
+  cost up to 5.
   The fixture above took 41 NVD requests for 13 components on a cold cache (14
   before: one keyword walk each, two pages for one of them) and 7 on the next scan (24-hour cache; "unknown product" answers are
   cached too; truncated answers and answers holding an `nvd_cpe_unverified` CVE

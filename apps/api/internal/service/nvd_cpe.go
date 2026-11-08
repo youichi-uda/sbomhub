@@ -94,6 +94,11 @@ func parseCPE(s string) (cpeName, bool) {
 		if !ok || len(fields) != 11 {
 			return cpeName{}, false
 		}
+		for _, f := range fields {
+			if f == "" { // no empty attributes in a formatted string (Codex M60 R13 Medium)
+				return cpeName{}, false
+			}
+		}
 	case strings.HasPrefix(lower, "cpe:/"):
 		raw := strings.Split(s[len("cpe:/"):], ":")
 		if len(raw) < 3 || len(raw) > 7 { // part:vendor:product[:version[:update[:edition[:language]]]]
@@ -597,9 +602,14 @@ type versionToken struct {
 var releaseMarkers = map[string]bool{"final": true, "ga": true, "release": true}
 
 // preReleaseRank orders the qualifier words; shorthand letters map onto them.
+//
+// "dev", "pre", "preview" are NOT here (Codex M60 R13 High): Maven sorts an
+// unknown qualifier AFTER the release while PEP 440 puts dev before it and
+// reads pre/preview as rc, so against the release they are undecidable
+// (tokenKindAt classifies them unknown).
 var preReleaseRank = map[string]int{
-	"dev": 0, "alpha": 1, "a": 1, "beta": 2, "b": 2, "milestone": 3, "m": 3,
-	"pre": 4, "preview": 4, "rc": 5, "cr": 5, "snapshot": 6,
+	"alpha": 1, "a": 1, "beta": 2, "b": 2, "c": 5, "milestone": 3, "m": 3,
+	"rc": 5, "cr": 5, "snapshot": 6,
 }
 
 // agreedPreRelease are the qualifiers every supported scheme orders the same
@@ -610,7 +620,10 @@ var agreedPreRelease = map[string]bool{"a": true, "alpha": true, "b": true, "bet
 // follows them. Bare, "m" is an OpenSSL patch letter (1.1.1m), while a bare
 // "a"/"b" is an alpha/beta in PEP 440 ("1.0a" < "1.0") but a patch letter in
 // OpenSSL ("1.1.1a" > "1.1.1"), so it is UNKNOWN (Codex M60 R6 High-2).
-var shorthandPreRelease = map[string]bool{"a": true, "b": true, "m": true}
+//
+// Bare "c" is PEP 440's rc and an OpenSSL patch letter alike, so it is
+// unknown too; "c1" is a pre-release (Codex M60 R13 High).
+var shorthandPreRelease = map[string]bool{"a": true, "b": true, "c": true, "m": true}
 
 type tokenKind int
 

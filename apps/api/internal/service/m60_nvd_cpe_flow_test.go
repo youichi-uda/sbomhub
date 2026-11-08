@@ -174,11 +174,12 @@ func TestM60Lookup_DebianOpenSSLIsDistroLabelledAndVerified(t *testing.T) {
 		t.Errorf("method = %q, want nvd_cpe_distro", l.method)
 	}
 	// Measured: the same 42 CVEs the cpeName query verified (all 42 in the
-	// openssl.org ground truth for 1.1.1k) plus CVE-2019-1543, kept as
-	// nvd_cpe_unverified because its range ends at "1.1.1b" (a bare "b" is
-	// scheme-dependent). 278 records rejected on positive evidence.
-	if len(l.vulns) != 43 || l.cpeRejected != 278 || l.cpeUndecidable != 1 || l.requests != 2 || l.truncated {
-		t.Errorf("kept=%d rejected=%d undecidable=%d requests=%d truncated=%v, want 43/278/1/2/false",
+	// openssl.org ground truth for 1.1.1k) plus 5 kept as nvd_cpe_unverified
+	// because their ranges end at "1.1.1b" / "1.1.1c" (a bare a/b/c is
+	// scheme-dependent; none of the 5 affects 1.1.1k per openssl.org). 274
+	// records rejected on positive evidence.
+	if len(l.vulns) != 47 || l.cpeRejected != 274 || l.cpeUndecidable != 5 || l.requests != 2 || l.truncated {
+		t.Errorf("kept=%d rejected=%d undecidable=%d requests=%d truncated=%v, want 47/274/5/2/false",
 			len(l.vulns), l.cpeRejected, l.cpeUndecidable, l.requests, l.truncated)
 	}
 	if !l.uncacheable {
