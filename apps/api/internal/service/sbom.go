@@ -53,6 +53,15 @@ func (s *SbomService) Import(ctx context.Context, projectID uuid.UUID, data []by
 		return nil, ValidationErrorf("failed to parse SBOM: %v", err)
 	}
 
+	// Parse the components BEFORE anything is written, so a document that is
+	// detected but cannot be parsed leaves no sboms row behind (Codex R1
+	// Medium). F443: a parse failure is caller-fixable feedback about a
+	// malformed upload; surface it at 400 via ErrValidation.
+	components, err := parseComponents(data, info.Format, info.Version)
+	if err != nil {
+		return nil, ValidationErrorf("failed to parse SBOM: %v", err)
+	}
+
 	// Resolve the tenant_id of the parent project so that both the new sbom
 	// row and the components belonging to it are tagged with the correct
 	// tenant. Without this, the FORCE RLS WITH CHECK clause on `sboms` (see
@@ -75,13 +84,6 @@ func (s *SbomService) Import(ctx context.Context, projectID uuid.UUID, data []by
 
 	if err := s.sbomRepo.Create(ctx, sbom); err != nil {
 		return nil, fmt.Errorf("failed to save SBOM: %w", err)
-	}
-
-	components, err := parseComponents(data, info.Format, info.Version)
-	if err != nil {
-		// F443: component parse failure is likewise caller-fixable feedback
-		// about a malformed upload; surface it at 400 via ErrValidation.
-		return nil, ValidationErrorf("failed to parse SBOM: %v", err)
 	}
 
 	for _, comp := range components {
@@ -265,7 +267,11 @@ func detectFormatAndVersion(data []byte) (*FormatInfo, error) {
 
 	// CycloneDX: "bomFormat" present; "specVersion" is required by every
 	// CycloneDX JSON schema and decides what the document may contain.
-	if _, ok := raw["bomFormat"]; ok {
+	if rawFormat, ok := raw["bomFormat"]; ok {
+		// The schema fixes bomFormat to exactly "CycloneDX".
+		if bf, isString := jsonString(rawFormat); !isString || bf != "CycloneDX" {
+			return nil, fmt.Errorf("unknown SBOM format: bomFormat must be \"CycloneDX\"")
+		}
 		version, ok := jsonString(raw["specVersion"])
 		if !ok || !containsString(supportedCycloneDXVersions, version) {
 			return nil, unsupportedVersionError("CycloneDX", "specVersion", raw["specVersion"], supportedCycloneDXVersions)
@@ -285,8 +291,8 @@ func detectFormatAndVersion(data []byte) (*FormatInfo, error) {
 		return &FormatInfo{Format: model.FormatSPDX, Version: version}, nil
 	}
 
-	// SPDX 3: "@context" points into spdx.org/rdf/3.<...>/.
-	if ctx, ok := jsonString(raw["@context"]); ok && strings.Contains(ctx, "spdx.org/rdf/3") {
+	// SPDX 3: "@context" is a URL under https://spdx.org/rdf/3.<...>/.
+	if ctx, ok := jsonString(raw["@context"]); ok && isSPDX3Context(ctx) {
 		version, ok := extractSPDX3Version(ctx)
 		if !ok {
 			return nil, unsupportedVersionError("SPDX 3", "@context", raw["@context"], supportedSPDX3Versions)
@@ -339,6 +345,20 @@ func prefixAll(prefix string, list []string) []string {
 		out[i] = prefix + v
 	}
 	return out
+}
+
+// spdx3ContextPrefixes are the URL prefixes of SPDX 3's JSON-LD contexts.
+// Matching the prefix, not a substring anywhere, keeps an unrelated document
+// whose @context merely mentions "spdx.org/rdf/3" from being parsed as SPDX.
+var spdx3ContextPrefixes = []string{"https://spdx.org/rdf/3", "http://spdx.org/rdf/3"}
+
+func isSPDX3Context(ctx string) bool {
+	for _, p := range spdx3ContextPrefixes {
+		if strings.HasPrefix(ctx, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractSPDX3Version reads the release from an SPDX 3 @context URL

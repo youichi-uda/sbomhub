@@ -170,3 +170,35 @@ func TestSBOMHandler_Upload_UnsupportedSpecVersion_400(t *testing.T) {
 		})
 	}
 }
+
+// Codex R1 Medium: a document that passes detection but fails component
+// parsing used to be rejected only AFTER its sboms row was inserted. Parsing
+// now happens first, so the 400 is returned with no repository call at all
+// (no sqlmock expectations: any query is unexpected).
+func TestSBOMHandler_Upload_ParseFailureTouchesNoRepository(t *testing.T) {
+	bodies := map[string]string{
+		"cyclonedx components not an array": `{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":5}`,
+		"spdx3 graph not an array":          `{"@context":"https://spdx.org/rdf/3.0.1/spdx-context.jsonld","@graph":"x"}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			sbomService := service.NewSbomService(
+				repository.NewSbomRepository(db),
+				repository.NewComponentRepository(db),
+			)
+			h := NewSbomHandler(db, sbomService, nil, nil, nil)
+			rec := driveUpload(t, h, uuid.New(), body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("want 400, got %d (body=%s)", rec.Code, rec.Body.String())
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet sqlmock expectations: %v", err)
+			}
+		})
+	}
+}

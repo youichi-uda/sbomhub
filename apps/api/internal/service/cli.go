@@ -161,6 +161,14 @@ func (s *CLIService) UploadSBOM(ctx context.Context, projectID uuid.UUID, data [
 		return nil, 0, ValidationErrorf("failed to detect SBOM format: %v", err)
 	}
 
+	// Parse before anything is written (see SbomService.Import).
+	components, err := parseComponents(data, info.Format, info.Version)
+	if err != nil {
+		// F443: component parse failure is likewise caller-fixable feedback
+		// about a malformed upload; surface it at 400 via ErrValidation.
+		return nil, 0, ValidationErrorf("failed to parse components: %v", err)
+	}
+
 	// Resolve the tenant_id of the parent project. Required because
 	// sboms.tenant_id and components.tenant_id are NOT NULL (migration 027)
 	// and gated by FORCE RLS WITH CHECK (migration 023). Without this, the
@@ -182,13 +190,6 @@ func (s *CLIService) UploadSBOM(ctx context.Context, projectID uuid.UUID, data [
 
 	if err := s.sbomRepo.Create(ctx, sbom); err != nil {
 		return nil, 0, fmt.Errorf("failed to save SBOM: %w", err)
-	}
-
-	components, err := parseComponents(data, info.Format, info.Version)
-	if err != nil {
-		// F443: component parse failure is likewise caller-fixable feedback
-		// about a malformed upload; surface it at 400 via ErrValidation.
-		return nil, 0, ValidationErrorf("failed to parse components: %v", err)
 	}
 
 	for _, comp := range components {

@@ -117,3 +117,27 @@ func TestDetectFormatAndVersion_SPDX3Versions(t *testing.T) {
 		}
 	}
 }
+
+// Codex R1 Medium: the CycloneDX discriminator itself was not checked, so
+// {"bomFormat":"SPDX",...} was stored as CycloneDX and a numeric bomFormat
+// passed detection.
+func TestDetectFormatAndVersion_BomFormatMustBeCycloneDX(t *testing.T) {
+	for _, bf := range []string{`"SPDX"`, `"cyclonedx"`, `""`, `1`, `null`, `{}`} {
+		_, err := detectFormatAndVersion([]byte(`{"bomFormat":` + bf + `,"specVersion":"1.5","version":1}`))
+		if err == nil {
+			t.Fatalf("bomFormat %s accepted", bf)
+		}
+	}
+}
+
+func TestDetectFormatAndVersion_SPDX3ContextMustBeSPDXOrigin(t *testing.T) {
+	for _, ctx := range []string{
+		"https://evil.example/spdx.org/rdf/3.0.1/terms/Core",
+		"https://notspdx.org/rdf/3.0.1/terms/Core",
+	} {
+		info, err := detectFormatAndVersion([]byte(`{"@context":"` + ctx + `","@graph":[]}`))
+		if err == nil {
+			t.Fatalf("%s accepted as %+v", ctx, info)
+		}
+	}
+}
