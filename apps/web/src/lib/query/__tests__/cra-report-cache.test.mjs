@@ -6,44 +6,55 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { withoutReport, withReportRestored, withReportState } from "../cra-report-cache.ts";
+import { applyPendingOps, withoutReport, withReportState } from "../cra-report-cache.ts";
 
 const A = { id: "A", state: "draft" };
 const B = { id: "B", state: "draft" };
 const C = { id: "C", state: "draft" };
 const ids = (p) => p.data.map((r) => r.id);
 
-test("A fails after B succeeded: B stays removed, A comes back at its index", () => {
-  let page = { data: [A, B, C], totalCount: 3 };
-  const aIndex = page.data.findIndex((r) => r.id === "A");
-  page = withoutReport(page, "A"); // approve A (in flight)
-  page = withoutReport(page, "B"); // approve B (succeeds)
-  // B's refetch: server now has A (still pending server-side) and C.
-  page = { data: [A, C], totalCount: 2 };
-  page = withReportRestored(page, A, aIndex); // A fails -> already present
-  assert.deepEqual(ids(page), ["A", "C"]);
-  assert.equal(page.totalCount, 2);
+test("A fails after B succeeded: B stays hidden, A is shown again", () => {
+  // Overlay while both are in flight.
+  const server = { data: [A, B, C], totalCount: 3 };
+  let ops = new Map([["A", { kind: "remove" }], ["B", { kind: "remove" }]]);
+  assert.deepEqual(ids(applyPendingOps(server, ops)), ["C"]);
+  // B succeeds; its refetch says the server still has A (pending) and C.
+  const afterB = { data: [A, C], totalCount: 2 };
+  ops = new Map([["A", { kind: "remove" }]]);
+  assert.deepEqual(ids(applyPendingOps(afterB, ops)), ["C"]);
+  // A fails: its op is dropped, nothing else changes.
+  ops = new Map();
+  assert.deepEqual(ids(applyPendingOps(afterB, ops)), ["A", "C"]);
 });
 
-test("A fails before any refetch: only A is restored, B's removal is kept", () => {
-  let page = { data: [A, B, C], totalCount: 3 };
-  page = withoutReport(page, "A");
-  page = withoutReport(page, "B");
-  page = withReportRestored(page, A, 0);
-  assert.deepEqual(ids(page), ["A", "C"]);
-  assert.equal(page.totalCount, 2);
-});
-
-test("restore index is clamped and undefined pages pass through", () => {
-  assert.deepEqual(ids(withReportRestored({ data: [B], totalCount: 1 }, A, 5)), ["B", "A"]);
-  assert.equal(withReportRestored(undefined, A, 0), undefined);
+test("removing an absent row is a no-op; undefined pages pass through", () => {
   assert.equal(withoutReport(undefined, "A"), undefined);
   const p = { data: [B], totalCount: 1 };
-  assert.equal(withoutReport(p, "A"), p, "removing an absent row is a no-op");
+  assert.equal(withoutReport(p, "A"), p);
+  assert.deepEqual(withoutReport({ data: [A, B], totalCount: 2 }, "A"), { data: [B], totalCount: 1 });
 });
 
 test("state edit touches one row only", () => {
   const page = withReportState({ data: [A, B], totalCount: 2 }, "B", "submitted");
   assert.deepEqual(page.data.map((r) => r.state), ["draft", "submitted"]);
   assert.equal(withReportState(undefined, "B", "x"), undefined);
+});
+
+// Codex R2 Medium: a refresh (or another action's invalidation) that lands
+// while an action is in flight returns the pre-action rows. The page keeps
+// in-flight actions as an overlay applied to every fetched page, so such a
+// response can never resurrect a decided row or revert "submitted".
+test("pending overlay is re-applied to a stale refetch", async () => {
+  const stale = { data: [A, B, C], totalCount: 3 };
+  const ops = new Map([
+    ["A", { kind: "remove" }],
+    ["C", { kind: "state", state: "submitted" }],
+  ]);
+  const shown = applyPendingOps(stale, ops);
+  assert.deepEqual(ids(shown), ["B", "C"]);
+  assert.equal(shown.totalCount, 2);
+  assert.equal(shown.data[1].state, "submitted");
+  // Settled (op dropped) -> the server's answer is shown as is.
+  assert.equal(applyPendingOps(stale, new Map()), stale);
+  assert.equal(applyPendingOps(undefined, ops), undefined);
 });

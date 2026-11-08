@@ -54,11 +54,7 @@ import {
   CRASubmissionInput,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query/keys";
-import {
-  withReportRestored,
-  withReportState,
-  withoutReport,
-} from "@/lib/query/cra-report-cache";
+import { applyPendingOps, type PendingOp } from "@/lib/query/cra-report-cache";
 import { LoadError } from "@/components/ui/load-error";
 import { AIDisabledBanner } from "@/components/triage/ai-disabled-banner";
 import {
@@ -186,8 +182,28 @@ export default function CRAReportsPage() {
     queryFn: (): Promise<ReportPage> =>
       api.craReports.listWithMeta(projectId, filter),
   });
-  const reports = useMemo(() => reportsQuery.data?.data ?? [], [reportsQuery.data]);
-  const totalCount = reportsQuery.data?.totalCount ?? 0;
+  // Actions in flight, by report id. They are an overlay on whatever the
+  // cache holds rather than edits to it, so a refresh or another action's
+  // refetch that answers with the pre-action rows cannot resurrect a
+  // decided report or revert "submitted" (Codex R2), and settling or
+  // failing one action never touches another's rows (Codex R1).
+  const [pendingOps, setPendingOps] = useState<ReadonlyMap<string, PendingOp>>(
+    () => new Map(),
+  );
+  const setPendingOp = useCallback((reportId: string, op: PendingOp | null) => {
+    setPendingOps((prev) => {
+      const next = new Map(prev);
+      if (op) next.set(reportId, op);
+      else next.delete(reportId);
+      return next;
+    });
+  }, []);
+  const shownPage = useMemo(
+    () => applyPendingOps(reportsQuery.data, pendingOps),
+    [reportsQuery.data, pendingOps],
+  );
+  const reports = useMemo(() => shownPage?.data ?? [], [shownPage]);
+  const totalCount = shownPage?.totalCount ?? 0;
   const loading = reportsQuery.isPending && !reportsQuery.isError;
   const loadError = reportsQuery.error;
   const loadAIDisabled = loadError instanceof APIError && loadError.isAIDisabled();
@@ -250,10 +266,11 @@ export default function CRAReportsPage() {
   }, [queryClient, reportsKey]);
 
   /**
-   * Optimistic update: drop the report from the visible list
-   * immediately, then call the API. On failure restore the entry so the
-   * row reappears (mirrors triage page's decideOptimistically). Every
-   * write targets the entry of the filter the action started on.
+   * Optimistic update: hide the report at once (pending "remove" op), then
+   * call the API. On success the op stays until every list entry has been
+   * refetched (so the pre-decision cache never shows through); on failure
+   * it is dropped and the row reappears (mirrors triage page's
+   * decideOptimistically).
    */
   const decideOptimistically = useCallback(
     async (
@@ -261,32 +278,21 @@ export default function CRAReportsPage() {
       input: CRAReportDecisionInput,
       errorKey: string,
     ) => {
-      const key = reportsKey;
       setBusyReportId(report.id);
-      // An in-flight fetch for this entry would overwrite the optimistic
-      // removal with the pre-decision rows.
-      await queryClient.cancelQueries({ queryKey: key, exact: true });
-      const index = queryClient
-        .getQueryData<ReportPage>(key)
-        ?.data.findIndex((r) => r.id === report.id) ?? 0;
-      queryClient.setQueryData<ReportPage>(key, (old) => withoutReport(old, report.id));
+      setPendingOp(report.id, { kind: "remove" });
       try {
         await api.craReports.decide(projectId, report.id, input);
         // background refresh so e.g. server-side state mutations land
-        void reloadReports();
+        void reloadReports().finally(() => setPendingOp(report.id, null));
       } catch (err) {
-        // Put back only this report: a whole-page snapshot would undo other
-        // rows' actions that completed meanwhile (Codex R1).
-        queryClient.setQueryData<ReportPage>(key, (old) =>
-          withReportRestored(old, report, Math.max(0, index)),
-        );
+        setPendingOp(report.id, null);
         void reloadReports();
         handleError(err, t(errorKey));
       } finally {
         setBusyReportId(null);
       }
     },
-    [reportsKey, queryClient, projectId, reloadReports, handleError, t],
+    [projectId, reloadReports, setPendingOp, handleError, t],
   );
 
   const handleApprove = useCallback(
@@ -372,7 +378,6 @@ export default function CRAReportsPage() {
    */
   const handleRecordSubmission = useCallback(
     async (report: CRAReport, values: ReportSubmitFormValues) => {
-      const key = reportsKey;
       setBusyReportId(report.id);
 
       const input: CRASubmissionInput = { authority: values.authority };
@@ -389,10 +394,7 @@ export default function CRAReportsPage() {
         input.reference_number = values.reference_number;
       if (values.notes) input.notes = values.notes;
 
-      await queryClient.cancelQueries({ queryKey: key, exact: true });
-      queryClient.setQueryData<ReportPage>(key, (old) =>
-        withReportState(old, report.id, "submitted"),
-      );
+      setPendingOp(report.id, { kind: "state", state: "submitted" });
       try {
         const created = await api.craSubmissions.record(
           projectId,
@@ -405,20 +407,18 @@ export default function CRAReportsPage() {
           ...(prev ?? []),
         ]);
         // Background reconcile so the authoritative state lands.
-        void reloadReports();
+        void reloadReports().finally(() => setPendingOp(report.id, null));
         void queryClient.invalidateQueries({ queryKey: subsKey, exact: true });
       } catch (err) {
-        // Revert only this report's state, then reconcile with the server.
-        queryClient.setQueryData<ReportPage>(key, (old) =>
-          withReportState(old, report.id, report.state),
-        );
+        // Drop only this report's overlay, then reconcile with the server.
+        setPendingOp(report.id, null);
         void reloadReports();
         handleError(err, t("recordSubmissionFailed"));
       } finally {
         setBusyReportId(null);
       }
     },
-    [reportsKey, queryClient, projectId, reloadReports, handleError, t],
+    [queryClient, projectId, reloadReports, setPendingOp, handleError, t],
   );
 
   // F4 carry-over: drop evidence-less reports from the visible queue,
