@@ -153,13 +153,17 @@ func startM48Server(t *testing.T, trustedProxies string) *m48Server {
 
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	deadline := time.Now().Add(90 * time.Second)
+	// A short per-attempt timeout: a listener that accepts and stalls (or a
+	// process that won the port after it was released) must not hang the
+	// loop past its deadline.
+	probe := &http.Client{Timeout: 2 * time.Second}
 	for {
 		select {
 		case <-done:
 			t.Fatalf("server exited during startup: %v\n%s", waitErr, out.String())
 		default:
 		}
-		resp, err := http.Get(base + "/api/v1/health")
+		resp, err := probe.Get(base + "/api/v1/health")
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {

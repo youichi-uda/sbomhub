@@ -288,3 +288,31 @@ func TestM51RateLimitRedisKeyNamesTheBudget(t *testing.T) {
 		}
 	}
 }
+
+// Codex R2 Low: INCR and EXPIRE were separate calls sharing one deadline, and
+// EXPIRE only ran when INCR returned 1. If EXPIRE was lost (deadline spent on
+// a slow INCR, a crash between the two), the bucket kept no TTL and nothing
+// ever repaired it. The charge is now one script that always re-asserts the
+// TTL, so a TTL-less bucket left by such a failure is repaired by the next
+// request. (The key name encodes the window bucket, so re-asserting the TTL
+// never extends a window — see failCharge.)
+func TestM51RateLimitBucketTTLSelfRepairs(t *testing.T) {
+	budgets := map[string]Budget{"/std": BudgetStandard}
+	h := newM51Harness(t, budgets)
+	ctx := context.Background()
+	key := rateLimitRedisKey(h.key, BudgetStandard, time.Now().UTC())
+	// The state a lost EXPIRE leaves behind: a counter with no TTL.
+	if err := h.rdb.Set(ctx, key, 1, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.get("/std"); r.status != http.StatusOK {
+		t.Fatalf("request: %s", r)
+	}
+	ttl, err := h.rdb.TTL(ctx, key).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ttl <= 0 || ttl > BudgetStandard.Window+2*time.Second {
+		t.Fatalf("bucket TTL = %v after a request, want (0, %v]", ttl, BudgetStandard.Window+time.Second)
+	}
+}

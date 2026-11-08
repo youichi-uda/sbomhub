@@ -253,3 +253,31 @@ func TestMigrateLock_WaitCoversConnectionAcquisition(t *testing.T) {
 		t.Fatal("Migrate blocked on an exhausted pool past its lock wait")
 	}
 }
+
+// Codex R2 Medium: a lock that only becomes free after the wait budget must
+// not be taken late — the budget is the acquisition deadline.
+func TestMigrateLock_NotAcquiredAfterDeadline(t *testing.T) {
+	dsn := scratchDB(t)
+	ctx := context.Background()
+	holder, err := openPool(t, dsn).Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if _, err := holder.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, MigrationLockKey); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		_, _ = holder.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, MigrationLockKey)
+	}()
+	fsys := fstest.MapFS{"001_x.up.sql": {Data: []byte(`CREATE TABLE late_created (id int);`)}}
+	start := time.Now()
+	err = MigrateWithOptions(ctx, openPool(t, dsn), fsys, MigrateOptions{LockWait: 60 * time.Millisecond})
+	if err == nil {
+		t.Fatalf("lock taken after the 60ms budget (returned after %v)", time.Since(start))
+	}
+	if el := time.Since(start); el > time.Second {
+		t.Fatalf("gave up after %v, want ~60ms", el)
+	}
+}

@@ -205,13 +205,14 @@ func RateLimitByAPIKey(rdb *redis.Client, budget Budget) echo.MiddlewareFunc {
 			// (500) like any other Redis error.
 			rctx, cancel := sbomredis.CommandContext(c.Request().Context())
 			defer cancel()
-			count, err := rdb.Incr(rctx, redisKey).Result()
+			//
+			// INCR and the expiry are one script (failCharge), so a lost
+			// EXPIRE cannot leave the bucket without a TTL; the TTL is set
+			// slightly longer than the window to handle edge cases (Codex R2
+			// Low).
+			count, err := failCharge.Run(rctx, rdb, []string{redisKey}, int((window + time.Second).Seconds())).Int64()
 			if err != nil {
 				return c.JSON(http.StatusInternalServerError, map[string]string{"error": "rate limit error"})
-			}
-			if count == 1 {
-				// Set expiry slightly longer than window to handle edge cases
-				_ = rdb.Expire(rctx, redisKey, window+time.Second).Err()
 			}
 			if count > int64(limit) {
 				c.Response().Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
@@ -558,7 +559,8 @@ func RateLimitPublicLink(rdb *redis.Client, perToken, perIP int, window time.Dur
 }
 
 // failCharge records one rejected attempt against a cumulative budget and
-// asserts the window TTL in the same round trip.
+// asserts the window TTL in the same round trip. RateLimitByAPIKey charges its
+// per-window bucket with the same script, for the same reason.
 //
 // Self-review after Codex round 1: the plain INCR-then-conditional-EXPIRE this
 // replaces had the same crash window as the lease did, with a worse

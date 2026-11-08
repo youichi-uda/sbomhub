@@ -5,7 +5,7 @@ package redis
 import (
 	"context"
 	"fmt"
-	"strings"
+	"net/url"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -68,11 +68,21 @@ func Options(redisURL string) (*redis.Options, error) {
 	// idempotent: a replay after Redis executed the command charged one
 	// request several times (Codex R1 Medium). Every caller already handles
 	// an error (fail closed, or cache miss). A max_retries in the URL is kept.
-	if opts.MaxRetries == 0 && !strings.Contains(redisURL, "max_retries=") {
+	if opts.MaxRetries == 0 && !urlSetsOption(redisURL, "max_retries") {
 		opts.MaxRetries = -1
 	}
 	opts.ContextTimeoutEnabled = true
 	return opts, nil
+}
+
+// urlSetsOption reports whether the URL's query has the exact key (a
+// substring elsewhere, e.g. inside another option's value, does not count).
+func urlSetsOption(redisURL, key string) bool {
+	u, err := url.Parse(redisURL)
+	if err != nil {
+		return false
+	}
+	return u.Query().Has(key)
 }
 
 // NewClient builds the client from Options and checks connectivity, giving up

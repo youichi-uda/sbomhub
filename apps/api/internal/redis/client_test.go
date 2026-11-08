@@ -135,26 +135,41 @@ func TestOptions_NoAutomaticRetries(t *testing.T) {
 						mu.Unlock()
 						return // "executed", reply lost: close without answering
 					}
+					if len(args) > 0 && strings.EqualFold(args[0], "CLIENT") {
+						_, _ = c.Write([]byte("+OK\r\n")) // CLIENT SETNAME / SETINFO
+						continue
+					}
 					_, _ = c.Write([]byte("-ERR unknown command\r\n"))
 				}
 			}(c)
 		}
 	}()
 
-	opts, err := Options("redis://" + ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := goredis.NewClient(opts)
-	defer c.Close()
-	ctx, cancel := CommandContext(context.Background())
-	defer cancel()
-	if err := c.Incr(ctx, "k").Err(); err == nil {
-		t.Fatal("INCR with a lost reply reported success")
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if incrs != 1 {
-		t.Fatalf("INCR reached the server %d times for one call, want 1 (no automatic retry)", incrs)
+	// The second URL carries "max_retries=" only inside another option's
+	// value (Codex R2 Medium): it must not count as an explicit setting.
+	for _, u := range []string{
+		"redis://" + ln.Addr().String(),
+		"redis://" + ln.Addr().String() + "?client_name=max_retries=",
+	} {
+		mu.Lock()
+		incrs = 0
+		mu.Unlock()
+		opts, err := Options(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := goredis.NewClient(opts)
+		ctx, cancel := CommandContext(context.Background())
+		if err := c.Incr(ctx, "k").Err(); err == nil {
+			t.Fatalf("%s: INCR with a lost reply reported success", u)
+		}
+		cancel()
+		_ = c.Close()
+		mu.Lock()
+		n := incrs
+		mu.Unlock()
+		if n != 1 {
+			t.Fatalf("%s: INCR reached the server %d times for one call, want 1 (no automatic retry)", u, n)
+		}
 	}
 }
