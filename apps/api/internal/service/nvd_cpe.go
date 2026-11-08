@@ -82,9 +82,20 @@ func parseCPE(s string) (cpeName, bool) {
 	lower := strings.ToLower(s)
 	switch {
 	case strings.HasPrefix(lower, "cpe:2.3:"):
-		fields = splitCPE23(s[len("cpe:2.3:"):])
+		// A formatted string has exactly 11 attributes and no dangling
+		// escape; a truncated one is not a CPE (Codex M60 R8 Medium) — as
+		// a criterion it would read as "every version".
+		var ok bool
+		fields, ok = splitCPE23(s[len("cpe:2.3:"):])
+		if !ok || len(fields) != 11 {
+			return cpeName{}, false
+		}
 	case strings.HasPrefix(lower, "cpe:/"):
-		for _, f := range strings.Split(s[len("cpe:/"):], ":") {
+		raw := strings.Split(s[len("cpe:/"):], ":")
+		if len(raw) < 3 || len(raw) > 7 { // part:vendor:product[:version[:update[:edition[:language]]]]
+			return cpeName{}, false
+		}
+		for _, f := range raw {
 			u, err := url.PathUnescape(f)
 			if err != nil {
 				return cpeName{}, false
@@ -111,8 +122,8 @@ func parseCPE(s string) (cpeName, bool) {
 }
 
 // splitCPE23 splits a CPE 2.3 formatted string body on unescaped colons and
-// removes the backslash escapes.
-func splitCPE23(s string) []string {
+// removes the backslash escapes. ok is false for a dangling escape.
+func splitCPE23(s string) ([]string, bool) {
 	var out []string
 	var b strings.Builder
 	esc := false
@@ -130,7 +141,10 @@ func splitCPE23(s string) []string {
 			b.WriteRune(r)
 		}
 	}
-	return append(out, b.String())
+	if esc {
+		return nil, false
+	}
+	return append(out, b.String()), true
 }
 
 // cpeConcrete is false for the logical values ANY ("*") and NA ("-") and for
@@ -495,7 +509,9 @@ func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
 type versionToken struct {
 	num   bool
 	value string
-	// dashNum: a number whose preceding separator was "-" (see above).
+	// dash: the token's preceding separator was "-". dashNum: a number so
+	// preceded (see above).
+	dash    bool
 	dashNum bool
 }
 
@@ -523,6 +539,18 @@ const (
 )
 
 func tokenKindAt(toks []versionToken, i int) tokenKind {
+	k := tokenKindIgnoringDash(toks, i)
+	// Letters directly after '-' are a pre-release in SemVer whatever they
+	// say; other schemes agree only when they are a pre-release word too
+	// ("2.0-beta9"). "-final", "-k", ... are read differently by different
+	// schemes, so they are unknown (Codex M60 R8 High).
+	if t := toks[i]; !t.num && t.dash && k != kindPre {
+		return kindUnknown
+	}
+	return k
+}
+
+func tokenKindIgnoringDash(toks []versionToken, i int) tokenKind {
 	t := toks[i]
 	if t.num {
 		return kindNum
@@ -556,7 +584,7 @@ func tokeniseVersion(v string) []versionToken {
 	var sep rune // separator seen since the last token
 	flush := func() {
 		if cur.Len() > 0 {
-			out = append(out, versionToken{num: curNum, value: cur.String(), dashNum: curNum && sep == '-'})
+			out = append(out, versionToken{num: curNum, value: cur.String(), dash: sep == '-', dashNum: curNum && sep == '-'})
 			cur.Reset()
 			sep = 0
 		}
@@ -576,11 +604,13 @@ func tokeniseVersion(v string) []versionToken {
 		cur.WriteRune(r)
 	}
 	flush()
-	// Drop release markers, but only bare ones: "final2" is not "final".
+	// Drop release markers, but only bare ones ("final2" is not "final")
+	// and only after '.', where every scheme reads them as the release:
+	// SemVer reads "-final" as a pre-release (Codex M60 R8 High).
 	kept := out[:0]
 	for i, t := range out {
 		numberFollows := i+1 < len(out) && out[i+1].num
-		if !t.num && releaseMarkers[t.value] && !numberFollows {
+		if !t.num && !t.dash && releaseMarkers[t.value] && !numberFollows {
 			continue
 		}
 		kept = append(kept, t)

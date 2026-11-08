@@ -133,7 +133,8 @@ func vulnListOrderBy(sortBy string) string {
 // bestMatchMethodJoin joins, for every vulnerability linked from SBOM $1, the
 // strongest match_method among that SBOM's links to it (M60). The CASE
 // mirrors model.MatchMethod.Rank; NULL (a pre-M60 link) ranks lowest and is
-// the result only when every link is NULL.
+// the result only when every link is NULL. Equal ranks are broken by the
+// method name so the label does not depend on row order (Codex M60 R8 Low).
 //
 // It is an aggregate computed ONCE per query and LEFT JOINed, not a
 // correlated subquery (Codex M60 R3 Medium). Measured 2026-11-08 on
@@ -161,7 +162,7 @@ const bestMatchMethodJoin = `
 			            WHEN 'nvd_keyword' THEN 1
 			            WHEN 'jvn_keyword' THEN 1
 			            WHEN 'cve_sync_keyword' THEN 1
-			            ELSE 0 END DESC))[1] AS match_method
+			            ELSE 0 END DESC, bm.match_method))[1] AS match_method
 			FROM component_vulnerabilities bm
 			JOIN components bc ON bc.id = bm.component_id
 			WHERE bc.sbom_id = $1

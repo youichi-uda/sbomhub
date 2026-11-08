@@ -352,3 +352,48 @@ func TestM60LinkComponent_DatabaseAcceptsEveryGoMethod(t *testing.T) {
 		}
 	}
 }
+
+// Codex M60 R8 Low: when an SBOM's links to one CVE carry different methods
+// of EQUAL rank, the projected label must not depend on row order.
+func TestM60VulnList_EqualRankTieIsDeterministic(t *testing.T) {
+	appURL, migURL := rlsTestEnv(t)
+	appDB := openOrSkip(t, appURL)
+	migDB := openOrSkip(t, migURL)
+
+	tenantID, compA := m54SeedComponentForLink(t, migDB)
+	v := m57ScannerVuln(t, migDB, m55MetaCVEID())
+	repo := NewVulnerabilityRepository(appDB)
+	if err := repo.Create(context.Background(), v); err != nil {
+		t.Fatal(err)
+	}
+	tx, ctx, commit := m57OpenTenantTx(t, appDB, tenantID)
+	var sbomID uuid.UUID
+	if err := tx.QueryRow(`SELECT sbom_id FROM components WHERE id = $1`, compA).Scan(&sbomID); err != nil {
+		t.Fatal(err)
+	}
+	compB := uuid.New()
+	if _, err := tx.Exec(`INSERT INTO components (id, tenant_id, sbom_id, name, version, type, created_at)
+		VALUES ($1, $2, $3, 'm60tie', '1', 'library', NOW())`, compB, tenantID, sbomID); err != nil {
+		t.Fatal(err)
+	}
+	// Insert in both orders across two CVE rows would need two CVEs; one
+	// order is enough to pin the rule: the alphabetically first method wins.
+	if err := repo.LinkComponent(ctx, compA, v.ID, model.MatchNVDKeyword); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.LinkComponent(ctx, compB, v.ID, model.MatchJVNKeyword); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		vs, err := NewComponentRepository(appDB).GetVulnerabilitiesPaginated(ctx, sbomID, 10, 0, "cvss")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(vs) != 1 || vs[0].MatchMethod != "jvn_keyword" || vs[0].MatchConfidence != "low" {
+			t.Fatalf("projection = %+v, want jvn_keyword/low (equal rank, name order)", vs)
+		}
+	}
+	if err := commit(); err != nil {
+		t.Fatal(err)
+	}
+}
