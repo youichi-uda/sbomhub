@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -161,16 +162,26 @@ func TestAccessLog_PublicLinkTokenRedacted(t *testing.T) {
 		{"encoded letters", "/%2561pi/v1/public/" + tok, "[REDACTED]", "", 404},
 		{"deeply encoded", "/api/v1/" + deepEncode("public/", 12) + tok, "[REDACTED]", "", 404},
 		{"encoded past the decode budget", "/api/v1/" + deepEncode("public/", 20) + tok, "[REDACTED]", "", 404},
+		// Codex R4 High: dot / empty segments hide the prefix from a literal
+		// search; the canonical form must be checked too.
+		{"dot segment", "/api/./v1/public/" + tok, "[REDACTED]", "", 404},
+		{"empty segment", "/api//v1/public/" + tok, "[REDACTED]", "", 404},
+		{"dot-dot segment", "/api/v1/x/../public/" + tok, "[REDACTED]", "", 404},
+		{"encoded dot segment", "/api/%2E/v1/public/" + tok, "[REDACTED]", "", 404},
+		{"double-encoded dot segment", "/api/%252E/v1/public/" + tok, "[REDACTED]", "", 404},
+		{"backslash separators", "/api\\v1\\public\\" + tok, "[REDACTED]", "", 404},
 		{"no separator after prefix", "/api/v1/public" + tok, "/api/v1/public[REDACTED]", "", 404},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e, buf, _ := accessLogServer(t)
 			got, rec := serveAndDecode(t, e, buf, httptest.NewRequest(http.MethodGet, tc.target, nil))
-			// Any 8-byte piece of the token counts as a leak (a shifted
-			// cut can leak a partial token).
-			if strings.Contains(buf.String(), tok[:8]) {
-				t.Fatalf("public-link token leaked: %s", buf.String())
+			// Any 8-byte window of the token counts as a leak (a shifted
+			// cut can leak a partial token from either end).
+			for i := 0; i+8 <= len(tok); i++ {
+				if strings.Contains(buf.String(), tok[i:i+8]) {
+					t.Fatalf("public-link token fragment %q leaked: %s", tok[i:i+8], buf.String())
+				}
 			}
 			if tc.wantURI != "" && got["uri"] != tc.wantURI {
 				t.Errorf("uri = %v, want %v", got["uri"], tc.wantURI)
@@ -297,5 +308,26 @@ func TestAccessLog_NonSecretPathsUntouched(t *testing.T) {
 	}
 	if got := redactSecretPrefixes("/x/" + deepEncode("a", 20)); got != accessLogRedacted {
 		t.Errorf("a path still decodable past the budget = %q, want fully redacted (fail closed)", got)
+	}
+}
+
+// Codex R4 High: the error text can carry credentials (an outbound
+// *url.Error with ?apiKey=, a Bearer token, a DSN password); it is scrubbed
+// with internal/redact before it reaches the access log.
+func TestAccessLog_ErrorFieldIsRedacted(t *testing.T) {
+	e, buf, _ := accessLogServer(t)
+	e.GET("/leaky", func(c echo.Context) error {
+		inner := &url.Error{Op: "Get", URL: "https://example.backlog.com/api/v2/issues/1?apiKey=APIKEYSECRET123", Err: errors.New("connection refused")}
+		return echo.NewHTTPError(http.StatusInternalServerError,
+			"sync failed: "+inner.Error()+"; Authorization: Bearer BEARERSECRET.abc123; postgres://u:DSNPASSWORD99@db:5432/x")
+	})
+	got, _ := serveAndDecode(t, e, buf, httptest.NewRequest(http.MethodGet, "/leaky", nil))
+	for _, secret := range []string{"APIKEYSECRET123", "BEARERSECRET", "DSNPASSWORD99"} {
+		if strings.Contains(buf.String(), secret) {
+			t.Errorf("secret %q reached the access log: %s", secret, buf.String())
+		}
+	}
+	if s, _ := got["error"].(string); !strings.Contains(s, "sync failed") {
+		t.Errorf("error field lost its non-secret text: %q", s)
 	}
 }

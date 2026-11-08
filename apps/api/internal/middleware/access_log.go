@@ -3,11 +3,14 @@ package middleware
 import (
 	"context"
 	"log/slog"
+	"path"
 	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
 	echomw "github.com/labstack/echo/v4/middleware"
+
+	"github.com/sbomhub/sbomhub/internal/redact"
 )
 
 // AccessLog is the HTTP access log: one slog record per request, replacing
@@ -35,6 +38,9 @@ import (
 //     everything after accessLogSecretPrefixes. middleware.Logger logged the
 //     public-link token in clear.
 //   - `route` (the matched route template, e.g. /api/v1/projects/:id) is new.
+//   - `error` is scrubbed with internal/redact (query-string credentials,
+//     Bearer tokens, Authorization headers, DSN passwords); middleware.Logger
+//     logged it verbatim.
 //   - 5xx responses are logged at ERROR, everything else at INFO.
 //
 // Error handling matches middleware.Logger exactly: a handler error is passed
@@ -89,7 +95,11 @@ func AccessLog(logger *slog.Logger) echo.MiddlewareFunc {
 				attrs = append(attrs, slog.String("request_id", v.RequestID))
 			}
 			if v.Error != nil {
-				attrs = append(attrs, slog.String("error", v.Error.Error()))
+				// Error text can carry credentials (an outbound *url.Error
+				// with ?apiKey=, a Bearer token, a DSN password); scrub it
+				// with the same pattern set the audit log uses. redact.String
+				// works on a copy — redact.Error would mutate the chain.
+				attrs = append(attrs, slog.String("error", redact.String(v.Error.Error())))
 			}
 			level := slog.LevelInfo
 			if v.Status >= 500 {
@@ -182,18 +192,37 @@ func redactSecretPrefixes(p string) string {
 	}
 	d := p
 	for n := 0; ; n++ {
+		// A canonical-equivalent spelling ("/api/./v1", "/api//v1",
+		// "/x/../public", backslashes) hides the prefix from the literal
+		// search above; check the cleaned form of every layer.
+		if hasSecretRemainder(canonicalPath(d)) {
+			return accessLogRedacted
+		}
 		u := lenientPercentDecode(d)
 		if u == d {
-			return p // fully decoded and no prefix anywhere: nothing secret
+			return p // fully decoded and no prefix in any form: nothing secret
 		}
 		if n == accessLogMaxDecodeLayers {
 			return accessLogRedacted // still decodable past the budget
 		}
 		d = u
-		if _, ok := indexSecretPrefix(d); ok {
+		if hasSecretRemainder(d) {
 			return accessLogRedacted
 		}
 	}
+}
+
+// canonicalPath treats "\\" as a separator and resolves ".", ".." and empty
+// segments, so equivalent spellings of a prefix compare equal.
+func canonicalPath(p string) string {
+	return path.Clean("/" + strings.ReplaceAll(p, "\\", "/"))
+}
+
+// hasSecretRemainder reports whether p contains a secret prefix followed by
+// anything at all.
+func hasSecretRemainder(p string) bool {
+	i, ok := indexSecretPrefix(p)
+	return ok && i < len(p)
 }
 
 // accessLogMaxDecodeLayers bounds the decode loop (each layer is O(len)). A
