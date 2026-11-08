@@ -201,7 +201,7 @@ test.describe("METI Self-Assessment (M3-5)", () => {
     // "(optional)" and the test left it blank, but PUT /override requires
     // a 1..4096-char note, so the save 400'd, the card never flipped and
     // the `count() === 0 → skip` guard hid it. The operator flow with a
-    // reason is tested here; the blank-note path is the fixme'd bug below.
+    // reason is tested here; the blank-note path is the required-reason test below.
     test("should apply a manual override and surface override badge", async ({ page, request }) => {
         const projectId = await newProject(request);
         const target = rowNotIn(await refresh(request, projectId), "not_applicable");
@@ -231,24 +231,50 @@ test.describe("METI Self-Assessment (M3-5)", () => {
         expect(persisted?.override_note).toBe(note);
     });
 
-    test("should save an override whose optional reason is left blank", async ({ page, request }) => {
-        test.fixme(
-            true,
-            'BUG: the override form labels the note "Override reason (optional)" and its zod schema allows blank, but PUT /meti/assessment/:criterion/override answers 400 "override_note is required" — the save always fails with "Manual override failed"',
-        );
+    // M65 bug 4: the form used to label the reason "(optional)" and accept
+    // blank, while PUT /override answers 400 "override_note is required", so
+    // a blank save always failed with "Manual override failed". The API is
+    // right (F34, auditor review): the form now requires the reason and
+    // never sends the PUT without one.
+    test("should require an override reason before saving", async ({ page, request }) => {
         const projectId = await newProject(request);
         const target = rowNotIn(await refresh(request, projectId), "not_applicable");
 
         await page.goto(`/en/projects/${projectId}/meti`);
         const c = card(page, target.criterion_id);
+        await expect(c).toHaveAttribute("data-overridden", "false", { timeout: 10000 });
         await c.getByTestId("meti-override-trigger").click();
         await c.getByTestId("meti-override-status-select").selectOption("not_applicable");
-        await c.getByTestId("meti-override-submit").click();
+        const note = c.getByLabel(tCard.overrideFormNoteLabel);
+        await expect(note).toHaveAttribute("aria-required", "true");
 
-        await expect(c).toHaveAttribute("data-overridden", "true", { timeout: 10000 });
+        let puts = 0;
+        page.on("request", (r) => {
+            if (r.method() === "PUT" && new URL(r.url()).pathname.endsWith("/override")) puts += 1;
+        });
+        // Blank, then whitespace-only: rejected in the form, nothing sent.
+        for (const value of ["", "   "]) {
+            await note.fill(value);
+            await c.getByTestId("meti-override-submit").click();
+            await expect(c.getByText(tCard.overrideValidationNote, { exact: true })).toBeVisible();
+            await expect(note).toHaveAttribute("aria-invalid", "true");
+            await expect(c.getByTestId("meti-override-form")).toBeVisible();
+        }
         await expect(page.getByTestId("meti-flash-errors")).toHaveCount(0);
+        await expect(c).toHaveAttribute("data-overridden", "false");
+
+        // With a reason (padded), the save goes through and stores it trimmed.
+        const saved = page.waitForResponse(
+            (r) => r.request().method() === "PUT" && new URL(r.url()).pathname.endsWith("/override"),
+        );
+        await note.fill("  vendor attestation reviewed  ");
+        await c.getByTestId("meti-override-submit").click();
+        expect((await saved).status()).toBe(200);
+        expect(puts).toBe(1);
+        await expect(c).toHaveAttribute("data-overridden", "true", { timeout: 10000 });
         const persisted = (await listRows(request, projectId)).find((r) => r.criterion_id === target.criterion_id);
         expect(persisted?.override_status).toBe("not_applicable");
+        expect(persisted?.override_note).toBe("vendor attestation reviewed");
     });
 
     test("should toggle improvement-actions-only filter", async ({ page, request }) => {

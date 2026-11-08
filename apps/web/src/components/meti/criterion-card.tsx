@@ -515,7 +515,8 @@ export function CriterionCard({
                   : values.improvement_action;
               await onOverride(assessment, {
                 override_status: values.override_status,
-                override_note: values.override_note || undefined,
+                // Required and trimmed by criterionOverrideSchema (M65 bug 4).
+                override_note: values.override_note,
                 improvement_action: improvement,
               });
               setMode("view");
@@ -656,6 +657,8 @@ function OverrideForm({
           {...register("override_note")}
           disabled={disabled || isSubmitting}
           placeholder={t("overrideFormNotePlaceholder")}
+          aria-required="true"
+          aria-invalid={errors.override_note ? "true" : "false"}
         />
         {errors.override_note && (
           <p className="mt-1 text-xs text-red-600">

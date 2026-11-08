@@ -186,6 +186,34 @@ describe("meti: override form", () => {
       ],
     );
   });
+  // M65 bug 4: the API requires a non-blank reason (400 "override_note is
+  // required" after trim), so the form does too.
+  test("blank / whitespace-only reason rejected; reason is trimmed", () => {
+    for (const override_note of ["", "   ", "\n\t "]) {
+      assert.deepEqual(
+        issuesOf(criterionOverrideSchema, {
+          override_status: "achieved",
+          override_note,
+          improvement_action: "",
+        }),
+        [["override_note", "override_note is required"]],
+      );
+    }
+    assert.equal(
+      accept(criterionOverrideSchema, {
+        override_status: "achieved",
+        override_note: "  vendor attestation  ",
+        improvement_action: "",
+      }).override_note,
+      "vendor attestation",
+    );
+    // The 2000 cap counts the trimmed reason.
+    accept(criterionOverrideSchema, {
+      override_status: "achieved",
+      override_note: ` ${"n".repeat(2000)} `,
+      improvement_action: "",
+    });
+  });
 });
 
 describe("meti: clear-override form (trim then 1..4096)", () => {
@@ -484,6 +512,15 @@ describe("zodResolver contract", () => {
     assert.deepEqual((await resolve(criterionClearOverrideSchema, { note: "  " })).messages, {
       note: "note must be 1..4096 characters after trim",
     });
+  });
+  test("meti override: blank reason is flagged, so the PUT is never sent", async () => {
+    const { values, messages } = await resolve(criterionOverrideSchema, {
+      override_status: "not_applicable",
+      override_note: "  ",
+      improvement_action: "",
+    });
+    assert.deepEqual(values, {});
+    assert.deepEqual(messages, { override_note: "override_note is required" });
   });
   test("meti override: status + note flagged", async () => {
     const { messages } = await resolve(criterionOverrideSchema, {

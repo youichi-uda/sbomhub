@@ -12,10 +12,21 @@ const OVERRIDE_STATUSES = [
   "not_applicable",
 ] as const;
 
-/** zod schema for the override form. Mirrors handler.metiOverrideRequest. */
+/**
+ * zod schema for the override form. Mirrors handler.metiOverrideRequest,
+ * which requires a non-blank override_note (F34: 400 "override_note is
+ * required", checked after trim, 1..4096). The form used to label the
+ * reason "optional" and accept blank, so every blank save 400'd (M65 bug 4).
+ * Trimmed like the clear-override note; the 2000 cap is the UI's own,
+ * tighter than the server's 4096.
+ */
 export const criterionOverrideSchema = z.object({
   override_status: z.enum(OVERRIDE_STATUSES, enumError(OVERRIDE_STATUSES)),
-  override_note: z.string(stringError).max(2000, maxChars(2000)),
+  override_note: z
+    .string(stringError)
+    .trim()
+    .min(1, { error: "override_note is required" })
+    .max(2000, maxChars(2000)),
   improvement_action: z.string(stringError).max(2000, maxChars(2000)),
 });
 
