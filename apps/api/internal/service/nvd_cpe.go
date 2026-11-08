@@ -842,7 +842,9 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 			// An answer in which the product only ever appears as a
 			// vulnerable=false platform says nothing about the product's own
 			// CVEs (Codex M60 R17 High): step 2 decides instead.
-			if out.productEvidence > 0 || res.truncated {
+			// But anything the answer KEEPS (an unverifiable record) is
+			// returned, not discarded by the fall-through (Codex M60 R20).
+			if out.productEvidence > 0 || len(out.vulns) > 0 || res.truncated {
 				out.requests = spent
 				if !out.uncacheable {
 					s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
@@ -881,7 +883,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 			"cannot tell whether NVD knows it", c.productQuery())
 	}
 	out := s.verifyCPEAnswer(res, c, method)
-	if out.productEvidence == 0 && !res.truncated {
+	if out.productEvidence == 0 && len(out.vulns) == 0 && !res.truncated {
 		// NVD names this product only as a vulnerable=false platform: no CVE
 		// is configured FOR it, which is "unknown product" for our purpose —
 		// a wrong early Syft guess must not end the candidate walk with a
