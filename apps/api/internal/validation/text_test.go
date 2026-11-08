@@ -26,6 +26,16 @@ func TestCheckJSONText(t *testing.T) {
 		{"invalid utf8", "{\"name\":\"a\xffb\"}", false},
 		{"truncated utf8", "{\"name\":\"\xe3\x81\"}", false},
 		{"utf8-encoded surrogate", "{\"name\":\"\xed\xa0\x80\"}", false},
+		{"surrogate pair escape", `{"name":"\ud83d\ude80"}`, true},
+		{"surrogate pair escape upper hex", `{"name":"\uD83D\uDE80"}`, true},
+		{"escaped backslash then ud800 text", `{"name":"\\ud800"}`, true},
+		{"lone high surrogate", `{"x":"\ud800"}`, false},
+		{"lone high surrogate at end", `{"x":"a\uD800"}`, false},
+		{"high surrogate then non-escape", `{"x":"\ud800x"}`, false},
+		{"high surrogate then high", `{"x":"\ud800\ud800"}`, false},
+		{"lone low surrogate", `{"x":"\udc00"}`, false},
+		{"high then escaped-backslash u", `{"x":"\ud800\\udc00"}`, false},
+		{"truncated escape", `{"x":"\ud8"}`, true}, // syntax error: left to the decoder
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

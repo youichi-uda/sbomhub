@@ -572,7 +572,7 @@ func (h *MetiHandler) OverrideAssessment(c echo.Context) error {
 			"tenant_id", tc.TenantID(),
 			"project_id", projectID,
 			"criterion_id", criterionID,
-			"raw_note_len", len(req.OverrideNote),
+			"raw_note_len", utf8.RuneCountInString(req.OverrideNote),
 		)
 		return c.JSON(status, body)
 	}
@@ -673,7 +673,7 @@ func (h *MetiHandler) OverrideAssessment(c echo.Context) error {
 		// so an auditor can spot one-character / boilerplate notes
 		// without us persisting the raw text in audit_logs.details
 		// (the full note already lives in meti_assessments.override_note).
-		"override_note_len": len(req.OverrideNote),
+		"override_note_len": utf8.RuneCountInString(req.OverrideNote), // characters, like the limit
 	}
 	if err := h.audit.Log(c.Request().Context(), &model.CreateAuditLogInput{
 		TenantID:     &tenantID,
@@ -794,7 +794,7 @@ func (h *MetiHandler) ClearOverride(c echo.Context) error {
 			"tenant_id", tc.TenantID(),
 			"project_id", projectID,
 			"criterion_id", criterionID,
-			"raw_note_len", len(req.Note),
+			"raw_note_len", utf8.RuneCountInString(req.Note),
 		)
 		return c.JSON(status, body)
 	}
@@ -877,7 +877,7 @@ func (h *MetiHandler) ClearOverride(c echo.Context) error {
 		"prior_status":          prior.Status,
 		"prior_override_status": priorOverrideStatus,
 		"prior_override_by":     priorOverrideBy,
-		"clear_note_len":        len(cleanedNote),
+		"clear_note_len":        utf8.RuneCountInString(cleanedNote), // characters, like the limit
 	}
 	if err := h.audit.Log(c.Request().Context(), &model.CreateAuditLogInput{
 		TenantID:     &tenantID,

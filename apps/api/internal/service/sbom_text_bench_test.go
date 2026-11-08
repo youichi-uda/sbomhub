@@ -74,3 +74,51 @@ func BenchmarkSBOM10k_DetectAndParse(b *testing.B) {
 		}
 	}
 }
+
+// asciiEscaped rewrites every non-ASCII character as \uXXXX (surrogate pairs
+// above the BMP), as Python's json.dumps(ensure_ascii=True) does by default:
+// the worst case for the escape walk in checkSBOMText.
+func asciiEscaped(b []byte) []byte {
+	out := make([]byte, 0, len(b)*2)
+	for _, r := range string(b) {
+		switch {
+		case r < 0x80:
+			out = append(out, byte(r))
+		case r > 0xFFFF:
+			r -= 0x10000
+			out = fmt.Appendf(out, `\u%04x\u%04x`, 0xD800+(r>>10), 0xDC00+(r&0x3FF))
+		default:
+			out = fmt.Appendf(out, `\u%04x`, r)
+		}
+	}
+	return out
+}
+
+func BenchmarkSBOM10k_TextCheck_ASCIIEscaped(b *testing.B) {
+	data := asciiEscaped(cdx10k(b, 10000))
+	if err := checkSBOMText(data); err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for b.Loop() {
+		if err := checkSBOMText(data); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkSBOM10k_DetectAndParse_ASCIIEscaped(b *testing.B) {
+	data := asciiEscaped(cdx10k(b, 10000))
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for b.Loop() {
+		info, err := detectFormatAndVersion(data)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := parseComponents(data, info.Format, info.Version); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

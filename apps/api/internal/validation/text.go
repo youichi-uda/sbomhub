@@ -28,15 +28,15 @@ func textErrorf(format string, args ...any) error {
 	return &textError{msg: fmt.Sprintf(format, args...)}
 }
 
-// nulEscape is the only JSON spelling of U+0000 inside a string: the escape
-// letter must be a lower-case 'u' (RFC 8259 §7) and every hex digit is '0',
-// so there is no case variant to look for.
-var nulEscape = []byte(`\u0000`)
+// uEscape starts every JSON \uXXXX escape; the escape letter must be a
+// lower-case 'u' (RFC 8259 §7), so there is no case variant to look for.
+var uEscape = []byte(`\u`)
 
 // CheckJSONText reports whether a JSON document would decode to text that
 // PostgreSQL can store and that equals what the client sent: the bytes must be
 // valid UTF-8, and the document must not contain U+0000, either as a raw byte
-// or as the escape \u0000.
+// or as the escape \u0000, nor a \uXXXX escape of an unpaired UTF-16
+// surrogate (see checkUnicodeEscapes).
 //
 // It does not validate JSON syntax (the decoder does that next) and it is
 // deliberately not a tokenizer: a `\u0000` is counted only when the backslash
@@ -49,7 +49,7 @@ var nulEscape = []byte(`\u0000`)
 // "contains a NUL character ..."); callers prefix what was checked.
 //
 // Cost: one utf8.Valid pass plus a bytes.Index search, both linear and
-// allocation-free; the escape-run walk only runs at each `\u0000` candidate.
+// allocation-free; the escape walk only runs at each `\u` occurrence.
 func CheckJSONText(b []byte) error {
 	if !utf8.Valid(b) {
 		return textErrorf("not valid UTF-8 (first invalid byte at offset %d)", firstInvalidUTF8(b))
@@ -57,21 +57,79 @@ func CheckJSONText(b []byte) error {
 	if i := bytes.IndexByte(b, 0); i >= 0 {
 		return textErrorf("contains a NUL byte at offset %d; NUL is not allowed in text", i)
 	}
+	return checkUnicodeEscapes(b)
+}
+
+// checkUnicodeEscapes walks every \uXXXX escape whose backslash is itself
+// unescaped (an odd run of backslashes) and refuses the two escapes that
+// decode to something PostgreSQL will not take: \u0000, and a UTF-16
+// surrogate that is not part of a high+low pair. encoding/json silently
+// turns a lone surrogate into U+FFFD, but the SBOM routes store the original
+// bytes in a jsonb column, which refuses it ("Unicode low surrogate must
+// follow a high surrogate"), and everywhere else the client's text would be
+// stored as something it did not send.
+//
+// A malformed escape (fewer than four hex digits) is left to the decoder,
+// which reports the syntax error.
+func checkUnicodeEscapes(b []byte) error {
 	for off := 0; ; {
-		i := bytes.Index(b[off:], nulEscape)
+		i := bytes.Index(b[off:], uEscape)
 		if i < 0 {
 			return nil
 		}
 		i += off
-		run := 0
-		for j := i; j >= 0 && b[j] == '\\'; j-- {
-			run++
-		}
-		if run%2 == 1 {
-			return textErrorf(`contains a NUL character (\u0000) at offset %d; NUL is not allowed in text`, i)
-		}
 		off = i + 1
+		if !unescapedBackslash(b, i) {
+			continue
+		}
+		cp, ok := hex4(b, i+2)
+		if !ok {
+			continue
+		}
+		switch {
+		case cp == 0:
+			return textErrorf(`contains a NUL character (\u0000) at offset %d; NUL is not allowed in text`, i)
+		case cp >= 0xDC00 && cp <= 0xDFFF:
+			return textErrorf(`contains an unpaired UTF-16 surrogate escape (\u%04x) at offset %d`, cp, i)
+		case cp >= 0xD800 && cp <= 0xDBFF:
+			lo, ok := hex4(b, i+8)
+			if i+7 >= len(b) || b[i+6] != '\\' || b[i+7] != 'u' || !ok || lo < 0xDC00 || lo > 0xDFFF {
+				return textErrorf(`contains an unpaired UTF-16 surrogate escape (\u%04x) at offset %d`, cp, i)
+			}
+			off = i + 12 // the pair is consumed; its low half is not a lone surrogate
+		}
 	}
+}
+
+// unescapedBackslash reports whether the backslash at b[i] starts an escape,
+// i.e. the run of backslashes ending at i has odd length.
+func unescapedBackslash(b []byte, i int) bool {
+	run := 0
+	for j := i; j >= 0 && b[j] == '\\'; j-- {
+		run++
+	}
+	return run%2 == 1
+}
+
+// hex4 decodes the four hex digits at b[at:at+4].
+func hex4(b []byte, at int) (rune, bool) {
+	if at < 0 || at+4 > len(b) {
+		return 0, false
+	}
+	var r rune
+	for _, c := range b[at : at+4] {
+		switch {
+		case c >= '0' && c <= '9':
+			r = r<<4 | rune(c-'0')
+		case c >= 'a' && c <= 'f':
+			r = r<<4 | rune(c-'a'+10)
+		case c >= 'A' && c <= 'F':
+			r = r<<4 | rune(c-'A'+10)
+		default:
+			return 0, false
+		}
+	}
+	return r, true
 }
 
 func firstInvalidUTF8(b []byte) int {

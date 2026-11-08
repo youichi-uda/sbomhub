@@ -123,7 +123,6 @@ func TestProjectCreate_AcceptsBoundaryValues(t *testing.T) {
 		"1000-char multiline desc":   mustJSON(t, map[string]string{"name": "ok", "description": strings.Repeat("ab\n", 333) + "x"}),
 		"escaped backslash + u0000":  `{"name":"C:\\u0000dir"}`,
 		"emoji and Japanese":         mustJSON(t, map[string]string{"name": "🚀 プロジェクト"}),
-		"lone surrogate escape kept": `{"name":"a\ud800b"}`,
 		"form feed in description":   `{"name":"ok","description":"page1\u000cpage2"}`,
 		"escape char in description": `{"name":"ok","description":"\u001b[1mbold"}`,
 	}

@@ -103,8 +103,9 @@ func TestTextGuardBinder_KeepsBodyLimit413(t *testing.T) {
 // touches no repository.
 func TestSBOMHandler_Upload_NULOrInvalidUTF8Is400(t *testing.T) {
 	for name, body := range map[string]string{
-		"nul escape in component name": `{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"name":"lib\u0000x","version":"1"}]}`,
-		"invalid utf8":                 "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.5\",\"components\":[{\"name\":\"lib\xff\"}]}",
+		"nul escape in component name":      `{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"name":"lib\u0000x","version":"1"}]}`,
+		"invalid utf8":                      "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.5\",\"components\":[{\"name\":\"lib\xff\"}]}",
+		"lone surrogate (jsonb refuses it)": `{"bomFormat":"CycloneDX","specVersion":"1.5","components":[],"x":"\ud800"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
