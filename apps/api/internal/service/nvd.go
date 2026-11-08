@@ -1508,6 +1508,15 @@ var nvdTimestampLayouts = []string{
 	"2006-01-02T15:04:05",
 }
 
+// ParseNVDTimestamp is parseNVDTimestamp for the other reader of the NVD feed,
+// scheduler.CVESyncJob (M57). It parsed `published` / `lastModified` with
+// time.RFC3339 alone — the bug M54 fixed here — so on NVD's real zoneless
+// timestamps every record it fetched was undateable and its metadata refresh
+// refused all of them. One parser for one wire format.
+func ParseNVDTimestamp(v string) *time.Time {
+	return parseNVDTimestamp(v)
+}
+
 // parseNVDTimestamp returns nil when the value is absent or in none of the
 // known shapes. nil is meaningful here — model.Vulnerability.PublishedAt is a
 // pointer precisely so "unknown" is representable rather than being flattened

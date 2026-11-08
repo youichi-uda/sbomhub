@@ -20,6 +20,7 @@ import (
 	"github.com/sbomhub/sbomhub/internal/client"
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/service"
 	"github.com/sbomhub/sbomhub/internal/service/advisory"
 )
 
@@ -669,12 +670,19 @@ func (j *CVESyncJob) fetchModifiedCVEs(ctx context.Context, since time.Time) ([]
 			// Extract CVSS score and severity
 			cve.CVSSScore, cve.Severity = extractCVSSFromMetrics(v.CVE.Metrics)
 
-			// Parse dates
-			if t, err := time.Parse(time.RFC3339, v.CVE.Published); err == nil {
-				cve.PublishedAt = t
+			// Parse dates. NVD sends them WITHOUT an offset
+			// ("2026-08-11T19:33:44.513", measured live 2026-11-08), which
+			// time.RFC3339 — what this used until M57 — rejects; the error was
+			// discarded, so every record was undateable and the metadata
+			// refresh refused all of them. service.ParseNVDTimestamp is the
+			// scanner's parser (M54) and reads the zoneless forms as UTC, as
+			// NVD documents them. Unparseable still yields the zero time,
+			// which the callers treat as "unknown".
+			if t := service.ParseNVDTimestamp(v.CVE.Published); t != nil {
+				cve.PublishedAt = *t
 			}
-			if t, err := time.Parse(time.RFC3339, v.CVE.LastModified); err == nil {
-				cve.ModifiedAt = t
+			if t := service.ParseNVDTimestamp(v.CVE.LastModified); t != nil {
+				cve.ModifiedAt = *t
 			}
 
 			// Extract keywords from CPE for matching
