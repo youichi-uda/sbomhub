@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -62,9 +63,13 @@ func AccessLog(logger *slog.Logger) echo.MiddlewareFunc {
 		// LogURI is deliberately off (it is RequestURI, query included);
 		// the path is derived below from c.Request().URL.Path.
 		LogValuesFunc: func(c echo.Context, v echomw.RequestLoggerValues) error {
-			bytesIn := v.ContentLength
-			if bytesIn == "" {
-				bytesIn = "0"
+			// bytes_in stays a JSON number like middleware.Logger's. The
+			// header is client-controlled: an absent or unparsable value is
+			// logged as 0 (the old template wrote it raw, so "abc" produced
+			// an invalid JSON line).
+			bytesIn, err := strconv.ParseInt(v.ContentLength, 10, 64)
+			if err != nil || bytesIn < 0 {
+				bytesIn = 0
 			}
 			attrs := make([]slog.Attr, 0, 14)
 			attrs = append(attrs,
@@ -77,7 +82,7 @@ func AccessLog(logger *slog.Logger) echo.MiddlewareFunc {
 				slog.String("remote_ip", v.RemoteIP),
 				slog.String("host", v.Host),
 				slog.String("user_agent", v.UserAgent),
-				slog.String("bytes_in", bytesIn),
+				slog.Int64("bytes_in", bytesIn),
 				slog.Int64("bytes_out", v.ResponseSize),
 			)
 			if v.RequestID != "" {

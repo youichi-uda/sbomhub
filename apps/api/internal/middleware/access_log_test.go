@@ -100,7 +100,7 @@ func TestAccessLog_FieldsAndNoQueryString(t *testing.T) {
 		"remote_ip":  "203.0.113.9", // from the trusted-proxy extractor, not the peer
 		"host":       "example.com",
 		"user_agent": "ua-test",
-		"bytes_in":   "0",
+		"bytes_in":   float64(0), // a JSON number, as middleware.Logger emitted it
 		"bytes_out":  float64(5),
 		"request_id": "req-42",
 	}
@@ -220,5 +220,31 @@ func TestAccessLog_ReturnsNilAfterHandling(t *testing.T) {
 	if !c.Response().Committed || c.Response().Status != http.StatusTeapot {
 		t.Fatalf("error was not handed to the error handler: committed=%v status=%d",
 			c.Response().Committed, c.Response().Status)
+	}
+}
+
+func TestAccessLog_BytesInIsNumeric(t *testing.T) {
+	e, buf, _ := accessLogServer(t)
+	e.POST("/echo", func(c echo.Context) error { return c.NoContent(http.StatusNoContent) })
+	cases := map[string]struct {
+		cl   string
+		want float64
+	}{
+		"declared":  {"5", 5},
+		"absent":    {"", 0},
+		"malformed": {"abc", 0},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader("hello"))
+			req.Header.Del(echo.HeaderContentLength)
+			if tc.cl != "" {
+				req.Header.Set(echo.HeaderContentLength, tc.cl)
+			}
+			got, _ := serveAndDecode(t, e, buf, req)
+			if got["bytes_in"] != tc.want {
+				t.Fatalf("bytes_in = %#v (%T), want JSON number %v", got["bytes_in"], got["bytes_in"], tc.want)
+			}
+		})
 	}
 }
