@@ -62,7 +62,7 @@ func TestM60R2_UndecidableCVEsAreLabelledUnverified(t *testing.T) {
 // in its scheme and part ("cPE:/A:openssl:openssl:1.1.1k").
 func TestM60R2_MixedCaseCPEPrefixIsAccepted(t *testing.T) {
 	in := []string{"cPE:/A:openssl:openssl:1.1.1k", "CPE:2.3:A:apache:log4j:2.14.1:*:*:*:*:*:*:*"}
-	if got := normaliseSBOMCPEs(in, "1.0"); len(got) != 2 {
+	if got := normaliseSBOMCPEs(in, "1.0", ""); len(got) != 2 {
 		t.Fatalf("normaliseSBOMCPEs dropped mixed-case CPEs: %q", got)
 	}
 	cs := cpeCandidates(in, "", "")

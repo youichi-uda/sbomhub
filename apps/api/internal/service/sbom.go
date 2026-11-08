@@ -307,7 +307,7 @@ func parseCycloneDX(data []byte) ([]model.Component, error) {
 					}
 				}
 			}
-			comp.CPEs = normaliseSBOMCPEs(cpes, comp.Version)
+			comp.CPEs = normaliseSBOMCPEs(cpes, comp.Version, comp.Purl)
 			if c.Licenses != nil && len(*c.Licenses) > 0 {
 				for _, lic := range *c.Licenses {
 					if lic.License != nil && lic.License.ID != "" {
@@ -373,7 +373,7 @@ func spdx2ExternalRefs(pkg map[string]interface{}, version string) (purl string,
 			raw = append(raw, loc)
 		}
 	}
-	return purl, normaliseSBOMCPEs(raw, version)
+	return purl, normaliseSBOMCPEs(raw, version, purl)
 }
 
 // maxStoredCPEsPerComponent bounds the CPE list kept per component. Syft
@@ -393,8 +393,7 @@ const maxStoredCPELength = 512
 // compVersion is the component's version: without one, a CPE whose own
 // version is not concrete can never become a candidate (cpeCandidates), so it
 // is not stored and does not use up the cap (Codex M60 R14 Low).
-func normaliseSBOMCPEs(in []string, compVersion string) []string {
-	noCompVersion := strings.TrimSpace(compVersion) == ""
+func normaliseSBOMCPEs(in []string, compVersion, purl string) []string {
 	var out []string
 	seen := make(map[string]struct{}, len(in))
 	for _, c := range in {
@@ -402,26 +401,18 @@ func normaliseSBOMCPEs(in []string, compVersion string) []string {
 		if c == "" || len(c) > maxStoredCPELength {
 			continue
 		}
-		// Only a CPE the scanner can use counts toward the cap (Codex M60
-		// R5 Low): parseCPE accepts the scheme case-insensitively and
-		// requires a valid part and a concrete vendor and product.
-		// A version-NA CPE never becomes a candidate either (Codex M60 R7
-		// Low).
-		n, ok := parseCPE(c)
-		if !ok || n.Version == "-" || (noCompVersion && !cpeConcrete(n.Version)) {
+		// Only a CPE the scanner can USE is stored, judged by the scanner's
+		// own rule — cpeCandidates with this component's version and purl —
+		// so storage and scanning cannot disagree (Codex M60 R5/R7/R14/R18).
+		cands := cpeCandidates([]string{c}, compVersion, purl)
+		if len(cands) == 0 {
 			continue
 		}
-		// Dedupe on the product identity the scanner uses (it tries the
-		// first CPE of each product only), so case variants and CPEs that
-		// differ only in ignored attributes do not use up the cap (Codex
-		// M60 R4 / R10 Medium).
-		// The scanner's product identity: cpeCandidates only ever tries the
-		// first USABLE CPE of a product, and the usability filter above
-		// (Codex M60 R14) already drops CPEs that need a component version
-		// when there is none — so a version-less CPE cannot shadow a usable
-		// one (R11), and other versions of a product cannot use up the cap
-		// (Codex M60 R16 Low).
-		key := cpeCandidate{part: n.Part, vendor: n.Vendor, product: n.Product}.productKey()
+		// Dedupe on the product identity the scanner uses: it only ever
+		// tries the first usable CPE of a product, so case variants, other
+		// versions and CPEs that differ in ignored attributes neither shadow
+		// a usable CPE nor use up the cap (Codex M60 R4/R10/R11/R16).
+		key := cands[0].productKey()
 		if _, dup := seen[key]; dup {
 			continue
 		}
@@ -482,7 +473,7 @@ func parseSPDX3(data []byte) ([]model.Component, error) {
 				cpes = append(cpes, ext.Identifier)
 			}
 		}
-		comp.CPEs = normaliseSBOMCPEs(cpes, comp.Version)
+		comp.CPEs = normaliseSBOMCPEs(cpes, comp.Version, comp.Purl)
 
 		// Extract license if available
 		if elem.DeclaredLicense != "" {

@@ -14,7 +14,7 @@ func TestM60R10_StoredCPEsDedupeByProduct(t *testing.T) {
 		in = append(in, "cpe:2.3:a:acme:widget:1.0:*:*:*:*:t"+strings.Repeat("x", i)+":*:*")
 	}
 	in = append(in, "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*")
-	got := normaliseSBOMCPEs(in, "1.0")
+	got := normaliseSBOMCPEs(in, "1.0", "")
 	if len(got) != 2 || got[0] != in[0] || got[1] != in[len(in)-1] {
 		t.Errorf("normaliseSBOMCPEs = %q, want the first acme CPE and the log4j one", got)
 	}

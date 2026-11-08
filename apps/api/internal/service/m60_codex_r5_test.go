@@ -14,7 +14,7 @@ func TestM60R5_MalformedCPEsDoNotUseTheCap(t *testing.T) {
 		in = append(in, "cpe:2.3:x:bad"+strings.Repeat("y", i)) // invalid part
 	}
 	in = append(in, "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*")
-	got := normaliseSBOMCPEs(in, "1.0")
+	got := normaliseSBOMCPEs(in, "1.0", "")
 	if len(got) != 1 || got[0] != "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*" {
 		t.Errorf("normaliseSBOMCPEs = %q, want only the valid CPE", got)
 	}

@@ -126,7 +126,7 @@ func TestM60NormaliseSBOMCPEs(t *testing.T) {
 		"cpe:/a:openssl:openssl:1.1.1k",
 		"cpe:2.3:a:" + strings.Repeat("x", 600) + ":p:1:*:*:*:*:*:*:*", // oversize
 	}
-	got := normaliseSBOMCPEs(in, "1.0")
+	got := normaliseSBOMCPEs(in, "1.0", "")
 	want := []string{"cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*", "cpe:/a:openssl:openssl:1.1.1k"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("normaliseSBOMCPEs = %q, want %q", got, want)
@@ -136,10 +136,10 @@ func TestM60NormaliseSBOMCPEs(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		many = append(many, "cpe:2.3:a:v:p"+strings.Repeat("x", i)+":1:*:*:*:*:*:*:*")
 	}
-	if n := len(normaliseSBOMCPEs(many, "1.0")); n != maxStoredCPEsPerComponent {
+	if n := len(normaliseSBOMCPEs(many, "1.0", "")); n != maxStoredCPEsPerComponent {
 		t.Errorf("kept %d CPEs, want the cap %d", n, maxStoredCPEsPerComponent)
 	}
-	if normaliseSBOMCPEs(nil, "1.0") != nil {
+	if normaliseSBOMCPEs(nil, "1.0", "") != nil {
 		t.Errorf("no CPEs must stay nil (stored as NULL), not an empty array")
 	}
 }

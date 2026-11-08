@@ -71,11 +71,11 @@ func TestM60R14_UnusableWildcardCPEsDoNotUseTheCap(t *testing.T) {
 		in = append(in, "cpe:2.3:a:acme:w"+strings.Repeat("x", i)+":*:*:*:*:*:*:*:*")
 	}
 	in = append(in, "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*")
-	got := normaliseSBOMCPEs(in, "")
+	got := normaliseSBOMCPEs(in, "", "")
 	if len(got) != 1 || got[0] != "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*" {
 		t.Errorf("no component version: kept %q, want only the versioned CPE", got)
 	}
-	if got := normaliseSBOMCPEs(in, "1.0"); len(got) != maxStoredCPEsPerComponent {
+	if got := normaliseSBOMCPEs(in, "1.0", ""); len(got) != maxStoredCPEsPerComponent {
 		t.Errorf("with a component version the wildcard CPEs are usable: kept %d, want the cap", len(got))
 	}
 }

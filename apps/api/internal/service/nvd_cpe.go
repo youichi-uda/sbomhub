@@ -877,9 +877,18 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 // productHasVulnerableEvidence reports whether any criterion of the record
 // names the candidate's product as vulnerable (or without saying, which is
 // not evidence of the opposite).
+//
+// Negated configurations and nodes are skipped, as in verifyCPEMatch (Codex
+// M60 R18 High).
 func productHasVulnerableEvidence(cve NVDCVE, c cpeCandidate) bool {
 	for _, cfg := range cve.Configurations {
+		if cfg.Negate {
+			continue
+		}
 		for _, n := range cfg.Nodes {
+			if n.Negate {
+				continue
+			}
 			for _, m := range n.CpeMatch {
 				crit, ok := parseCPE(m.Criteria)
 				if ok && crit.Part == c.part && crit.Vendor == c.vendor && crit.Product == c.product &&
