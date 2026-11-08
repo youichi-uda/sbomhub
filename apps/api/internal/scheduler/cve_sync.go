@@ -1371,9 +1371,14 @@ func (j *CVESyncJob) linkCVEToTenantComponents(
 	for _, componentID := range componentIDs {
 		// component_vulnerabilities is not RLS-bound; this write still
 		// goes through the tx (q is the tx) which is fine.
+		// M60: labelled cve_sync_keyword — this linker matches product
+		// names from the CVE's CPE criteria against component NAMES with
+		// no version check. It stays DO NOTHING: it is the weakest method,
+		// so it never relabels an existing link (and never takes a row
+		// lock on one).
 		if _, err := q.ExecContext(ctx, `
-			INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at)
-			VALUES ($1, $2, NOW())
+			INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at, match_method)
+			VALUES ($1, $2, NOW(), 'cve_sync_keyword')
 			ON CONFLICT (component_id, vulnerability_id) DO NOTHING
 		`, componentID, vulnID); err != nil {
 			slog.Warn("failed to link component to vulnerability",

@@ -518,7 +518,7 @@ func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component, e
 			// Link existing vulnerability to component if not already linked.
 			// A failed link means the component silently loses this match, so
 			// log it (same treatment as the new-vulnerability path below).
-			if err := s.vulnRepo.LinkToComponent(ctx, existing.ID, comp.ID); err != nil {
+			if err := s.vulnRepo.LinkToComponent(ctx, existing.ID, comp.ID, model.MatchJVNKeyword); err != nil {
 				slog.Error("Failed to link existing vulnerability to component",
 					"cve_id", vuln.CVEID, "component", comp.Name, "error", err)
 				refused++
@@ -537,7 +537,7 @@ func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component, e
 		}
 
 		// Link to component
-		if err := s.vulnRepo.LinkToComponent(ctx, vuln.ID, comp.ID); err != nil {
+		if err := s.vulnRepo.LinkToComponent(ctx, vuln.ID, comp.ID, model.MatchJVNKeyword); err != nil {
 			slog.Error("Failed to link vulnerability to component", "error", err)
 			refused++
 		}

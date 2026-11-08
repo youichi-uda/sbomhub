@@ -124,7 +124,7 @@ func (s *m50TxProbeScanner) ScanComponents(ctx context.Context, _ uuid.UUID) err
 	repo := repository.NewVulnerabilityRepository(s.appDB)
 
 	if s.earlier != nil {
-		s.earlierCreateErr = repo.LinkComponent(ctx, s.componentID, s.earlier.ID)
+		s.earlierCreateErr = repo.LinkComponent(ctx, s.componentID, s.earlier.ID, model.MatchNVDKeyword)
 		// Confirm it really landed INSIDE the tx before anything is poisoned;
 		// otherwise "it is gone afterwards" would be consistent with "it was
 		// never written".
@@ -144,7 +144,7 @@ func (s *m50TxProbeScanner) ScanComponents(ctx context.Context, _ uuid.UUID) err
 			QueryRowContext(ctx, `SELECT 1/0`).Scan(&one)
 	}
 
-	s.createErr = repo.LinkComponent(ctx, s.componentID, s.vuln.ID)
+	s.createErr = repo.LinkComponent(ctx, s.componentID, s.vuln.ID, model.MatchNVDKeyword)
 
 	// Read the link back on a DIFFERENT connection (the pool, not the tx). If
 	// the write really went through the raw *sql.DB it would already be

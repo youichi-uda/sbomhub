@@ -279,6 +279,9 @@ type NVDCVE struct {
 	LastModified string     `json:"lastModified"`
 	Descriptions []NVDDesc  `json:"descriptions"`
 	Metrics      NVDMetrics `json:"metrics"`
+	// Configurations is NVD's affected-configuration data, read by the CPE
+	// path (M60, verifyCPEMatch). The keyword path ignores it.
+	Configurations []NVDConfiguration `json:"configurations"`
 }
 
 type NVDDesc struct {
@@ -318,10 +321,37 @@ type CvssData struct {
 	BaseSeverity string  `json:"baseSeverity"`
 }
 
-// nvdComponentKey is used for deduplication in NVD scanning
+// nvdComponentKey is used for deduplication in NVD scanning.
+//
+// M60: two components with the same (name, version) but different CPE lists
+// or a different distro-ness are different work — their candidates differ —
+// so both are part of the key. CPEKey is a length-prefixed encoding of the
+// ordered CPE list (injective for the same reason nvdCacheName is).
 type nvdComponentKey struct {
 	Name    string
 	Version string
+	CPEKey  string
+	Distro  bool
+}
+
+// nvdWorkItem is one deduplicated unit of NVD work.
+type nvdWorkItem struct {
+	key          nvdComponentKey
+	componentIDs []uuid.UUID
+	// candidates are the CPE candidates to try (M60); empty means the
+	// keyword path only.
+	candidates []cpeCandidate
+	distro     bool
+}
+
+func nvdCPEKey(cpes []string) string {
+	var b strings.Builder
+	for _, c := range cpes {
+		b.WriteString(strconv.Itoa(len(c)))
+		b.WriteByte(':')
+		b.WriteString(c)
+	}
+	return b.String()
 }
 
 // NVDScanReport is the accounting for one NVDService sweep.
@@ -380,6 +410,24 @@ type NVDScanReport struct {
 	// It is a FLOOR, not the size of the loss: a shifted walk contributes 0
 	// because it cannot say how many records slid past its offsets.
 	DroppedMatches int
+
+	// M60 — how the work items were matched.
+	//
+	// CPEMatched counts work items answered by the CPE path (including a
+	// verified "no CVE at this version"). KeywordOnly counts items that had
+	// no CPE candidate at all; KeywordFallback counts items that HAD
+	// candidates, none of which named a product NVD knows. Both of the
+	// latter produce nvd_keyword (low-confidence) links.
+	CPEMatched      int
+	KeywordOnly     int
+	KeywordFallback int
+	// CPERejected counts records NVD returned for a cpeName query that the
+	// local configuration check refused (the product only appears as a
+	// vulnerable=false platform, or no range covers the version).
+	CPERejected int
+	// CPEUndecidable counts records KEPT although the local version
+	// comparison could not decide them (NVD's own evaluation returned them).
+	CPEUndecidable int
 }
 
 // ScanComponents scans all components in an SBOM for vulnerabilities.
@@ -405,7 +453,7 @@ func (s *NVDService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.U
 		return NVDScanReport{}, nil
 	}
 
-	components, err := s.compRepo.ListBySbom(ctx, sbomID)
+	components, err := s.compRepo.ListScanTargetsBySbom(ctx, sbomID)
 	if err != nil {
 		return NVDScanReport{}, fmt.Errorf("failed to get components: %w", err)
 	}
@@ -416,14 +464,25 @@ func (s *NVDService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.U
 
 	slog.Info("starting component scan", "sbom_id", sbomID, "component_count", len(components))
 
-	// Deduplicate components by name+version
-	uniqueComponents := make(map[nvdComponentKey][]uuid.UUID)
+	// Deduplicate components by name+version (+ CPE list and distro-ness,
+	// which decide the CPE candidates — M60).
+	uniqueComponents := make(map[nvdComponentKey]*nvdWorkItem)
 	for _, comp := range components {
 		if comp.Name == "" {
 			continue
 		}
-		key := nvdComponentKey{Name: comp.Name, Version: comp.Version}
-		uniqueComponents[key] = append(uniqueComponents[key], comp.ID)
+		distro := isDistroComponent(comp.Purl)
+		key := nvdComponentKey{Name: comp.Name, Version: comp.Version, CPEKey: nvdCPEKey(comp.CPEs), Distro: distro}
+		item, ok := uniqueComponents[key]
+		if !ok {
+			item = &nvdWorkItem{
+				key:        key,
+				candidates: cpeCandidates(comp.CPEs, comp.Version, comp.Purl),
+				distro:     distro,
+			}
+			uniqueComponents[key] = item
+		}
+		item.componentIDs = append(item.componentIDs, comp.ID)
 	}
 
 	slog.Info("deduplicated components", "unique_count", len(uniqueComponents), "total_count", len(components))
@@ -501,7 +560,7 @@ func (s *NVDService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.U
 // a refused catalogue write costs its own match and nothing else. What can
 // still abort the sweep is a statement that IS on the transaction: GetByCVE
 // and LinkComponent.
-func (s *NVDService) processComponentsParallel(ctx context.Context, components map[nvdComponentKey][]uuid.UUID) (NVDScanReport, error) {
+func (s *NVDService) processComponentsParallel(ctx context.Context, components map[nvdComponentKey]*nvdWorkItem) (NVDScanReport, error) {
 	report := NVDScanReport{UniqueComponents: len(components)}
 
 	maxWorkers := maxConcurrentNoKey
@@ -512,13 +571,9 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	}
 
 	// Create work channel
-	type workItem struct {
-		key          nvdComponentKey
-		componentIDs []uuid.UUID
-	}
-	workChan := make(chan workItem, len(components))
-	for key, ids := range components {
-		workChan <- workItem{key: key, componentIDs: ids}
+	workChan := make(chan *nvdWorkItem, len(components))
+	for _, item := range components {
+		workChan <- item
 	}
 	close(workChan)
 
@@ -571,6 +626,7 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	fetchFailures := 0
 	truncatedComponents := 0
 	droppedMatches := 0
+	cpeMatched, keywordOnly, keywordFallback, cpeRejected, cpeUndecidable := 0, 0, 0, 0, 0
 
 	for i := 0; i < maxWorkers; i++ {
 		wg.Add(1)
@@ -585,7 +641,7 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 					// Rate limit acquired
 				}
 
-				lookup, err := s.getVulnerabilitiesWithCache(ctx, work.key.Name, work.key.Version, pace)
+				lookup, err := s.lookupComponent(ctx, *work, pace)
 				if err != nil {
 					slog.Warn("failed to get vulnerabilities",
 						"component", work.key.Name,
@@ -627,6 +683,16 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 					cacheHits++
 				}
 				apiCalls += lookup.requests
+				switch {
+				case lookup.method != model.MatchNVDKeyword:
+					cpeMatched++
+				case lookup.keywordFallback:
+					keywordFallback++
+				default:
+					keywordOnly++
+				}
+				cpeRejected += lookup.cpeRejected
+				cpeUndecidable += lookup.cpeUndecidable
 				if lookup.truncated {
 					truncatedComponents++
 					// A shifted walk knows it lost records but not how many,
@@ -638,7 +704,7 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 				mu.Unlock()
 
 				// Link vulnerabilities to all component instances
-				refused := s.persistWorkItem(ctx, &dbMu, lookup.vulns, work.componentIDs)
+				refused := s.persistWorkItem(ctx, &dbMu, lookup.vulns, work.componentIDs, lookup.method)
 				if refused > 0 {
 					mu.Lock()
 					refusedWrites += refused
@@ -657,6 +723,11 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	report.FetchFailures = fetchFailures
 	report.TruncatedComponents = truncatedComponents
 	report.DroppedMatches = droppedMatches
+	report.CPEMatched = cpeMatched
+	report.KeywordOnly = keywordOnly
+	report.KeywordFallback = keywordFallback
+	report.CPERejected = cpeRejected
+	report.CPEUndecidable = cpeUndecidable
 
 	// The summary is WARN, not INFO, whenever the sweep is known to be less
 	// than complete (M55). A PARTIAL fetch failure is not escalated into a scan
@@ -676,6 +747,11 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 		"fetch_failures", fetchFailures,
 		"truncated_components", truncatedComponents,
 		"dropped_matches", droppedMatches,
+		"cpe_matched", cpeMatched,
+		"keyword_only", keywordOnly,
+		"keyword_fallback", keywordFallback,
+		"cpe_rejected", cpeRejected,
+		"cpe_undecidable", cpeUndecidable,
 	}
 	if fetchFailures > 0 || truncatedComponents > 0 || refusedWrites > 0 {
 		slog.Warn("component scan completed with incomplete coverage", logArgs...)
@@ -865,6 +941,7 @@ func (s *NVDService) persistWorkItem(
 	dbMu *sync.Mutex,
 	vulns []model.Vulnerability,
 	componentIDs []uuid.UUID,
+	method model.MatchMethod,
 ) int {
 	dbMu.Lock()
 	defer dbMu.Unlock()
@@ -883,7 +960,7 @@ func (s *NVDService) persistWorkItem(
 		}
 
 		for _, compID := range componentIDs {
-			if err := s.vulnRepo.LinkComponent(ctx, compID, existing.ID); err != nil {
+			if err := s.vulnRepo.LinkComponent(ctx, compID, existing.ID, method); err != nil {
 				// Kept at Debug for volume (one line per component instance
 				// per CVE), but no longer the ONLY trace: the refused count
 				// this function returns is what reaches the caller.
@@ -909,6 +986,16 @@ type nvdLookup struct {
 	fetched   int
 	// requests is how many NVD HTTP requests this lookup spent.
 	requests int
+	// method is how the vulns were matched (M60): nvd_cpe / nvd_cpe_distro
+	// for the CPE path, nvd_keyword for the keyword path. It is what the
+	// links are labelled with.
+	method model.MatchMethod
+	// keywordFallback: the item HAD CPE candidates, none of which named a
+	// product NVD knows, so the keyword path answered.
+	keywordFallback bool
+	// cpeRejected / cpeUndecidable: see NVDScanReport.
+	cpeRejected    int
+	cpeUndecidable int
 }
 
 // nvdCacheSchema namespaces every cache key this build reads or writes.
@@ -1004,59 +1091,73 @@ func nvdCacheName(name, version string) string {
 
 // getVulnerabilitiesWithCache tries cache first, falls back to API.
 func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, version string, pace nvdPacer) (nvdLookup, error) {
+	return s.keywordLookup(ctx, name, version, pace, false)
+}
+
+// cachedNVDVulns converts one cache record back into vulnerabilities, or
+// reports it unusable. Shared by the keyword path and (M60) the CPE path, so
+// both treat the cache as the same untrusted source.
+func cachedNVDVulns(entry *cache.VulnCacheEntry, name, version string) ([]model.Vulnerability, bool) {
+	// Cache hit - convert cached vulns to model.
+	//
+	// The cache is NOT a trusted source (Codex M54 R8, Critical). The
+	// R7 cve.id check and the R8 canonicalisation both live on the
+	// HTTP path, so a cache hit used to reach the database having
+	// passed neither. Entries written by a pre-M54 build are still in
+	// Redis after an upgrade, and NVD results are cached BEFORE their
+	// PostgreSQL writes — so a malformed id could be served from cache
+	// indefinitely, stored as CVEID "" (VARCHAR NOT NULL accepts it),
+	// and linked to components with no failure counter moving.
+	//
+	// Same treatment as the wire: canonicalise, and refuse what does
+	// not validate.
+	//
+	// A malformed entry makes the whole cache record untrustworthy, so
+	// the record is DISCARDED and the lookup falls through to the API
+	// (M54, Codex R9 Critical). The R8 cut filtered the bad entries out
+	// and returned the remainder AS A CACHE HIT, which its own comment
+	// described as something the scan "can simply re-fetch" — it did
+	// not re-fetch. A record whose entries were all malformed became an
+	// empty, successful, zero-finding lookup with no HTTP request at
+	// all; a mixed one silently lost the malformed findings.
+	cachedAt := entry.CachedAt
+	vulns := make([]model.Vulnerability, 0, len(entry.Vulnerabilities))
+	usable := true
+	for _, cv := range entry.Vulnerabilities {
+		canonical, err := validation.ValidateCVEID(cv.CVEID)
+		if err != nil {
+			slog.Warn("discarding cached NVD record: malformed CVE ID",
+				"component", name, "version", version, "cve", cv.CVEID)
+			usable = false
+			break
+		}
+		// M46 B2: CachedVuln mirrors the model's pointer fields, so
+		// CVSSScore/PublishedAt carry through without sentinels.
+		vulns = append(vulns, model.Vulnerability{
+			ID:          uuid.New(),
+			CVEID:       canonical,
+			Description: cv.Description,
+			Severity:    cv.Severity,
+			CVSSScore:   cv.CVSSScore,
+			PublishedAt: cv.PublishedAt,
+			Source:      "NVD",
+			UpdatedAt:   &cachedAt,
+		})
+	}
+	return vulns, usable
+}
+
+// keywordLookup is getVulnerabilitiesWithCache with the pacing of its first
+// request made explicit (M60): when the CPE path already spent requests for
+// this work item, the keyword fallback's first page must take a tick too.
+func (s *NVDService) keywordLookup(ctx context.Context, name, version string, pace nvdPacer, paceFirst bool) (nvdLookup, error) {
 	// Try cache first
 	if s.cache != nil {
 		entry, err := s.cache.Get(ctx, nvdCacheName(name, version), "")
 		if err != nil {
 			slog.Debug("cache get error", "component", name, "error", err)
 		} else if entry != nil {
-			// Cache hit - convert cached vulns to model.
-			//
-			// The cache is NOT a trusted source (Codex M54 R8, Critical). The
-			// R7 cve.id check and the R8 canonicalisation both live on the
-			// HTTP path, so a cache hit used to reach the database having
-			// passed neither. Entries written by a pre-M54 build are still in
-			// Redis after an upgrade, and NVD results are cached BEFORE their
-			// PostgreSQL writes — so a malformed id could be served from cache
-			// indefinitely, stored as CVEID "" (VARCHAR NOT NULL accepts it),
-			// and linked to components with no failure counter moving.
-			//
-			// Same treatment as the wire: canonicalise, and refuse what does
-			// not validate.
-			//
-			// A malformed entry makes the whole cache record untrustworthy, so
-			// the record is DISCARDED and the lookup falls through to the API
-			// (M54, Codex R9 Critical). The R8 cut filtered the bad entries out
-			// and returned the remainder AS A CACHE HIT, which its own comment
-			// described as something the scan "can simply re-fetch" — it did
-			// not re-fetch. A record whose entries were all malformed became an
-			// empty, successful, zero-finding lookup with no HTTP request at
-			// all; a mixed one silently lost the malformed findings.
-			cachedAt := entry.CachedAt
-			vulns := make([]model.Vulnerability, 0, len(entry.Vulnerabilities))
-			usable := true
-			for _, cv := range entry.Vulnerabilities {
-				canonical, err := validation.ValidateCVEID(cv.CVEID)
-				if err != nil {
-					slog.Warn("discarding cached NVD record: malformed CVE ID",
-						"component", name, "version", version, "cve", cv.CVEID)
-					usable = false
-					break
-				}
-				// M46 B2: CachedVuln mirrors the model's pointer fields, so
-				// CVSSScore/PublishedAt carry through without sentinels.
-				vulns = append(vulns, model.Vulnerability{
-					ID:          uuid.New(),
-					CVEID:       canonical,
-					Description: cv.Description,
-					Severity:    cv.Severity,
-					CVSSScore:   cv.CVSSScore,
-					PublishedAt: cv.PublishedAt,
-					Source:      "NVD",
-					UpdatedAt:   &cachedAt,
-				})
-			}
-			if usable {
+			if vulns, usable := cachedNVDVulns(entry, name, version); usable {
 				return nvdLookup{vulns: vulns, fromCache: true}, nil
 			}
 			// Fall through to the API below, exactly as a cache miss would.
@@ -1064,7 +1165,7 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 	}
 
 	// Cache miss - call API
-	res, err := s.searchByKeyword(ctx, name, version, pace)
+	res, err := s.searchByKeywordPaced(ctx, name, version, pace, paceFirst)
 	if err != nil {
 		// The requests the failed walk already spent are still charged against
 		// NVD's rate limit, so they are still reported (Codex M55 R2, Low —
@@ -1123,6 +1224,11 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 type nvdSearchResult struct {
 	// vulns are the matches, de-duplicated by canonical CVE id.
 	vulns []model.Vulnerability
+	// entries are the raw NVD records behind vulns, index-aligned with it
+	// (entries[i] is the record vulns[i] was converted from, its cve.id
+	// canonicalised). The CPE path (M60) verifies them against their
+	// configurations; the keyword path ignores them.
+	entries []NVDVulnEntry
 	// fetched is how many RECORDS the walk consumed (pre-dedup), i.e. how far
 	// into the result set its offsets got. Compared against total.
 	fetched int
@@ -1283,6 +1389,11 @@ type nvdPacer func(ctx context.Context) error
 // product (and needs component CPE/purl mapping that this function does not
 // have), not because it was overlooked.
 func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, pace nvdPacer) (nvdSearchResult, error) {
+	return s.searchByKeywordPaced(ctx, name, version, pace, false)
+}
+
+// searchByKeywordPaced is searchByKeyword with walkNVD's paceFirst exposed.
+func (s *NVDService) searchByKeywordPaced(ctx context.Context, name, version string, pace nvdPacer, paceFirst bool) (nvdSearchResult, error) {
 	if s.offline {
 		slog.Info("scan skipped: offline mode", "source", "nvd")
 		return nvdSearchResult{}, nil
@@ -1292,7 +1403,23 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 	if version != "" {
 		keyword = fmt.Sprintf("%s %s", name, version)
 	}
+	q := url.Values{}
+	q.Set("keywordSearch", keyword)
+	return s.walkNVD(ctx, q, pace, paceFirst)
+}
 
+// walkNVD pages one NVD CVE query — keywordSearch (searchByKeyword) or
+// cpeName (the M60 CPE path) — through the budget described on
+// searchByKeyword, with the same truncation, shift and page-identity
+// discipline for both. The walk logic was searchByKeyword's body until M60;
+// only the query it sends was made a parameter.
+//
+// paceFirst says whether the FIRST page must also take a pacer tick. The
+// worker loop pays one tick per work item, which covers the first request of
+// the item and nothing else; since M60 one item can issue several queries
+// (CPE candidates, the product probe, the keyword fallback), and every query
+// after the item's first must pay for its first page too.
+func (s *NVDService) walkNVD(ctx context.Context, query url.Values, pace nvdPacer, paceFirst bool) (nvdSearchResult, error) {
 	var out nvdSearchResult
 	// seen de-duplicates by canonical CVE id ACROSS pages, and — see the
 	// shifted-window discussion on nvdSearchResult.shifted — a hit that is not
@@ -1313,13 +1440,13 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 		// pool's per-work-item tick did not pay for, so it takes its own tick.
 		// Without this the pool would issue up to maxConcurrentWithKey * 5
 		// requests per tick and blow through NVD's published rate.
-		if out.pages > 0 && pace != nil {
+		if (out.pages > 0 || paceFirst) && pace != nil {
 			if err := pace(ctx); err != nil {
 				return nvdSearchResult{pages: out.pages}, err
 			}
 		}
 
-		page, err := s.fetchPage(ctx, keyword, start)
+		page, err := s.fetchPage(ctx, query, start, nvdPageSize)
 		out.pages++
 		if err != nil {
 			// A failure partway through a walk is a failure of the whole
@@ -1338,7 +1465,7 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 		}
 
 		entries := page.entries()
-		fresh := s.convertToVulnerabilities(entries)
+		fresh, freshEntries := s.convertEntries(entries)
 
 		// Boundary anchor. This page was asked to START with the record that
 		// ended the previous one; if it does not, the window moved.
@@ -1348,10 +1475,11 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 			}
 			if len(fresh) > 0 {
 				fresh = fresh[1:]
+				freshEntries = freshEntries[1:]
 			}
 		}
 
-		for _, v := range fresh {
+		for i, v := range fresh {
 			if _, dup := seen[v.CVEID]; dup {
 				// A repeat that is NOT the deliberate overlap: the window
 				// moved backwards, so something moved forwards past an offset
@@ -1361,6 +1489,7 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 			}
 			seen[v.CVEID] = struct{}{}
 			out.vulns = append(out.vulns, v)
+			out.entries = append(out.entries, freshEntries[i])
 		}
 		// fetched is an ABSOLUTE position, not a running sum, because the
 		// pages overlap by one record.
@@ -1394,10 +1523,15 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 // most, and the parameter is documented as defaulting to 0 anyway (verified
 // against the live API on 2026-08-11: an explicit startIndex=0 answers
 // identically to omitting it).
-func (s *NVDService) fetchPage(ctx context.Context, keyword string, startIndex int) (*NVDResponse, error) {
+//
+// query carries the search itself (keywordSearch, cpeName or
+// virtualMatchString); resultsPerPage and startIndex are always set here.
+func (s *NVDService) fetchPage(ctx context.Context, query url.Values, startIndex, pageSize int) (*NVDResponse, error) {
 	params := url.Values{}
-	params.Set("keywordSearch", keyword)
-	params.Set("resultsPerPage", strconv.Itoa(nvdPageSize))
+	for k, v := range query {
+		params[k] = append([]string(nil), v...)
+	}
+	params.Set("resultsPerPage", strconv.Itoa(pageSize))
 	params.Set("startIndex", strconv.Itoa(startIndex))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", s.baseURL+"?"+params.Encode(), nil)
@@ -1465,7 +1599,16 @@ func decodeNVDResponse(r io.Reader, wantStartIndex int) (*NVDResponse, error) {
 }
 
 func (s *NVDService) convertToVulnerabilities(entries []NVDVulnEntry) []model.Vulnerability {
+	vulns, _ := s.convertEntries(entries)
+	return vulns
+}
+
+// convertEntries is convertToVulnerabilities plus the source records,
+// index-aligned with the result and with cve.id replaced by its canonical
+// form (M60: the CPE path verifies the records after conversion).
+func (s *NVDService) convertEntries(entries []NVDVulnEntry) ([]model.Vulnerability, []NVDVulnEntry) {
 	var vulns []model.Vulnerability
+	var kept []NVDVulnEntry
 
 	for _, entry := range entries {
 		// Store the CANONICAL id, not the wire form (Codex M54 R8, High).
@@ -1506,9 +1649,11 @@ func (s *NVDService) convertToVulnerabilities(entries []NVDVulnEntry) []model.Vu
 		vuln.UpdatedAt = &now
 
 		vulns = append(vulns, vuln)
+		entry.CVE.ID = canonical
+		kept = append(kept, entry)
 	}
 
-	return vulns
+	return vulns, kept
 }
 
 // nvdTimestampLayouts are the shapes NVD actually publishes, most specific

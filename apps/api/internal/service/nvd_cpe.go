@@ -1,0 +1,683 @@
+package service
+
+// CPE-based NVD matching (M60).
+//
+// # Why
+//
+// Before M60 both scanners matched by keyword. Measured against the live NVD
+// API on 2026-11-08 for a Syft SBOM of realistic components, NVD's
+// keywordSearch on "<name> <version>" (which ANDs the terms) returned 0
+// records for log4j-core 2.14.1 (Log4Shell missed), tomcat-embed-core 9.0.30,
+// golang.org/x/net v0.7.0, gin v1.7.0, openssl 1.1.1k-1 (Debian) and the
+// kernel: the version string has to appear in the CVE DESCRIPTION, and it
+// rarely does. A CPE query asks NVD's affected-configuration data instead.
+//
+// # How a component is matched
+//
+//  1. Up to nvdMaxCPECandidates distinct part:vendor:product candidates are
+//     taken from the CPE names the SBOM declared, in SBOM order. Syft's
+//     FIRST candidate is often not NVD's product (measured: log4j-core ->
+//     apache:log4j-core, NVD uses apache:log4j, Syft's third candidate).
+//  2. For a candidate, NVD is asked `cpeName=<part:vendor:product:version:*...>`
+//     (exact name, NVD evaluates the version ranges server-side) and the walk
+//     pages exactly like the keyword walk (same budget, same truncation and
+//     page-identity checks).
+//  3. Every returned CVE is VERIFIED locally against its configurations
+//     (verifyCPEMatch). Measured: cpeName for openssl 1.1.1k returned 47
+//     CVEs, 5 of them only because openssl appears as a vulnerable=false
+//     PLATFORM in an AND configuration (Mutt CVE-2009-1390 etc., httpd
+//     CVE-2019-0190). Those are not openssl vulnerabilities.
+//  4. A cpeName answer of ZERO is ambiguous: NVD answers 0, with no error, for
+//     a product it has never heard of (measured: apache:log4j-core) exactly
+//     as it does for a known product whose version is unaffected. A second,
+//     one-record request (`virtualMatchString=cpe:2.3:part:vendor:product`)
+//     tells them apart. Known product -> the verified answer is "none" and it
+//     is final. Unknown product -> try the next candidate.
+//  5. No candidate names a product NVD knows -> fall back to the keyword
+//     search, and the links are labelled nvd_keyword (low confidence). A wrong
+//     CPE therefore never turns into a silent "clean".
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"log/slog"
+	"net/url"
+	"strconv"
+	"strings"
+	"unicode"
+
+	"github.com/sbomhub/sbomhub/internal/cache"
+	"github.com/sbomhub/sbomhub/internal/model"
+)
+
+// nvdMaxCPECandidates bounds how many distinct part:vendor:product
+// candidates of ONE component are tried. Each unknown candidate costs two
+// requests (the cpeName query and the product probe). Measured on Syft 1.46.0
+// output (2026-11-08): maven / go packages carry 1-3 candidates and the NVD
+// product was within the first 3 in every case; Debian packages carry up to
+// 18, all generated from the package name (linux-image-5.10.0-8-amd64), none
+// of them an NVD product — trying all 18 would be 36 wasted requests.
+const nvdMaxCPECandidates = 3
+
+// cpeName is the parsed, UNESCAPED form of a CPE name's leading attributes.
+type cpeName struct {
+	Part    string
+	Vendor  string
+	Product string
+	Version string
+	Update  string
+}
+
+// parseCPE parses a CPE 2.3 formatted string (`cpe:2.3:a:vendor:product:...`,
+// backslash-escaped) or a CPE 2.2 URI (`cpe:/a:vendor:product:...`,
+// percent-encoded). Attribute values are returned unescaped and lower-cased.
+func parseCPE(s string) (cpeName, bool) {
+	s = strings.TrimSpace(s)
+	var fields []string
+	switch {
+	case strings.HasPrefix(s, "cpe:2.3:"):
+		fields = splitCPE23(s[len("cpe:2.3:"):])
+	case strings.HasPrefix(s, "cpe:/"):
+		for _, f := range strings.Split(s[len("cpe:/"):], ":") {
+			u, err := url.PathUnescape(f)
+			if err != nil {
+				return cpeName{}, false
+			}
+			fields = append(fields, u)
+		}
+	default:
+		return cpeName{}, false
+	}
+	get := func(i int) string {
+		if i < len(fields) {
+			return strings.ToLower(fields[i])
+		}
+		return ""
+	}
+	n := cpeName{Part: get(0), Vendor: get(1), Product: get(2), Version: get(3), Update: get(4)}
+	if n.Part != "a" && n.Part != "o" && n.Part != "h" {
+		return cpeName{}, false
+	}
+	if !cpeConcrete(n.Vendor) || !cpeConcrete(n.Product) {
+		return cpeName{}, false
+	}
+	return n, true
+}
+
+// splitCPE23 splits a CPE 2.3 formatted string body on unescaped colons and
+// removes the backslash escapes.
+func splitCPE23(s string) []string {
+	var out []string
+	var b strings.Builder
+	esc := false
+	for _, r := range s {
+		switch {
+		case esc:
+			b.WriteRune(r)
+			esc = false
+		case r == '\\':
+			esc = true
+		case r == ':':
+			out = append(out, b.String())
+			b.Reset()
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return append(out, b.String())
+}
+
+// cpeConcrete is false for the logical values ANY ("*") and NA ("-") and for
+// an empty attribute.
+func cpeConcrete(v string) bool {
+	return v != "" && v != "*" && v != "-"
+}
+
+// escapeCPE23 re-escapes an attribute value for a CPE 2.3 formatted string:
+// everything other than letters, digits, '_', '-' and '.' is backslash-quoted.
+func escapeCPE23(v string) string {
+	var b strings.Builder
+	for _, r := range v {
+		if r < 0x80 && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.') {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('\\')
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// cpeCandidate is one part:vendor:product to try for a component, with the
+// version the component will be matched at.
+type cpeCandidate struct {
+	part, vendor, product string
+	version               string
+}
+
+// query is the exact CPE name sent as cpeName. Every attribute after the
+// version is ANY: measured on 2026-11-08, cpeName for lodash 4.17.20 with
+// target_sw=node.js and with target_sw=* both returned the same 5 CVEs, and
+// a wildcard cannot exclude a criterion the SBOM's guess got wrong.
+func (c cpeCandidate) query() string {
+	return "cpe:2.3:" + c.part + ":" + escapeCPE23(c.vendor) + ":" + escapeCPE23(c.product) + ":" +
+		escapeCPE23(c.version) + ":*:*:*:*:*:*:*"
+}
+
+// productQuery is the version-less virtualMatchString used to ask whether NVD
+// knows the product at all.
+func (c cpeCandidate) productQuery() string {
+	return "cpe:2.3:" + c.part + ":" + escapeCPE23(c.vendor) + ":" + escapeCPE23(c.product)
+}
+
+func (c cpeCandidate) productKey() string { return c.part + ":" + c.vendor + ":" + c.product }
+
+// distroPurlTypes are purl types whose versions carry a distro revision (and
+// possibly an epoch) on top of the upstream version.
+var distroPurlTypes = map[string]bool{"deb": true, "rpm": true, "apk": true, "alpm": true}
+
+// purlType returns the purl's type ("maven", "deb", ...) or "".
+func purlType(purl string) string {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(purl), "pkg:")
+	if !ok {
+		return ""
+	}
+	if i := strings.IndexAny(rest, "/@?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.ToLower(rest)
+}
+
+// isDistroComponent reports whether the component is a distro package.
+func isDistroComponent(purl string) bool { return distroPurlTypes[purlType(purl)] }
+
+// normaliseCPEVersion turns an SBOM version into the version NVD's
+// configurations are written in.
+//
+//   - A leading "v" before a digit is dropped (Go modules). Measured: cpeName
+//     golang:networking:v0.7.0 -> 0 CVEs, :0.7.0 -> 2.
+//   - For a distro package the epoch ("1:") and the distro revision (after the
+//     LAST "-": Debian "1.1.1k-1+deb11u2", RPM "2.17-326.el7", Alpine
+//     "1.1.1k-r0") are dropped, leaving the upstream version. This is what
+//     makes a distro package matchable at all, and it is also why such links
+//     are labelled nvd_cpe_distro: a backported fix does not change the
+//     upstream version.
+func normaliseCPEVersion(v string, distro bool) string {
+	v = strings.TrimSpace(v)
+	if distro {
+		if i := strings.Index(v, ":"); i > 0 && isDigits(v[:i]) {
+			v = v[i+1:]
+		}
+		if i := strings.LastIndex(v, "-"); i > 0 {
+			v = v[:i]
+		}
+	}
+	if len(v) > 1 && (v[0] == 'v' || v[0] == 'V') && v[1] >= '0' && v[1] <= '9' {
+		v = v[1:]
+	}
+	return v
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// cpeCandidates derives the candidates for one component. The version is the
+// CPE's own version attribute when it is concrete (that is what the SBOM
+// author asserted), otherwise the component version; either way normalised.
+// A candidate without any version is dropped — a version-less cpeName would
+// match every version of the product.
+func cpeCandidates(cpes []string, compVersion, purl string) []cpeCandidate {
+	distro := isDistroComponent(purl)
+	var out []cpeCandidate
+	seen := make(map[string]struct{})
+	for _, raw := range cpes {
+		n, ok := parseCPE(raw)
+		if !ok {
+			continue
+		}
+		v := compVersion
+		if cpeConcrete(n.Version) {
+			v = n.Version
+		}
+		v = normaliseCPEVersion(v, distro)
+		if !cpeConcrete(v) {
+			continue
+		}
+		c := cpeCandidate{part: n.Part, vendor: n.Vendor, product: n.Product, version: strings.ToLower(v)}
+		if _, dup := seen[c.productKey()]; dup {
+			continue
+		}
+		seen[c.productKey()] = struct{}{}
+		out = append(out, c)
+		if len(out) == nvdMaxCPECandidates {
+			break
+		}
+	}
+	return out
+}
+
+// NVD configuration structures (CVE API 2.0 `configurations`).
+type NVDConfiguration struct {
+	Operator string          `json:"operator"`
+	Negate   bool            `json:"negate"`
+	Nodes    []NVDConfigNode `json:"nodes"`
+}
+
+type NVDConfigNode struct {
+	Operator string        `json:"operator"`
+	Negate   bool          `json:"negate"`
+	CpeMatch []NVDCPEMatch `json:"cpeMatch"`
+}
+
+type NVDCPEMatch struct {
+	Vulnerable            bool   `json:"vulnerable"`
+	Criteria              string `json:"criteria"`
+	VersionStartIncluding string `json:"versionStartIncluding"`
+	VersionStartExcluding string `json:"versionStartExcluding"`
+	VersionEndIncluding   string `json:"versionEndIncluding"`
+	VersionEndExcluding   string `json:"versionEndExcluding"`
+}
+
+// cpeVerdict is the outcome of checking one CVE against one candidate.
+type cpeVerdict int
+
+const (
+	// cpeRejected: NVD's configurations hold no vulnerable criterion for this
+	// product whose version spec contains the component version.
+	cpeRejected cpeVerdict = iota
+	// cpeMatched: at least one vulnerable criterion for this product contains
+	// the version.
+	cpeMatched
+	// cpeUndecidable: a vulnerable criterion for this product exists but the
+	// version comparison could not be decided locally (unparseable or
+	// incomparable versions). NVD's own server-side evaluation returned the
+	// CVE, so it is KEPT — dropping it would turn our comparator's limits
+	// into silent false negatives.
+	cpeUndecidable
+)
+
+// verifyCPEMatch checks a CVE NVD returned for a cpeName query against the
+// CVE's own configurations.
+//
+// Only vulnerable=true criteria count: a vulnerable=false criterion is a
+// platform the vulnerable thing runs ON (measured: 5 of 47 openssl 1.1.1k
+// answers). AND configurations ("X running on Y") count when the component is
+// the vulnerable X — the platform half cannot be known from an SBOM, so
+// requiring it would drop real findings. Negated nodes/configurations are
+// never used as positive evidence.
+func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
+	undecidable := false
+	for _, cfg := range cve.Configurations {
+		if cfg.Negate {
+			continue
+		}
+		for _, node := range cfg.Nodes {
+			if node.Negate {
+				continue
+			}
+			for _, m := range node.CpeMatch {
+				if !m.Vulnerable {
+					continue
+				}
+				crit, ok := parseCPE(m.Criteria)
+				if !ok || crit.Part != c.part || crit.Vendor != c.vendor || crit.Product != c.product {
+					continue
+				}
+				switch v := criterionContains(crit, m, c.version); v {
+				case cpeMatched:
+					return cpeMatched
+				case cpeUndecidable:
+					undecidable = true
+				}
+			}
+		}
+	}
+	if undecidable {
+		return cpeUndecidable
+	}
+	return cpeRejected
+}
+
+// criterionContains decides whether one vulnerable criterion covers version.
+func criterionContains(crit cpeName, m NVDCPEMatch, version string) cpeVerdict {
+	if crit.Version == "-" {
+		// NA: the criterion applies to a version-less thing; a versioned
+		// component is not it.
+		return cpeRejected
+	}
+	if cpeConcrete(crit.Version) {
+		// A criterion can pin a qualifier in the CPE `update` attribute
+		// (NVD writes log4j 2.0-beta9 as `log4j:2.0:beta9`), so the release
+		// it names is version+update, and an SBOM writes that as one
+		// version string ("2.0-beta9"). `update` = "-" (NA) names the final
+		// release itself.
+		target := crit.Version
+		if cpeConcrete(crit.Update) {
+			target += "-" + crit.Update
+		}
+		cmp, ok := compareVersions(version, target)
+		if !ok {
+			return cpeUndecidable
+		}
+		if cmp != 0 {
+			return cpeRejected
+		}
+		return cpeMatched
+	}
+	// version "*": a range, or every version when no bound is given.
+	bounds := []struct {
+		v    string
+		pass func(int) bool
+	}{
+		{m.VersionStartIncluding, func(c int) bool { return c >= 0 }},
+		{m.VersionStartExcluding, func(c int) bool { return c > 0 }},
+		{m.VersionEndIncluding, func(c int) bool { return c <= 0 }},
+		{m.VersionEndExcluding, func(c int) bool { return c < 0 }},
+	}
+	for _, b := range bounds {
+		if b.v == "" {
+			continue
+		}
+		cmp, ok := compareVersions(version, strings.ToLower(b.v))
+		if !ok {
+			return cpeUndecidable
+		}
+		if !b.pass(cmp) {
+			return cpeRejected
+		}
+	}
+	return cpeMatched
+}
+
+// preReleaseWords sort BEFORE the release they qualify ("2.0-beta9" <
+// "2.0"). Any other alphabetic suffix sorts AFTER it, which is what OpenSSL's
+// letter releases need ("1.1.1k" > "1.1.1", "1.1.1za" > "1.1.1z").
+var preReleaseWords = map[string]bool{
+	"alpha": true, "beta": true, "rc": true, "cr": true, "pre": true, "preview": true,
+	"dev": true, "snapshot": true, "milestone": true, "m": true,
+}
+
+type versionToken struct {
+	num   bool
+	value string
+}
+
+func tokeniseVersion(v string) []versionToken {
+	var out []versionToken
+	var cur strings.Builder
+	curNum := false
+	flush := func() {
+		if cur.Len() > 0 {
+			out = append(out, versionToken{num: curNum, value: cur.String()})
+			cur.Reset()
+		}
+	}
+	for _, r := range strings.ToLower(v) {
+		isNum := r >= '0' && r <= '9'
+		isAlpha := r >= 'a' && r <= 'z'
+		if !isNum && !isAlpha {
+			flush()
+			continue
+		}
+		if cur.Len() > 0 && isNum != curNum {
+			flush()
+		}
+		curNum = isNum
+		cur.WriteRune(r)
+	}
+	flush()
+	return out
+}
+
+func compareNumeric(a, b string) int {
+	a = strings.TrimLeft(a, "0")
+	b = strings.TrimLeft(b, "0")
+	if len(a) != len(b) {
+		if len(a) < len(b) {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(a, b)
+}
+
+// compareVersions compares two versions the way NVD's configuration ranges
+// are written: dotted numerics, letter-suffixed releases (OpenSSL) and
+// pre-release qualifiers. ok is false when the two cannot be ordered with
+// confidence (e.g. a number against a non-pre-release word at the same
+// position) — callers must treat that as "unknown", never as "outside".
+func compareVersions(a, b string) (int, bool) {
+	ta, tb := tokeniseVersion(a), tokeniseVersion(b)
+	if len(ta) == 0 || len(tb) == 0 {
+		return 0, false
+	}
+	n := len(ta)
+	if len(tb) < n {
+		n = len(tb)
+	}
+	for i := 0; i < n; i++ {
+		x, y := ta[i], tb[i]
+		switch {
+		case x.num && y.num:
+			if c := compareNumeric(x.value, y.value); c != 0 {
+				return c, true
+			}
+		case !x.num && !y.num:
+			if c := strings.Compare(x.value, y.value); c != 0 {
+				return c, true
+			}
+		default:
+			// A pre-release word against a number at the same position is
+			// older than it ("2.0-beta9" vs "2.0.1"). Anything else is not
+			// orderable without knowing the project's scheme.
+			if !x.num && preReleaseWords[x.value] {
+				return -1, true
+			}
+			if !y.num && preReleaseWords[y.value] {
+				return 1, true
+			}
+			return 0, false
+		}
+	}
+	if len(ta) == len(tb) {
+		return 0, true
+	}
+	// One is a prefix of the other. The longer one's next token decides.
+	longer, sign := ta, 1
+	if len(tb) > len(ta) {
+		longer, sign = tb, -1
+	}
+	rest := longer[n:]
+	if !rest[0].num && preReleaseWords[rest[0].value] {
+		return -sign, true
+	}
+	allZero := true
+	for _, t := range rest {
+		if !t.num || strings.TrimLeft(t.value, "0") != "" {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return 0, true // "1.0" == "1.0.0"
+	}
+	return sign, true
+}
+
+// nvdCPECacheName / nvdNoCPECacheName are the cache identities of the CPE
+// path. Both hash a length-prefixed input like nvdCacheName (same injectivity
+// argument), and their schema prefixes ("m60c." / "m60n.") share no prefix
+// with each other or with the keyword path's "m55.", so the three key spaces
+// are disjoint within this build. Older builds compose every key as
+// `NVDCachePrefix + nvdCacheName(...)` = "nvdv2:m55.<hex>" (M55..M59) or use
+// the legacy "nvd:vuln:" prefix (pre-M55), so neither can write a key here.
+const (
+	nvdCPECacheSchema   = "m60c."
+	nvdNoCPECacheSchema = "m60n."
+)
+
+// nvdCPECacheName keys a VERIFIED answer for one candidate at one version.
+// The entry holds only CVEs that passed verifyCPEMatch; an EMPTY entry means
+// "NVD knows this product and none of its CVEs covers this version".
+func nvdCPECacheName(c cpeCandidate) string {
+	q := c.query()
+	sum := sha256.Sum256([]byte(strconv.Itoa(len(q)) + ":" + q))
+	return nvdCPECacheSchema + hex.EncodeToString(sum[:])
+}
+
+// nvdNoCPECacheName keys the negative fact "NVD's configurations name no
+// CVE for this part:vendor:product". Its only effect is to skip the
+// candidate, which ends in the keyword fallback — a poisoned or stale entry
+// lowers a component's match CONFIDENCE, it cannot make it read as clean.
+func nvdNoCPECacheName(c cpeCandidate) string {
+	k := c.productKey()
+	sum := sha256.Sum256([]byte(strconv.Itoa(len(k)) + ":" + k))
+	return nvdNoCPECacheSchema + hex.EncodeToString(sum[:])
+}
+
+// matchMethodFor is the label a CPE-path link gets.
+func matchMethodFor(distro bool) model.MatchMethod {
+	if distro {
+		return model.MatchNVDCPEDistro
+	}
+	return model.MatchNVDCPE
+}
+
+// String is for logs.
+func (c cpeCandidate) String() string { return fmt.Sprintf("%s@%s", c.productKey(), c.version) }
+
+// lookupComponent resolves one work item: the CPE path first, the keyword
+// fallback when no candidate names a product NVD knows.
+//
+// The worker loop has already paid ONE pacer tick for this item, which covers
+// exactly its first request; every later request (another candidate, the
+// product probe, the keyword fallback) pays its own. That keeps the pool's
+// invariant from M55: at most one NVD request per tick, whatever the mix.
+func (s *NVDService) lookupComponent(ctx context.Context, item nvdWorkItem, pace nvdPacer) (nvdLookup, error) {
+	spent := 0
+	for _, c := range item.candidates {
+		l, decided, err := s.lookupCPECandidate(ctx, c, item.distro, pace, spent > 0)
+		spent += l.requests
+		if err != nil {
+			return nvdLookup{requests: spent}, err
+		}
+		if decided {
+			l.requests = spent
+			return l, nil
+		}
+	}
+	l, err := s.keywordLookup(ctx, item.key.Name, item.key.Version, pace, spent > 0)
+	l.requests += spent
+	l.method = model.MatchNVDKeyword
+	l.keywordFallback = len(item.candidates) > 0
+	return l, err
+}
+
+// lookupCPECandidate asks NVD about one candidate. decided=false means "NVD
+// has no CVE configured for this part:vendor:product; try the next candidate"
+// and is the ONLY outcome that moves on — a fetch error is returned as an
+// error, never treated as "unknown product", so a network failure cannot be
+// laundered into a keyword-only (or clean) result.
+func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, distro bool, pace nvdPacer, paceFirst bool) (nvdLookup, bool, error) {
+	method := matchMethodFor(distro)
+
+	if s.cache != nil {
+		if entry, err := s.cache.Get(ctx, nvdCPECacheName(c), ""); err != nil {
+			slog.Debug("cache get error", "cpe", c.String(), "error", err)
+		} else if entry != nil {
+			if vulns, usable := cachedNVDVulns(entry, c.productKey(), c.version); usable {
+				return nvdLookup{vulns: vulns, fromCache: true, method: method}, true, nil
+			}
+		}
+		if entry, err := s.cache.Get(ctx, nvdNoCPECacheName(c), ""); err == nil && entry != nil {
+			return nvdLookup{}, false, nil
+		}
+	}
+
+	q := url.Values{}
+	q.Set("cpeName", c.query())
+	res, err := s.walkNVD(ctx, q, pace, paceFirst)
+	if err != nil {
+		return nvdLookup{requests: res.pages}, false, err
+	}
+	out := nvdLookup{
+		requests:  res.pages,
+		truncated: res.truncated,
+		shifted:   res.shifted,
+		total:     res.total,
+		fetched:   res.fetched,
+		method:    method,
+	}
+
+	if res.total == 0 && len(res.entries) == 0 {
+		// Ambiguous zero: unknown product, or known product with no CVE at
+		// this version. One record of the version-less product query decides.
+		if pace != nil {
+			if err := pace(ctx); err != nil {
+				return out, false, err
+			}
+		}
+		pq := url.Values{}
+		pq.Set("virtualMatchString", c.productQuery())
+		page, err := s.fetchPage(ctx, pq, 0, 1)
+		out.requests++
+		if err != nil {
+			return out, false, err
+		}
+		if *page.TotalResults == 0 {
+			s.cacheVulns(ctx, nvdNoCPECacheName(c), c.String(), nil)
+			return nvdLookup{requests: out.requests}, false, nil
+		}
+		s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), nil)
+		return out, true, nil
+	}
+
+	for i, e := range res.entries {
+		switch verifyCPEMatch(e.CVE, c) {
+		case cpeMatched:
+			out.vulns = append(out.vulns, res.vulns[i])
+		case cpeUndecidable:
+			out.vulns = append(out.vulns, res.vulns[i])
+			out.cpeUndecidable++
+		case cpeRejected:
+			out.cpeRejected++
+		}
+	}
+	// Same rule as the keyword path: a truncated answer is never cached, or
+	// the truncation would be reported once and then laundered for a TTL.
+	if !res.truncated {
+		s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
+	}
+	return out, true, nil
+}
+
+// cacheVulns writes one cache record (best effort, like the keyword path).
+func (s *NVDService) cacheVulns(ctx context.Context, cacheName, label string, vulns []model.Vulnerability) {
+	if s.cache == nil {
+		return
+	}
+	cachedVulns := make([]cache.CachedVuln, len(vulns))
+	for i, v := range vulns {
+		cachedVulns[i] = cache.CachedVuln{
+			CVEID:       v.CVEID,
+			Description: v.Description,
+			Severity:    v.Severity,
+			CVSSScore:   v.CVSSScore,
+			PublishedAt: v.PublishedAt,
+		}
+	}
+	if err := s.cache.Set(ctx, cacheName, "", cachedVulns); err != nil {
+		slog.Debug("cache set error", "key", label, "error", err)
+	}
+}

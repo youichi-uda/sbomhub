@@ -181,7 +181,7 @@ func TestM57Create_RefusalDoesNotAbortTheScannersTx(t *testing.T) {
 	if err := repo.Create(txCtx, good); err != nil {
 		t.Fatalf("Create (good): %v", err)
 	}
-	if err := repo.LinkComponent(txCtx, componentID, good.ID); err != nil {
+	if err := repo.LinkComponent(txCtx, componentID, good.ID, model.MatchNVDKeyword); err != nil {
 		t.Fatalf("LinkComponent (good): %v", err)
 	}
 
@@ -268,7 +268,7 @@ func TestM57UpdateMetadata_IsNotBlockedByATenantTxLink(t *testing.T) {
 
 	tenantID, componentID := m54SeedComponentForLink(t, migDB)
 	_, txCtx, commit := m57OpenTenantTx(t, appDB, tenantID)
-	if err := NewVulnerabilityRepository(appDB).LinkComponent(txCtx, componentID, vulnID); err != nil {
+	if err := NewVulnerabilityRepository(appDB).LinkComponent(txCtx, componentID, vulnID, model.MatchNVDKeyword); err != nil {
 		t.Fatalf("LinkComponent inside the tenant tx: %v", err)
 	}
 
