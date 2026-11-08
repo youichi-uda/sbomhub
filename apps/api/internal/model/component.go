@@ -7,18 +7,18 @@ import (
 )
 
 type Component struct {
-	ID        uuid.UUID `json:"id" db:"id"`
-	TenantID  uuid.UUID `json:"tenant_id" db:"tenant_id"`
-	SbomID    uuid.UUID `json:"sbom_id" db:"sbom_id"`
-	Name      string    `json:"name" db:"name"`
-	Version   string    `json:"version" db:"version"`
-	Type      string    `json:"type" db:"type"`
-	Purl      string    `json:"purl" db:"purl"`
+	ID       uuid.UUID `json:"id" db:"id"`
+	TenantID uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	SbomID   uuid.UUID `json:"sbom_id" db:"sbom_id"`
+	Name     string    `json:"name" db:"name"`
+	Version  string    `json:"version" db:"version"`
+	Type     string    `json:"type" db:"type"`
+	Purl     string    `json:"purl" db:"purl"`
 	// CPEs are the CPE names the SBOM declared for this component, in the
 	// order the SBOM listed them (M60). Syft emits several CANDIDATES per
 	// package and the order is meaningful: the NVD scanner tries them first
 	// to last. nil when the SBOM declared none (stored as NULL).
-	CPEs []string `json:"cpes,omitempty" db:"cpes"`
+	CPEs      []string  `json:"cpes,omitempty" db:"cpes"`
 	License   string    `json:"license" db:"license"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 

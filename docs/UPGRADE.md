@@ -1605,3 +1605,146 @@ of the feed — fix the mirror rather than the check.
 - Records that move between pages while a large window is being read are
   reached by the daily sync (if NVD changed them) or by the next pass.
 
+
+## 13. NVD matching by CPE, and every finding says how it was matched (M60)
+
+Until this release both scanners matched components to CVEs by **text search**:
+NVD `keywordSearch` on `"<name> <version>"`, MyJVN `keyword` on the name. The
+NVD scanner now matches by **CPE** when the SBOM gives the component one, and
+checks every candidate CVE against NVD's own affected-configuration data. Every
+component→vulnerability link now records **how** it was made.
+
+Migration **067** adds `components.cpes` and `component_vulnerabilities.match_method`.
+
+### 13.1 What "a match" means now
+
+For each component with CPE names in the SBOM (Syft emits them; CycloneDX
+`cpe` + `syft:cpe23` properties, SPDX 2 `cpe23Type`/`cpe22Type` externalRefs,
+SPDX 3 `cpe23`/`cpe22` identifiers):
+
+1. up to 3 distinct `part:vendor:product` candidates are tried, in SBOM order;
+2. NVD is asked `cpeName=<candidate at the component's version>`;
+3. each returned CVE is **verified** against its `configurations`: it must have a
+   `vulnerable: true` criterion for the same product whose version (or
+   `versionStart*`/`versionEnd*` range) contains the component's version;
+4. if NVD answers zero, one extra one-record request asks whether NVD knows
+   the product at all. Known → the answer "no CVE at this version" is final.
+   Unknown → the next candidate; no candidate known → the old keyword search.
+
+Step 3 matters: NVD's `cpeName` also returns CVEs in which the product is only
+the **platform** something else runs on. Measured 2026-11-08: openssl 1.1.1k →
+5 of 47 (Mutt, Apache httpd); Linux 5.10.46 → 504 of the first 997 (Flash
+Player "on Linux" and similar). Those are now dropped.
+
+Step 4 matters too: NVD answers `cpeName` for a product it has never heard of
+with an ordinary empty result, no error. Syft's first CPE guess is often such a
+product (`apache:log4j-core`; NVD's product is `apache:log4j`, Syft's third
+guess), so trusting the first candidate would have turned a wrong guess into a
+silent "no vulnerabilities".
+
+Versions are normalised before matching: a leading `v` is dropped (Go modules;
+`v0.7.0` matches nothing in NVD, `0.7.0` does), and for **distro packages**
+(purl type `deb`, `rpm`, `apk`, `alpm`) the epoch and distro revision are
+dropped (`1.1.1k-1+deb11u2` → `1.1.1k`).
+
+### 13.2 `match_method` / `match_confidence`
+
+| `match_method` | `match_confidence` | meaning |
+|---|---|---|
+| `nvd_cpe` | high | CPE match verified against NVD configurations |
+| `nvd_cpe_distro` | medium | same, for a distro package, on the **upstream** version — a fix the distro backported without changing the upstream version is NOT seen, so these can be false positives |
+| `nvd_keyword` | low | NVD text search (no usable CPE) |
+| `jvn_keyword` | low | MyJVN text search on the component name |
+| `cve_sync_keyword` | low | the daily CVE-sync linker (product names vs component names) |
+| *(absent)* | unknown | link made before this release |
+
+`GET /api/v1/projects/:id/vulnerabilities` returns both fields per CVE (the
+strongest method among the SBOM's links to it). A link is relabelled only
+upward: a later CPE match upgrades a keyword or pre-067 link, a keyword match
+never downgrades a CPE one.
+
+**Low-confidence findings are still findings.** Nothing previously linked is
+dropped, and keyword links are still counted by `--fail-on` and in reports.
+They are labelled so they can be triaged as candidates.
+
+### 13.3 Expect NVD finding counts to go UP, not down
+
+The keyword search was mostly *missing* things, not over-matching: NVD ANDs the
+words, and the version string rarely appears in a CVE description. Measured on
+2026-11-08 against live NVD (fixture: real Syft 1.46.0 output for a Debian 11
+tree + Maven/npm/Go manifests, plus a kernel and glibc component; ground truth
+OSV for Maven/npm/Go, openssl.org's 1.1.1 advisory list for OpenSSL):
+
+| component | ground truth | NVD links before | NVD links after (true) | method |
+|---|---|---|---|---|
+| log4j-core 2.14.1 | 8 | **0** (Log4Shell missed) | 10 (8) | nvd_cpe |
+| tomcat-embed-core 9.0.30 | 51 | 0 | 77 (50) | nvd_cpe |
+| lodash 4.17.20 | 4 | 1 (0) | 5 (4) | nvd_cpe |
+| golang.org/x/net v0.7.0 | 24 | 0 | 2 (2) | nvd_cpe |
+| gin v1.7.0 | 3 | 0 | 2 (2) | nvd_cpe |
+| openssl 1.1.1k-1 (deb) | 49 | 0 | 42 (42) | nvd_cpe_distro |
+| glibc 2.31 | 26¹ | 3 (0) | 26 (26) | nvd_cpe |
+| libc6 2.31-13 (deb) | 26¹ | 0 | 0 | keyword fallback |
+| linux kernel 5.10.46 | 7,059² | 0 | 493, **truncated** | nvd_cpe |
+
+¹ NVD's own configurations — not an independent source. ² NVD's count; not
+verified independently.
+
+Across the components with ground truth: **before 4 links, 0 true; after 164
+links, 134 true (precision 82%, recall 70%)**. The remaining false positives
+are mostly NVD's product granularity (NVD's `apache:tomcat` covers server-only
+issues that do not affect the embedded jar); the remaining misses are CVEs NVD
+has not configured (golang.org/x/net: NVD's CPE data covers 2 of 24) and
+packages whose CPE Syft could not guess (Debian `libc6`).
+
+JVN matching is **unchanged** (see 13.6), so the JVN half of the counts does not
+move; it is now labelled `jvn_keyword`.
+
+### 13.4 Existing SBOMs keep matching by keyword until re-uploaded
+
+CPE names are read at import time. SBOMs uploaded before this release have no
+stored CPEs, so scheduled re-scans of them keep using the keyword search
+(`nvd_keyword`), and their existing links show `unknown` until a scan
+reproduces them. **Re-upload an SBOM to get CPE matching.** Re-scans add links;
+they never remove one, so a stale keyword link stays until the SBOM is
+replaced.
+
+### 13.5 Cost, truncation and the kernel
+
+- **Requests.** A component whose first CPE candidate is NVD's product costs one
+  request, as before. Each unknown candidate costs two (query + product probe),
+  so Maven packages where Syft guesses `apache:log4j-core` first cost up to 5.
+  The fixture above took 40 NVD requests for 13 components on a cold cache (13
+  before) and 5 on the next scan (24-hour cache; "unknown product" answers are
+  cached too). Without an NVD API key that is ~6 s per request.
+- **Truncation.** The CPE path uses the same page budget as the keyword path
+  (5 pages, 996 records). A Linux kernel component exceeds it (NVD: 7,059 CVEs
+  for 5.10.46), so the scan is reported **failed / truncated**. Before, the
+  keyword search found 0 CVEs for the kernel and the scan reported success.
+  Whether to raise the budget for the CPE path is an open decision.
+- **SPDX 2 purls.** The SPDX 2 importer never stored a package's purl (it read
+  the `externalRefs` array as if it were a string). Purls are now stored, which
+  also changes VEX purl matching and the reachability ecosystem for SPDX 2
+  uploads.
+
+### 13.6 JVN: why it was not changed
+
+MyJVN's API (and all of JVN iPedia except the RSS data feeds) has been **out of
+service since early November 2026**; the operator notice (updated 2026-11-06)
+expects service to resume during November. While it is down, every JVN lookup
+fails and every scan that includes JVN is reported `failed` ("jvn: scan
+failed"); NVD's links are still committed. Nothing in this release changes that.
+
+MyJVN's `cpeName` parameter therefore could not be measured, and per this
+project's rule it is not used. Measured offline against the JVNDBRSS feeds
+instead: the JVN overview carries product-level CPEs with **no version ranges**,
+so filtering JVN results by product would raise openssl's precision only from
+9% (48 true of 508) to 16%, and it would have dropped both true x/net
+advisories. JVN results stay keyword matches, labelled low confidence.
+
+### 13.7 Rollback
+
+`067_component_cpes_and_match_method.down.sql` drops both columns. The stored
+CPE names come back on re-upload; the link methods do not (all return to
+`unknown`). Roll the binary back with the schema: this release writes both
+columns.
