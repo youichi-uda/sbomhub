@@ -18,11 +18,11 @@
     "test": "tsc && node test/run.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@types/node": "^22.19.7",
+    "@types/node": "^22.20.5",
     "typescript": "^5.9.3"
   },
   "engines": {
