@@ -675,7 +675,7 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_DistinctByVulnID_F29(t 
 	//     remains: limit=50 here mirrors what the handler would clamp).
 	// A regression that drops EXISTS for the old JOIN form would no longer
 	// match this regex and surface as a sqlmock "unexpected query".
-	mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
+	mock.ExpectQuery(`FROM vulnerabilities v .*WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, 50, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "cve_id", "description", "severity", "cvss_score",
@@ -754,7 +754,7 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_SortOrderBy_F446(t *tes
 			// this sortBy MUST appear in the emitted SQL. If the code chose
 			// the wrong column, this regex would not match and sqlmock would
 			// surface "unexpected query", failing the call below.
-			mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*`+tt.wantOrderBy+`.*LIMIT \$2 OFFSET \$3`).
+			mock.ExpectQuery(`FROM vulnerabilities v .*WHERE EXISTS.*`+tt.wantOrderBy+`.*LIMIT \$2 OFFSET \$3`).
 				WithArgs(sbomID, 50, 0).
 				WillReturnRows(sqlmock.NewRows([]string{
 					"id", "cve_id", "description", "severity", "cvss_score",
@@ -802,7 +802,7 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_UnscoredEPSSNil(t *test
 
 	sbomID := uuid.New()
 	now := time.Now()
-	mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
+	mock.ExpectQuery(`FROM vulnerabilities v .*WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, 50, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "cve_id", "description", "severity", "cvss_score",

@@ -621,7 +621,7 @@ func driveSortHappyPath(t *testing.T, query, wantOrderBy string) {
 		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
 	// The load-bearing assertion — the paginated SELECT MUST carry the
 	// expected ORDER BY branch for this sort value.
-	mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*`+wantOrderBy+`.*LIMIT \$2 OFFSET \$3`).
+	mock.ExpectQuery(`FROM vulnerabilities v .*WHERE EXISTS.*`+wantOrderBy+`.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, VulnsDefaultLimit, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "cve_id", "description", "severity", "cvss_score",
@@ -885,7 +885,7 @@ func TestSBOMHandler_GetVulnerabilities_DistinctRows_F29(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
 		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
-	mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
+	mock.ExpectQuery(`FROM vulnerabilities v .*WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, VulnsDefaultLimit, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "cve_id", "description", "severity", "cvss_score",

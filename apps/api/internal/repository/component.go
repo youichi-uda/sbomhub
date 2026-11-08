@@ -130,25 +130,43 @@ func vulnListOrderBy(sortBy string) string {
 	return "ORDER BY v.cvss_score DESC NULLS LAST, v.id"
 }
 
-// bestMatchMethodSQL selects, for vulnerability v, the strongest
-// match_method among the links from components of SBOM $1 (M60). The CASE
+// bestMatchMethodJoin joins, for every vulnerability linked from SBOM $1, the
+// strongest match_method among that SBOM's links to it (M60). The CASE
 // mirrors model.MatchMethod.Rank; NULL (a pre-M60 link) ranks lowest and is
-// returned only when every link is NULL.
-const bestMatchMethodSQL = `(
-		SELECT bm.match_method
-		FROM component_vulnerabilities bm
-		JOIN components bc ON bc.id = bm.component_id
-		WHERE bm.vulnerability_id = v.id AND bc.sbom_id = $1
-		ORDER BY CASE bm.match_method
-			WHEN 'nvd_cpe' THEN 3
-			WHEN 'nvd_cpe_distro' THEN 2
-			WHEN 'nvd_cpe_unverified' THEN 1
-			WHEN 'nvd_keyword' THEN 1
-			WHEN 'jvn_keyword' THEN 1
-			WHEN 'cve_sync_keyword' THEN 1
-			ELSE 0 END DESC
-		LIMIT 1
-	)`
+// the result only when every link is NULL.
+//
+// It is an aggregate computed ONCE per query and LEFT JOINed, not a
+// correlated subquery (Codex M60 R3 Medium). Measured 2026-11-08 on
+// PostgreSQL 15 (local docker, warm cache, single runs) with one SBOM of
+// 20,000 components / 2,000 CVEs / 59,940 links:
+//
+//	first page of 100 (GetVulnerabilitiesPaginated)
+//	  pre-M60, no provenance       10.8 ms
+//	  correlated subquery         234   ms  (re-scans the link table per row:
+//	                                         no index leads with vulnerability_id)
+//	  this aggregate join          78   ms
+//	whole list (GetVulnerabilities)
+//	  pre-M60                      58   ms
+//	  this aggregate join         133   ms
+//
+// The aggregate costs one pass over the SBOM's links, independent of how
+// many rows are returned; the correlated form grew with every row.
+const bestMatchMethodJoin = `
+		LEFT JOIN (
+			SELECT bm.vulnerability_id,
+			       (array_agg(bm.match_method ORDER BY CASE bm.match_method
+			            WHEN 'nvd_cpe' THEN 3
+			            WHEN 'nvd_cpe_distro' THEN 2
+			            WHEN 'nvd_cpe_unverified' THEN 1
+			            WHEN 'nvd_keyword' THEN 1
+			            WHEN 'jvn_keyword' THEN 1
+			            WHEN 'cve_sync_keyword' THEN 1
+			            ELSE 0 END DESC))[1] AS match_method
+			FROM component_vulnerabilities bm
+			JOIN components bc ON bc.id = bm.component_id
+			WHERE bc.sbom_id = $1
+			GROUP BY bm.vulnerability_id
+		) best ON best.vulnerability_id = v.id`
 
 // setMatch fills the M60 projection fields from the scanned best method.
 func setMatch(v *model.Vulnerability, best sql.NullString) {
@@ -174,10 +192,11 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
 		       v.published_at, v.updated_at,
-		       ` + bestMatchMethodSQL + `
+		       best.match_method
 		FROM vulnerabilities v
 		JOIN component_vulnerabilities cv ON cv.vulnerability_id = v.id
 		JOIN components c ON c.id = cv.component_id
+		` + bestMatchMethodJoin + `
 		WHERE c.sbom_id = $1
 		` + vulnListOrderBy(sortBy) + `
 	`
@@ -314,8 +333,9 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
 		       v.published_at, v.updated_at,
-		       ` + bestMatchMethodSQL + `
+		       best.match_method
 		FROM vulnerabilities v
+		` + bestMatchMethodJoin + `
 		WHERE EXISTS (
 			SELECT 1
 			FROM component_vulnerabilities cv

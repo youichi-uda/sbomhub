@@ -434,34 +434,74 @@ func criterionContains(crit cpeName, m NVDCPEMatch, version string) cpeVerdict {
 	return cpeMatched
 }
 
-// preReleaseWords sort BEFORE the release they qualify ("2.0-beta9" <
-// "2.0"). Any other alphabetic suffix sorts AFTER it, which is what OpenSSL's
-// letter releases need ("1.1.1k" > "1.1.1", "1.1.1za" > "1.1.1z").
+// Version ordering for NVD ranges.
 //
-// "m" (a Tomcat-style milestone, "9.0.0.M1") is a pre-release ONLY when a
-// number follows it: OpenSSL 1.1.1m is a patch release, and treating it as a
-// pre-release put openssl 1.1.1k outside CVE-2021-4160's `< 1.1.1m` range
-// (caught by the recorded-openssl test). See isPreRelease.
-var preReleaseWords = map[string]bool{
-	"alpha": true, "beta": true, "rc": true, "cr": true, "pre": true, "preview": true,
-	"dev": true, "snapshot": true, "milestone": true,
-}
-
-// isPreRelease reports whether toks[i] is a pre-release qualifier.
-func isPreRelease(toks []versionToken, i int) bool {
-	t := toks[i]
-	if t.num {
-		return false
-	}
-	if preReleaseWords[t.value] {
-		return true
-	}
-	return t.value == "m" && i+1 < len(toks) && toks[i+1].num
-}
+// A version is tokenised into runs of digits and runs of letters. Letter runs
+// are classified, because the same letters mean opposite things in different
+// schemes (Codex M60 R2 High / R3 High):
+//
+//   - PRE-RELEASE: a known qualifier word ("alpha", "beta", "rc", "dev", ...)
+//     or a shorthand letter immediately followed by a number ("1.0a1",
+//     "1.0b2", Tomcat's "9.0.0.M1"). Sorts BEFORE the release it qualifies,
+//     in Maven order: dev < alpha < beta < milestone < preview < rc < snapshot.
+//   - POST-RELEASE: one or two bare letters with no number after them —
+//     OpenSSL's patch releases ("1.1.1k" > "1.1.1", "1.1.1za" > "1.1.1z").
+//     OpenSSL 1.1.1m is a patch release, not a milestone.
+//   - RELEASE MARKER: "final", "ga", "release" (Maven's "4.1.100.Final") mean
+//     the release itself and are dropped.
+//   - anything else ("post1", "dfsg", "final2", ...) is UNKNOWN: a comparison
+//     that depends on it is undecidable, never guessed. The caller keeps such
+//     a CVE as nvd_cpe_unverified and does not cache the answer.
+//
+// Numeric zero padding is skipped wherever a number faces a qualifier, so
+// "1.0" == "1.0.0" and "1.0.0-rc1" < "1.0" < "1.0.0a" all hold together.
+// The orderings are pinned by transitivity tests over mixed sets.
 
 type versionToken struct {
 	num   bool
 	value string
+}
+
+var releaseMarkers = map[string]bool{"final": true, "ga": true, "release": true}
+
+// preReleaseRank orders the qualifier words; shorthand letters map onto them.
+var preReleaseRank = map[string]int{
+	"dev": 0, "alpha": 1, "a": 1, "beta": 2, "b": 2, "milestone": 3, "m": 3,
+	"pre": 4, "preview": 4, "rc": 5, "cr": 5, "snapshot": 6,
+}
+
+// shorthandPreRelease are qualifiers that are pre-releases ONLY when a number
+// follows them; bare, they are OpenSSL-style patch letters.
+var shorthandPreRelease = map[string]bool{"a": true, "b": true, "m": true}
+
+type tokenKind int
+
+const (
+	kindNum tokenKind = iota
+	kindPre
+	kindPost
+	kindUnknown
+)
+
+func tokenKindAt(toks []versionToken, i int) tokenKind {
+	t := toks[i]
+	if t.num {
+		return kindNum
+	}
+	numberFollows := i+1 < len(toks) && toks[i+1].num
+	if shorthandPreRelease[t.value] {
+		if numberFollows {
+			return kindPre
+		}
+		return kindPost
+	}
+	if _, ok := preReleaseRank[t.value]; ok {
+		return kindPre
+	}
+	if len(t.value) <= 2 && !numberFollows {
+		return kindPost
+	}
+	return kindUnknown
 }
 
 func tokeniseVersion(v string) []versionToken {
@@ -488,7 +528,15 @@ func tokeniseVersion(v string) []versionToken {
 		cur.WriteRune(r)
 	}
 	flush()
-	return out
+	// Drop release markers, but only bare ones: "final2" is not "final".
+	kept := out[:0]
+	for i, t := range out {
+		if !t.num && releaseMarkers[t.value] && !(i+1 < len(out) && out[i+1].num) {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	return kept
 }
 
 func compareNumeric(a, b string) int {
@@ -503,21 +551,21 @@ func compareNumeric(a, b string) int {
 	return strings.Compare(a, b)
 }
 
+func isZero(t versionToken) bool { return t.num && strings.TrimLeft(t.value, "0") == "" }
+
 // compareVersions compares two versions the way NVD's configuration ranges
-// are written: dotted numerics, letter-suffixed releases (OpenSSL) and
-// pre-release qualifiers. ok is false when the two cannot be ordered with
-// confidence (e.g. a number against a non-pre-release word at the same
-// position) — callers must treat that as "unknown", never as "outside".
+// are written. ok is false when they cannot be ordered with confidence;
+// callers must treat that as "unknown", never as "outside".
 func compareVersions(a, b string) (int, bool) {
 	ta, tb := tokeniseVersion(a), tokeniseVersion(b)
 	if len(ta) == 0 || len(tb) == 0 {
 		return 0, false
 	}
-	n := len(ta)
-	if len(tb) < n {
-		n = len(tb)
-	}
-	for i := 0; i < n; i++ {
+	return compareTokens(ta, tb)
+}
+
+func compareTokens(ta, tb []versionToken) (int, bool) {
+	for i := 0; i < len(ta) && i < len(tb); i++ {
 		x, y := ta[i], tb[i]
 		switch {
 		case x.num && y.num:
@@ -525,57 +573,86 @@ func compareVersions(a, b string) (int, bool) {
 				return c, true
 			}
 		case !x.num && !y.num:
-			// A pre-release word precedes any other suffix at the same
-			// position ("1.0.0-beta2" < "1.0.0" < "1.0.0a"), so the two
-			// classes are ordered before the letters are compared —
-			// lexically "a" < "beta", which made the order intransitive
-			// (Codex M60 R2 High, found by the transitivity check).
-			px, py := isPreRelease(ta, i), isPreRelease(tb, i)
-			if px != py {
-				if px {
+			kx, ky := tokenKindAt(ta, i), tokenKindAt(tb, i)
+			if kx == kindUnknown || ky == kindUnknown {
+				if x.value == y.value {
+					continue
+				}
+				return 0, false
+			}
+			if kx != ky { // pre-release before post-release
+				if kx == kindPre {
 					return -1, true
 				}
 				return 1, true
 			}
+			if kx == kindPre {
+				if c := preReleaseRank[x.value] - preReleaseRank[y.value]; c != 0 {
+					if c < 0 {
+						return -1, true
+					}
+					return 1, true
+				}
+				continue
+			}
 			if c := strings.Compare(x.value, y.value); c != 0 {
 				return c, true
 			}
-		default:
-			// A pre-release word against a number at the same position is
-			// older than it ("2.0-beta9" vs "2.0.1"). Anything else is not
-			// orderable without knowing the project's scheme.
-			if isPreRelease(ta, i) {
-				return -1, true
-			}
-			if isPreRelease(tb, i) {
-				return 1, true
-			}
-			return 0, false
+		case x.num: // number vs qualifier
+			return compareNumVsQualifier(ta[i:], tb[i:], 1)
+		default: // qualifier vs number
+			return compareNumVsQualifier(tb[i:], ta[i:], -1)
 		}
 	}
 	if len(ta) == len(tb) {
 		return 0, true
 	}
-	// One is a prefix of the other. Zero padding is skipped FIRST ("1.0" ==
-	// "1.0.0"), then the longer one's next token decides: a pre-release word
-	// makes it older, anything else newer. Skipping the padding before
-	// looking for the word is what keeps "1.0.0-rc1" < "1.0" consistent with
-	// "1.0.0-rc1" < "1.0.0" (Codex M60 R2 High).
 	longer, sign := ta, 1
 	if len(tb) > len(ta) {
 		longer, sign = tb, -1
 	}
-	rest := longer[n:]
-	for len(rest) > 0 && rest[0].num && strings.TrimLeft(rest[0].value, "0") == "" {
+	c, ok := compareRest(longer[min(len(ta), len(tb)):])
+	return sign * c, ok
+}
+
+// compareNumVsQualifier handles a number (head of nums) facing a qualifier
+// (head of quals). sign orients the result: +1 when nums is the left operand.
+func compareNumVsQualifier(nums, quals []versionToken, sign int) (int, bool) {
+	if isZero(nums[0]) {
+		// Zero padding: "1.0.0" vs "1.0a" compares like "1.0" vs "1.0a".
+		j := 0
+		for j < len(nums) && isZero(nums[j]) {
+			j++
+		}
+		c, ok := compareTokens(nums[j:], quals)
+		if len(nums[j:]) == 0 {
+			c, ok = compareRest(quals)
+			c = -c
+		}
+		return sign * c, ok
+	}
+	if tokenKindAt(quals, 0) == kindPre {
+		return sign, true // "2.0-beta9" < "2.0.1"
+	}
+	return 0, false
+}
+
+// compareRest orders the tail a longer version has beyond a shorter one that
+// is its prefix: positive when the tail makes it newer.
+func compareRest(rest []versionToken) (int, bool) {
+	for len(rest) > 0 && isZero(rest[0]) {
 		rest = rest[1:]
 	}
 	if len(rest) == 0 {
 		return 0, true
 	}
-	if isPreRelease(rest, 0) {
-		return -sign, true
+	switch tokenKindAt(rest, 0) {
+	case kindNum, kindPost:
+		return 1, true
+	case kindPre:
+		return -1, true
 	}
-	return sign, true
+	return 0, false
 }
 
 // nvdCPECacheName / nvdNoCPECacheName are the cache identities of the CPE
@@ -622,7 +699,10 @@ func nvdWorkKey(name, version string, cpes []string, purl string) nvdComponentKe
 		b.WriteByte(':')
 		b.WriteString(q)
 	}
-	return nvdComponentKey{Name: name, Version: version, CPEKey: b.String(), Distro: isDistroComponent(purl)}
+	// Distro-ness only changes the lookup when there are candidates (it
+	// selects the version normalisation and the nvd_cpe_distro label); a
+	// keyword-only item is the same walk either way (Codex M60 R3 Low).
+	return nvdComponentKey{Name: name, Version: version, CPEKey: b.String(), Distro: b.Len() > 0 && isDistroComponent(purl)}
 }
 
 // matchMethodFor is the label a CPE-path link gets.
