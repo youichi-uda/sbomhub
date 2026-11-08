@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/lib/pq"
@@ -114,7 +115,7 @@ type cveReconcileState struct {
 	PassPages         int      `json:"pass_pages"`
 	PassRecords       int      `json:"pass_records"`
 	PassWritten       int      `json:"pass_written"`
-	PassWriteFailures int      `json:"pass_write_failures"`
+	PassWriteFailures int      `json:"pass_write_failures"` // failed write attempts
 	PassFailedSample  []string `json:"pass_failed_sample,omitempty"`
 
 	LastFinishedAt    *time.Time `json:"last_finished_at,omitempty"`
@@ -262,8 +263,12 @@ func (j *CVESyncJob) reconcileCatalogue(ctx context.Context, now time.Time) (rec
 		st.PassRecords += winRecords
 		st.PassWritten += winWritten
 		st.PassWriteFailures += len(winFailed)
+		// A record modified exactly on a window boundary is returned by both
+		// adjacent windows (the bounds are inclusive), so the same id can fail
+		// twice; it is named once (Codex M58 R3, Low). The count stays a count
+		// of failed write attempts.
 		for _, id := range winFailed {
-			if len(st.PassFailedSample) < cveReconcileFailureSample {
+			if len(st.PassFailedSample) < cveReconcileFailureSample && !slices.Contains(st.PassFailedSample, id) {
 				st.PassFailedSample = append(st.PassFailedSample, id)
 			}
 		}

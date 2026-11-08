@@ -1577,8 +1577,8 @@ The first pass starts right after the first daily sync following the upgrade.
   disable; see [configuration.md](./configuration.md)). An unusable value
   stops the API at startup.
 - It runs after the daily sync, never alongside it, at half its request rate,
-  under a 6-hour deadline per day; a window cut off by the deadline is re-read
-  whole the next day.
+  with a 6-hour deadline per run (each run follows a daily sync or a process
+  start); a window cut off by the deadline is re-read whole by the next run.
 - Progress and the last result live in the `system_settings` row
   `cve_catalogue_reconcile`. A restart resumes at the window it was in. A pass
   in which the database refused some rows finishes as
