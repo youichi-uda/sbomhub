@@ -531,7 +531,8 @@ func tokeniseVersion(v string) []versionToken {
 	// Drop release markers, but only bare ones: "final2" is not "final".
 	kept := out[:0]
 	for i, t := range out {
-		if !t.num && releaseMarkers[t.value] && !(i+1 < len(out) && out[i+1].num) {
+		numberFollows := i+1 < len(out) && out[i+1].num
+		if !t.num && releaseMarkers[t.value] && !numberFollows {
 			continue
 		}
 		kept = append(kept, t)
