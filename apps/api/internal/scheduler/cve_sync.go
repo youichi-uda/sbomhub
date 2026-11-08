@@ -1373,14 +1373,29 @@ func (j *CVESyncJob) linkCVEToTenantComponents(
 		// goes through the tx (q is the tx) which is fine.
 		// M60: labelled cve_sync_keyword — this linker matches product
 		// names from the CVE's CPE criteria against component NAMES with
-		// no version check. It stays DO NOTHING: it is the weakest method,
-		// so it never relabels an existing link (and never takes a row
-		// lock on one).
-		if _, err := q.ExecContext(ctx, `
+		// no version check, the weakest method. The INSERT is DO NOTHING so
+		// an existing link is neither changed nor locked; a pre-M60 link
+		// (match_method NULL) it reproduces is then labelled by a separate
+		// UPDATE that touches — and locks — only a NULL row (Codex M60 R1
+		// Low). Separate statements for the snapshot reason given on
+		// VulnerabilityRepository.LinkComponent.
+		res, err := q.ExecContext(ctx, `
 			INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at, match_method)
 			VALUES ($1, $2, NOW(), 'cve_sync_keyword')
 			ON CONFLICT (component_id, vulnerability_id) DO NOTHING
-		`, componentID, vulnID); err != nil {
+		`, componentID, vulnID)
+		if err == nil {
+			if n, rerr := res.RowsAffected(); rerr == nil && n == 0 {
+				_, err = q.ExecContext(ctx, `
+					UPDATE component_vulnerabilities
+					   SET match_method = 'cve_sync_keyword'
+					 WHERE component_id = $1
+					   AND vulnerability_id = $2
+					   AND match_method IS NULL
+				`, componentID, vulnID)
+			}
+		}
+		if err != nil {
 			slog.Warn("failed to link component to vulnerability",
 				"component_id", componentID,
 				"vuln_id", vulnID,
