@@ -91,7 +91,7 @@ func TestProjectCreate_RejectsInvalidInputWith400(t *testing.T) {
 		{"NUL plus unit separator, as the E2E sends it", mustJSON(t, map[string]string{"name": "Project\x00Test\x1f1"}),
 			`invalid request body: contains a NUL character (\u0000)`},
 		{"unit separator alone", mustJSON(t, map[string]string{"name": "Project\x1fTest"}),
-			"name must not contain control characters (U+001F)"},
+			"name must not contain control or line-break characters (U+001F)"},
 		{"invalid UTF-8", "{\"name\":\"bad\xff\"}", "invalid request body: not valid UTF-8"},
 		{"empty name", `{"name":""}`, "name is required"},
 		{"blank name", `{"name":"   "}`, "name is required"},
@@ -123,6 +123,8 @@ func TestProjectCreate_AcceptsBoundaryValues(t *testing.T) {
 		"escaped backslash + u0000":  `{"name":"C:\\u0000dir"}`,
 		"emoji and Japanese":         mustJSON(t, map[string]string{"name": "🚀 プロジェクト"}),
 		"lone surrogate escape kept": `{"name":"a\ud800b"}`,
+		"form feed in description":   `{"name":"ok","description":"page1\u000cpage2"}`,
+		"escape char in description": `{"name":"ok","description":"\u001b[1mbold"}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

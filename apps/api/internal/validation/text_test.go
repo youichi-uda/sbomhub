@@ -72,7 +72,7 @@ func TestCheckTextField(t *testing.T) {
 		{"name empty", "", name, "name is required"},
 		{"name blank", " \t ", name, "name is required"},
 		{"name nul", "a\x00b", name, "must not contain a NUL"},
-		{"name unit separator", "a\x1fb", name, "control characters (U+001F)"},
+		{"name unit separator", "a\x1fb", name, "line-break characters (U+001F)"},
 		{"name newline", "a\nb", name, "control characters (tab, newline)"},
 		{"name del", "a\x7fb", name, "U+007F"},
 		{"name invalid utf8", "a\xffb", name, "not valid UTF-8"},
@@ -81,7 +81,11 @@ func TestCheckTextField(t *testing.T) {
 		{"desc 1000 ok", strings.Repeat("é", 1000), desc, ""},
 		{"desc 1001", strings.Repeat("e", 1001), desc, "at most 1000 characters (got 1001)"},
 		{"desc nul", "x\x00", desc, "NUL"},
-		{"desc escape char", "x\x1b[31m", desc, "U+001B"},
+		{"desc escape char allowed", "x\x1b[31m", desc, ""},
+		{"desc form feed allowed", "page1\fpage2", desc, ""},
+		{"name next line", "a\u0085b", name, "U+0085"},
+		{"name line separator", "a\u2028b", name, "U+2028"},
+		{"name paragraph separator", "a\u2029b", name, "U+2029"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

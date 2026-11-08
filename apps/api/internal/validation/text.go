@@ -92,10 +92,12 @@ type TextRule struct {
 	// MaxChars is the maximum length in Unicode code points — the unit
 	// PostgreSQL's VARCHAR(n) counts in a UTF-8 database. 0 means unlimited.
 	MaxChars int
-	// SingleLine also refuses every other C0 control character (U+0001-U+001F,
-	// including tab and newline) and DEL. For names and identifiers. Without
-	// it tab, LF and CR are allowed and the remaining C0 controls are still
-	// refused.
+	// SingleLine also refuses every control and line-break character: C0
+	// (U+0001-U+001F, including tab and newline), DEL, C1 (U+0080-U+009F,
+	// including U+0085 NEXT LINE) and the Unicode line / paragraph separators
+	// U+2028 / U+2029. For names and identifiers. Without it only what
+	// PostgreSQL cannot store (U+0000) and invalid UTF-8 are refused, so free
+	// text keeps every character TEXT has always accepted.
 	SingleLine bool
 }
 
@@ -118,12 +120,11 @@ func CheckTextField(field, value string, rule TextRule) error {
 		switch {
 		case r == 0:
 			return textErrorf("%s must not contain a NUL character", field)
+		case !rule.SingleLine:
 		case r == '\t' || r == '\n' || r == '\r':
-			if rule.SingleLine {
-				return textErrorf("%s must not contain control characters (tab, newline)", field)
-			}
-		case r < 0x20 || r == 0x7f:
-			return textErrorf("%s must not contain control characters (U+%04X)", field, r)
+			return textErrorf("%s must not contain control characters (tab, newline)", field)
+		case r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == 0x2028 || r == 0x2029:
+			return textErrorf("%s must not contain control or line-break characters (U+%04X)", field, r)
 		}
 	}
 	if rule.MaxChars > 0 {

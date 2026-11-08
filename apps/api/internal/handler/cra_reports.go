@@ -773,7 +773,13 @@ func (h *CRAReportsHandler) Reanalyse(c echo.Context) error {
 	}
 
 	var override runReportRequest
-	_ = c.Bind(&override) // tolerated when body is empty
+	// A missing or malformed body is tolerated (the source report supplies
+	// every field), but a body refused for its text (invalid UTF-8 / U+0000,
+	// see TextGuardBinder) or its size is answered, not silently replaced by
+	// the defaults — otherwise the LLM runner would run on a refused request.
+	if err := c.Bind(&override); err != nil && isRefusedBody(err) {
+		return respondBindError(c, err)
+	}
 
 	// Default every RunInput field from the source report; let the
 	// caller override the regulatory pass-through fields and the

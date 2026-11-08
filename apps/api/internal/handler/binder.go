@@ -87,8 +87,15 @@ func guardJSONBody(c echo.Context) error {
 
 // respondBindError writes the 400 for a failed c.Bind. A body refused by
 // TextGuardBinder gets its specific message (what is wrong and at which
-// offset); any other bind failure keeps the generic "invalid request body".
+// offset); a non-400 HTTPError (BodyLimit's 413) is returned as is; any other
+// bind failure keeps the generic "invalid request body".
 func respondBindError(c echo.Context, err error) error {
+	// BodyLimit's 413 (and any other non-400 status the binder chose) is
+	// kept: an over-long body is not a malformed one.
+	var limit *echo.HTTPError
+	if errors.As(err, &limit) && limit.Code != http.StatusBadRequest {
+		return limit
+	}
 	if errors.Is(err, validation.ErrInvalidText) {
 		var he *echo.HTTPError
 		if errors.As(err, &he) {
@@ -98,4 +105,15 @@ func respondBindError(c echo.Context, err error) error {
 		}
 	}
 	return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+}
+
+// isRefusedBody reports whether a c.Bind error means the request must be
+// answered even by a handler that otherwise tolerates a missing or malformed
+// body: the text guard refused it, or BodyLimit did (413).
+func isRefusedBody(err error) bool {
+	if errors.Is(err, validation.ErrInvalidText) {
+		return true
+	}
+	var he *echo.HTTPError
+	return errors.As(err, &he) && he.Code == http.StatusRequestEntityTooLarge
 }
