@@ -203,6 +203,28 @@ test.describe('Error Handling', () => {
         }
     });
 
+    // Codex R1 Medium: a failed latest-SBOM lookup (anything but 404) used to
+    // resolve to "no SBOM", so the license check silently showed no
+    // violations — a compliance false negative.
+    test('should show an error on the license tab when the latest SBOM cannot be loaded', async ({ page, request }) => {
+        const project = await createProject(request, uniqueName('License Check Error'), 'license check error');
+        try {
+            await page.route(`${API_BASE_URL}/api/v1/projects/${project.id}/sbom`, (route) =>
+                route.request().method() === 'GET'
+                    ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'boom' }) })
+                    : route.continue(),
+            );
+            await page.goto(`/en/projects/${project.id}`);
+            await expect(page.getByRole('heading', { level: 1, name: project.name })).toBeVisible({ timeout: 15000 });
+            await page.getByRole('button', { name: new RegExp(`^${en.Components.license} \\(`) }).click();
+            const error = page.getByTestId('license-check-load-error');
+            await expect(error).toBeVisible();
+            await expect(error).toContainText(en.ProjectDetail.licenseCheckFailed);
+        } finally {
+            await deleteProject(request, project.id);
+        }
+    });
+
     // Duplicate project names: the API deliberately allows them within a
     // tenant (M11-2 #77 left the dedup / 409 question as a product
     // decision). This pins the current behaviour — two projects, distinct

@@ -325,7 +325,8 @@
     "apiKeyDescription": "CLI / MCP Server / CI/CD 連携用の API キー。このプロジェクトに限定されます。",
     "apiKeyExpired": "期限切れ",
     "apiKeyPrefix": "プレフィックス",
-    "apiKeysLoadFailed": "このプロジェクトの API キーの読み込みに失敗しました。API に接続できるか確認して、再試行してください。"
+    "apiKeysLoadFailed": "このプロジェクトの API キーの読み込みに失敗しました。API に接続できるか確認して、再試行してください。",
+    "licenseCheckFailed": "ライセンス違反を確認できませんでした (最新 SBOM または確認結果の読み込みに失敗)。この一覧を信頼する前に再試行してください。"
   },
   "VexForm": {
     "createFor": "{cveId}のVEXステートメントを作成",

@@ -171,19 +171,14 @@ export default function ProjectDetailPage() {
 
   // Latest SBOM id, used to check license violations. Through the API
   // client so it carries the auth / org headers (it used to be a bare fetch
-  // that 401'd in Clerk mode — M64 residual). No SBOM (404) is
-  // null; any other failure is logged and also leaves the id null, so the
-  // license tab simply has nothing to check, as before.
+  // that 401'd in Clerk mode — M64 residual). No SBOM (404) is null; any
+  // other failure is an error the license tab shows (Codex R1: treating it
+  // as "no SBOM" silently showed no violations).
   const sbomIdQuery = useQuery({
     queryKey: queryKeys.projects.latestSbomId(projectId),
-    queryFn: async (): Promise<string | null> => {
-      try {
-        return (await api.projects.getLatestSbom(projectId))?.id ?? null;
-      } catch (error) {
-        console.error("Failed to load SBOM ID:", error);
-        return null;
-      }
-    },
+    queryFn: () =>
+      logged("Failed to load SBOM ID:", async (): Promise<string | null> =>
+        (await api.projects.getLatestSbom(projectId))?.id ?? null),
   });
   const sbomId = sbomIdQuery.data ?? null;
 
@@ -195,6 +190,11 @@ export default function ProjectDetailPage() {
     enabled: activeTab === "licenses" && !!sbomId,
   });
   const licenseViolations = licenseViolationsQuery.data ?? [];
+  const licenseCheckFailed = sbomIdQuery.isError || licenseViolationsQuery.isError;
+  const retryLicenseCheck = () => {
+    if (sbomIdQuery.isError) void sbomIdQuery.refetch();
+    else void licenseViolationsQuery.refetch();
+  };
 
   const notificationSettingsQuery = useQuery({
     queryKey: queryKeys.projects.notificationSettings(projectId),
@@ -958,6 +958,17 @@ export default function ProjectDetailPage() {
                   loadLicenseViolations();
                 }}
                 onCancel={() => setShowLicenseForm(false)}
+              />
+            )}
+
+            {licenseCheckFailed && (
+              <LoadError
+                compact
+                testId="license-check-load-error"
+                message={tp("licenseCheckFailed")}
+                retryLabel={tc("retry")}
+                onRetry={retryLicenseCheck}
+                retrying={sbomIdQuery.isFetching || licenseViolationsQuery.isFetching}
               />
             )}
 

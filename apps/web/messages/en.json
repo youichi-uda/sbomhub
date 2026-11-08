@@ -325,7 +325,8 @@
     "apiKeyDescription": "API keys for CLI, MCP Server, and CI/CD integrations, limited to this project.",
     "apiKeyExpired": "Expired",
     "apiKeyPrefix": "Prefix",
-    "apiKeysLoadFailed": "Failed to load this project's API keys. Check that the API is reachable, then retry."
+    "apiKeysLoadFailed": "Failed to load this project's API keys. Check that the API is reachable, then retry.",
+    "licenseCheckFailed": "Could not check license violations (the latest SBOM or the check failed to load). Retry before relying on this list."
   },
   "VexForm": {
     "createFor": "Create VEX Statement for {cveId}",

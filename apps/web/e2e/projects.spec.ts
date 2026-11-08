@@ -320,7 +320,8 @@ test.describe('Projects', () => {
   });
 
   test('should handle long project name', async ({ page, request }) => {
-    test.fixme(true, 'BUG: a 300-char project name makes POST /api/v1/projects return 500 "failed to create project" (should be a 400 validation error), and the create dialog shows no error at all');
+    // Was fixme (M65 bug 7): the API answered 500 (fixed in a2f1f4d, 400 with
+    // the reason) and the create dialog showed no error (M65 bug 10 web fix).
 
     await page.getByRole('button', { name: /New Project/i }).first().click();
     await expect(page.getByPlaceholder('My Project')).toBeVisible({ timeout: 5000 });
