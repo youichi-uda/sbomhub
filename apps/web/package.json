@@ -42,6 +42,6 @@
     "eslint-config-next": "^16.4.5",
     "postcss": "^8.5.32",
     "tailwindcss": "^4.3.5",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.3"
   }
 }
