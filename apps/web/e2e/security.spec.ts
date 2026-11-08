@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import en from '../messages/en.json';
+import ja from '../messages/ja.json';
 import { API_BASE_URL, createProject, deleteProject, uniqueName, uploadSbom } from './fixtures/vuln-project';
 
 // Records every native dialog (alert/confirm/prompt) the page opens: an
@@ -341,8 +342,14 @@ test.describe('Security Tests', () => {
                 const res = await page.goto(path);
                 expect(res?.status(), path).toBe(200);
                 expect(res?.headers()['content-security-policy'], path).toContain("default-src 'self'");
-                // The page really ran its client code (hydrated + talked to the API).
-                await page.waitForLoadState('networkidle');
+                // The page really ran its client code: hydrated and finished its
+                // API loads (connect-src), i.e. no loading placeholder is left.
+                // Not 'networkidle' (Codex R1 Low: dashboard polling can keep the
+                // network busy).
+                await page.waitForLoadState('load');
+                await expect(page.locator('body')).not.toBeEmpty();
+                await expect(page.getByText(en.Common.loading, { exact: true })).toHaveCount(0, { timeout: 15000 });
+                await expect(page.getByText(ja.Common.loading, { exact: true })).toHaveCount(0, { timeout: 15000 });
             }
             expect(violations).toEqual([]);
         });

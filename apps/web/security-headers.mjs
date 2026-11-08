@@ -16,9 +16,10 @@
 //   - connect-src is the API origin (NEXT_PUBLIC_API_URL, inlined at build
 //     time like everything else here), the optional waitlist form endpoint,
 //     and, in Clerk mode, the Clerk Frontend API.
-//   - Clerk mode adds what Clerk documents for a strict CSP: its Frontend API
-//     host for scripts / XHR, img.clerk.com, Cloudflare Turnstile
-//     (challenges.cloudflare.com) for bot protection, blob: workers.
+//   - Clerk mode adds what Clerk documents for a manual CSP: its Frontend
+//     API host for scripts / XHR, img.clerk.com, Cloudflare Turnstile
+//     (challenges.cloudflare.com), abuse / fraud protection
+//     (*.protect.clerk.com), blob: workers.
 //   - frame-ancestors 'none' (and X-Frame-Options: DENY for old browsers):
 //     no route is designed to be embedded. Public share links
 //     (/[locale]/public/[token]) are full pages, not widgets, and there is
@@ -89,10 +90,14 @@ export function buildContentSecurityPolicy(env) {
   const frame = ["'self'"];
   const worker = ["'self'", "blob:"];
   if (clerkFapi) {
-    script.push(clerkFapi, "https://challenges.cloudflare.com");
-    connect.push(clerkFapi, "https://clerk-telemetry.com");
+    // Clerk's documented manual CSP: Frontend API, Cloudflare Turnstile
+    // (bot protection) and abuse / fraud protection (*.protect.clerk.com,
+    // served on non-443 ports, hence ":*" in connect-src). Telemetry is
+    // from Clerk middleware's default policy.
+    script.push(clerkFapi, "https://challenges.cloudflare.com", "https://*.protect.clerk.com");
+    connect.push(clerkFapi, "https://*.protect.clerk.com:*", "https://clerk-telemetry.com");
     img.push("https://img.clerk.com");
-    frame.push("https://challenges.cloudflare.com");
+    frame.push("https://challenges.cloudflare.com", "https://*.protect.clerk.com");
   }
 
   const directives = [

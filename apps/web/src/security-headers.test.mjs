@@ -86,10 +86,18 @@ test("Clerk mode allows the decoded Frontend API and Clerk's documented hosts", 
   const d = directives(
     buildContentSecurityPolicy({ apiUrl: "https://api.sbomhub.app", clerkPublishableKey: pk("clerk.sbomhub.app"), dev: false }),
   );
-  assert.deepEqual(d["script-src"], ["'self'", "'unsafe-inline'", "https://clerk.sbomhub.app", "https://challenges.cloudflare.com"]);
-  assert.deepEqual(d["connect-src"], ["'self'", "https://api.sbomhub.app", "https://clerk.sbomhub.app", "https://clerk-telemetry.com"]);
+  // Clerk's manual CSP (clerk.com/docs/guides/secure/best-practices/csp-headers):
+  // FAPI, Turnstile, and abuse/fraud protection (*.protect.clerk.com, served
+  // on non-443 ports, hence ":*" in connect-src). Codex R1 High.
+  assert.deepEqual(d["script-src"], [
+    "'self'", "'unsafe-inline'", "https://clerk.sbomhub.app", "https://challenges.cloudflare.com", "https://*.protect.clerk.com",
+  ]);
+  assert.deepEqual(d["connect-src"], [
+    "'self'", "https://api.sbomhub.app", "https://clerk.sbomhub.app", "https://*.protect.clerk.com:*", "https://clerk-telemetry.com",
+  ]);
   assert.ok(d["img-src"].includes("https://img.clerk.com"));
-  assert.ok(d["frame-src"].includes("https://challenges.cloudflare.com"));
+  assert.deepEqual(d["frame-src"], ["'self'", "https://challenges.cloudflare.com", "https://*.protect.clerk.com"]);
+  assert.deepEqual(d["form-action"], ["'self'"]);
   assert.deepEqual(d["frame-ancestors"], ["'none'"]);
 });
 
