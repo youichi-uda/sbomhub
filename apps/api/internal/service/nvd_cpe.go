@@ -647,9 +647,11 @@ func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
 		}
 	}
 	if !hasBound {
-		if crit.Update == "-" && c.update != "" {
+		if crit.Update == "-" && (c.update != "" || (!c.updateNA && !c.plain())) {
 			// "*:-" is every FINAL release; it does not prove anything about
-			// a candidate pinning an update (Codex M60 R15 Medium).
+			// a candidate pinning an update (Codex M60 R15 Medium), nor about
+			// a non-plain version not explicitly NA — whether "2.0-beta9" is
+			// a final release is not decidable (Codex M60 R24 Medium).
 			return cpeUndecidable
 		}
 		return cpeMatched // all versions: no comparison involved
