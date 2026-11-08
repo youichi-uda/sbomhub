@@ -353,6 +353,7 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 		"internal/handler/m51_cra_reanalyse_tenant_binding_integration_test.go": true,
 		"internal/repository/cra_reports_rls_test.go":                           true,
 		"internal/repository/cra_reports_test.go":                               true,
+		"internal/repository/m68_cra_report_type_width_integration_test.go":     true, // migration 068: inserts every report type to prove the column holds it
 		"internal/service/cra/deadline_test.go":                                 true, // M34 F423: deadline table test names the report-type wire values
 		"internal/repository/cra_submissions_rls_test.go":                       true, // M33 F418: RLS smoke seeds an approved cra_report fixture (report_type literal)
 		"internal/service/evidence_pack/builder_test.go":                        true,
