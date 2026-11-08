@@ -6,11 +6,12 @@ import (
 	"testing"
 )
 
-// cdx10k builds a CycloneDX 1.5 document with n components shaped like Syft
+// cdx10k builds a CycloneDX 1.5 document with 10,000 components shaped like Syft
 // output (name, version, purl, licenses, a description with escapes and
 // non-ASCII text), so the text check is measured on a realistic byte mix.
-func cdx10k(tb testing.TB, n int) []byte {
+func cdx10k(tb testing.TB) []byte {
 	tb.Helper()
+	const n = 10000
 	comps := make([]map[string]any, n)
 	for i := range comps {
 		comps[i] = map[string]any{
@@ -33,7 +34,7 @@ func cdx10k(tb testing.TB, n int) []byte {
 }
 
 func TestCDX10kFixtureIsAcceptedAndParses(t *testing.T) {
-	data := cdx10k(t, 10000)
+	data := cdx10k(t)
 	if err := checkSBOMText(data); err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +51,7 @@ func TestCDX10kFixtureIsAcceptedAndParses(t *testing.T) {
 
 // go test -run '^$' -bench 'SBOM10k' -benchmem ./internal/service
 func BenchmarkSBOM10k_TextCheck(b *testing.B) {
-	data := cdx10k(b, 10000)
+	data := cdx10k(b)
 	b.SetBytes(int64(len(data)))
 	b.ResetTimer()
 	for b.Loop() {
@@ -61,7 +62,7 @@ func BenchmarkSBOM10k_TextCheck(b *testing.B) {
 }
 
 func BenchmarkSBOM10k_DetectAndParse(b *testing.B) {
-	data := cdx10k(b, 10000)
+	data := cdx10k(b)
 	b.SetBytes(int64(len(data)))
 	b.ResetTimer()
 	for b.Loop() {
@@ -95,7 +96,7 @@ func asciiEscaped(b []byte) []byte {
 }
 
 func BenchmarkSBOM10k_TextCheck_ASCIIEscaped(b *testing.B) {
-	data := asciiEscaped(cdx10k(b, 10000))
+	data := asciiEscaped(cdx10k(b))
 	if err := checkSBOMText(data); err != nil {
 		b.Fatal(err)
 	}
@@ -109,7 +110,7 @@ func BenchmarkSBOM10k_TextCheck_ASCIIEscaped(b *testing.B) {
 }
 
 func BenchmarkSBOM10k_DetectAndParse_ASCIIEscaped(b *testing.B) {
-	data := asciiEscaped(cdx10k(b, 10000))
+	data := asciiEscaped(cdx10k(b))
 	b.SetBytes(int64(len(data)))
 	b.ResetTimer()
 	for b.Loop() {
