@@ -29,7 +29,7 @@ func TestClientIPExtractor_DefaultIgnoresForwardingHeaders(t *testing.T) {
 		echo.HeaderXForwardedFor: "1.2.3.4",
 		echo.HeaderXRealIP:       "5.6.7.8",
 	}
-	for _, spec := range []string{"", "  ", ","} {
+	for _, spec := range []string{"", "  ", "\t\n"} {
 		if got := realIPWith(t, spec, "203.0.113.9:4444", spoof); got != "203.0.113.9" {
 			t.Errorf("spec %q: RealIP = %q, want peer 203.0.113.9 (forwarding headers must be ignored)", spec, got)
 		}
@@ -90,5 +90,18 @@ func TestClientIPExtractor_InvalidEntryRefused(t *testing.T) {
 	}
 	if _, err := ClientIPExtractor("10.0.0.0/8, 2001:db8::1 192.0.2.1"); err != nil {
 		t.Errorf("valid mixed spec refused: %v", err)
+	}
+}
+
+// Codex review 2026-11-08 (R2 Low): a value that is non-blank but names no
+// proxy (e.g. "," or " , ") used to select the direct extractor silently while
+// main.go, seeing a non-empty string, logged that X-Forwarded-For was being
+// honoured. An operator could believe proxy attribution was active when it was
+// not. Such a value is malformed and must refuse startup like any other typo.
+func TestClientIPExtractor_SeparatorOnlyIsRejected(t *testing.T) {
+	for _, spec := range []string{",", " , ", ",,\t,"} {
+		if _, err := ClientIPExtractor(spec); err == nil {
+			t.Errorf("spec %q: want error (names no proxy), got nil", spec)
+		}
 	}
 }

@@ -29,13 +29,20 @@ import (
 //     unless its address falls inside a range the operator listed, so exact
 //     proxy addresses are preferred over CIDRs.
 //
-// An unparseable entry is an error so a typo is a startup refusal rather than
-// a silently untrusted proxy.
+// An unparseable entry, or a non-blank value that names no proxy at all (","),
+// is an error so a typo is a startup refusal rather than a silently untrusted
+// proxy. Only a blank value selects the direct mode.
 func ClientIPExtractor(spec string) (echo.IPExtractor, error) {
 	fields := strings.FieldsFunc(spec, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\t' || r == '\n'
 	})
 	if len(fields) == 0 {
+		if strings.TrimSpace(spec) != "" {
+			// Non-blank but names no proxy (e.g. ","): a typo, not an
+			// opt-out. Refuse rather than silently running in direct mode
+			// while the operator believes proxies are trusted.
+			return nil, fmt.Errorf("SBOMHUB_TRUSTED_PROXIES: %q names no proxy address (leave it empty to trust none)", spec)
+		}
 		return echo.ExtractIPDirect(), nil
 	}
 

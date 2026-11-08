@@ -53,10 +53,13 @@
 //     `packages/*/Dockerfile*` + `docker/Dockerfile*` set so a future
 //     `apps/api/Dockerfile.dev`, `packages/mcp-server/Dockerfile`,
 //     etc. is covered without touching this tool.
-//     A `FROM golang:<version>[-<flavor>]` tag may pin either patch
-//     or minor precision (`golang:1.26.4-alpine` or `golang:1.26-alpine`).
-//     If patch is used it must match truth exactly; if minor is used,
-//     the M.N must match truth's M.N. Non-alpine flavors (`-bookworm`,
+//     A `FROM golang:<version>[-<flavor>]` tag must pin patch precision
+//     (`golang:1.26.4-alpine`) matching truth exactly; a minor-only tag
+//     (`golang:1.26-alpine`) is drift, because official golang images set
+//     GOTOOLCHAIN=local and ignore go.mod's toolchain line, so the tag
+//     alone decides which patch compiles the image (Codex review
+//     2026-11-08). Minor precision stays legal for workflow
+//     `go-version:` pins only. Non-alpine flavors (`-bookworm`,
 //     `-bullseye`, etc.) are accepted — only the X.Y[.Z] portion is
 //     compared. **Every `FROM golang:` line in the Dockerfile
 //     participates in the alignment cross-check** (checkDockerfiles
