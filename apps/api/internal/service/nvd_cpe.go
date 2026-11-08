@@ -600,6 +600,25 @@ func compareNumeric(a, b string) int {
 	return strings.Compare(a, b)
 }
 
+// versionCharsSupported is false when the version (before any "+" build
+// metadata) contains a separator other than '.', '-', '_'. Such separators
+// carry scheme-specific order — PEP 440's epoch "1!2.0", Debian's "~"
+// pre-release, RPM's "^" — that this tokenizer cannot honour, so the whole
+// comparison is undecidable (Codex M60 R7 High). Closing the class here, not
+// separator by separator.
+func versionCharsSupported(v string) bool {
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
+	for _, r := range strings.ToLower(v) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // isZero is a zero that can be read as padding — never a dash-number.
 func isZero(t versionToken) bool {
 	return t.num && !t.dashNum && strings.TrimLeft(t.value, "0") == ""
@@ -609,6 +628,9 @@ func isZero(t versionToken) bool {
 // are written. ok is false when they cannot be ordered with confidence;
 // callers must treat that as "unknown", never as "outside".
 func compareVersions(a, b string) (int, bool) {
+	if !versionCharsSupported(a) || !versionCharsSupported(b) {
+		return 0, false
+	}
 	ta, tb := tokeniseVersion(a), tokeniseVersion(b)
 	if len(ta) == 0 || len(tb) == 0 {
 		return 0, false

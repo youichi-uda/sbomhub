@@ -400,7 +400,9 @@ func normaliseSBOMCPEs(in []string) []string {
 		// Only a CPE the scanner can use counts toward the cap (Codex M60
 		// R5 Low): parseCPE accepts the scheme case-insensitively and
 		// requires a valid part and a concrete vendor and product.
-		if _, ok := parseCPE(c); !ok {
+		// A version-NA CPE never becomes a candidate either (Codex M60 R7
+		// Low).
+		if n, ok := parseCPE(c); !ok || n.Version == "-" {
 			continue
 		}
 		// CPE matching is case-insensitive, so case variants are ONE CPE
