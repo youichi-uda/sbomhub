@@ -19,6 +19,11 @@
 //   `/publicity`). They are pinned as-is so a change in EITHER direction is
 //   noticed; tightening them is a separate, tracked change.
 //
+// Scope: this is the createRouteMatcher layer only. Which requests reach
+// the proxy at all is pinned by proxy.matcher.test.mjs, and the Clerk-mode
+// end-to-end behaviour (sign-in redirects) was checked against a running
+// build during the upgrade. It is not yet wired into frontend-ci.yml.
+//
 // Run:
 //   node apps/web/src/proxy.public-routes.test.mjs
 
@@ -84,6 +89,9 @@ const cases = [
   ["/ja/settings/apikeys", false],
   ["/ja/pricing/x", false],
   ["/ja/privacy/x", false],
+  // Classifier-only rows: `config.matcher` excludes every `/api/` path, so
+  // these never reach Clerk (the Go API authenticates its own requests).
+  // They pin the matcher's answer in case that exclusion is ever narrowed.
   ["/api/other", false],
   ["/api/v1/projects", false],
   ["/JA/dashboard", false],
