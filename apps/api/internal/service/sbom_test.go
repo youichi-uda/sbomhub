@@ -606,19 +606,21 @@ func TestExtractSPDX3Version(t *testing.T) {
 	tests := []struct {
 		ctx      string
 		expected string
+		ok       bool
 	}{
-		{"https://spdx.org/rdf/3.0/terms/Core", "3.0"},
-		{"https://spdx.org/rdf/3.0.1/terms/Core", "3.0.1"},
-		{"https://spdx.org/rdf/3.0.1/terms/Software", "3.0.1"},
-		{"https://spdx.org/rdf/3.0/spdx-json-ld-context.jsonld", "3.0"},
-		{"unknown", "3.0"}, // default
+		{"https://spdx.org/rdf/3.0/terms/Core", "3.0", true},
+		{"https://spdx.org/rdf/3.0.1/terms/Core", "3.0.1", true},
+		{"https://spdx.org/rdf/3.0.1/terms/Software", "3.0.1", true},
+		{"https://spdx.org/rdf/3.0/spdx-json-ld-context.jsonld", "3.0", true},
+		{"https://spdx.org/rdf/3.0.2/terms/Core", "3.0.2", false},
+		{"unknown", "", false}, // no longer defaults to 3.0
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.ctx, func(t *testing.T) {
-			result := extractSPDX3Version(tt.ctx)
-			if result != tt.expected {
-				t.Errorf("extractSPDX3Version(%q) = %q, expected %q", tt.ctx, result, tt.expected)
+			result, ok := extractSPDX3Version(tt.ctx)
+			if result != tt.expected || ok != tt.ok {
+				t.Errorf("extractSPDX3Version(%q) = %q, %v; expected %q, %v", tt.ctx, result, ok, tt.expected, tt.ok)
 			}
 		})
 	}

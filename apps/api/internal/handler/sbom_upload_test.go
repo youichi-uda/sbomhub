@@ -132,3 +132,41 @@ func TestSBOMHandler_Upload_InternalError_500_NoLeak_F443(t *testing.T) {
 		t.Errorf("unmet sqlmock expectations: %v", err)
 	}
 }
+
+// An unsupported spec version is refused at detection with a 400 that names
+// the accepted versions, before the SBOM row is written (no sqlmock
+// expectations: reaching the repository would be an unexpected query). Before
+// the check, CycloneDX "1.8" passed detection, the row was inserted, and the
+// library's rejection came after.
+func TestSBOMHandler_Upload_UnsupportedSpecVersion_400(t *testing.T) {
+	bodies := map[string]string{
+		"cyclonedx 1.8":       `{"bomFormat":"CycloneDX","specVersion":"1.8","version":1,"components":[]}`,
+		"cyclonedx missing":   `{"bomFormat":"CycloneDX","version":1,"components":[]}`,
+		"spdx-3.0 in 2.x key": `{"spdxVersion":"SPDX-3.0","packages":[]}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			sbomService := service.NewSbomService(
+				repository.NewSbomRepository(db),
+				repository.NewComponentRepository(db),
+			)
+			h := NewSbomHandler(db, sbomService, nil, nil, nil)
+
+			rec := driveUpload(t, h, uuid.New(), body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("want 400, got %d (body=%s)", rec.Code, rec.Body.String())
+			}
+			if !contains(rec.Body.String(), "unsupported") || !contains(rec.Body.String(), "supported:") {
+				t.Errorf("body must say the version is unsupported and list what is: %s", rec.Body.String())
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet sqlmock expectations: %v", err)
+			}
+		})
+	}
+}

@@ -221,47 +221,141 @@ func detectFormat(data []byte) (model.SbomFormat, error) {
 	return info.Format, nil
 }
 
-// detectFormatAndVersion detects the SBOM format and extracts the spec version
+// ErrUnsupportedSpecVersion marks an upload whose format was recognised but
+// whose spec version this server cannot parse (or that has none). Callers
+// wrap detection failures in ValidationErrorf, so it is answered 400.
+var ErrUnsupportedSpecVersion = errors.New("unsupported SBOM spec version")
+
+// supportedCycloneDXVersions lists, in order, the CycloneDX spec versions the
+// linked cyclonedx-go accepts — read from the library rather than written
+// down here, so a library upgrade that adds a version is picked up without a
+// second edit (it is the library that parses the document).
+var supportedCycloneDXVersions = func() []string {
+	var out []string
+	for v := cdx.SpecVersion1_0; ; v++ {
+		var probe cdx.SpecVersion
+		b, _ := json.Marshal(v.String())
+		if probe.UnmarshalJSON(b) != nil || probe != v {
+			return out
+		}
+		out = append(out, v.String())
+	}
+}()
+
+// supportedSPDX2Versions are the SPDX 2.x "spdxVersion" values parseSPDX
+// reads. Its reader only uses fields shared by every 2.x JSON document
+// (packages[].name / versionInfo / externalRefs).
+var supportedSPDX2Versions = []string{"2.0", "2.1", "2.2", "2.3"}
+
+// supportedSPDX3Versions are the SPDX 3 releases whose JSON-LD @context
+// parseSPDX3 is written against.
+var supportedSPDX3Versions = []string{"3.0", "3.0.1"}
+
+// detectFormatAndVersion detects the SBOM format and its spec version, and
+// refuses a version this server does not support (ErrUnsupportedSpecVersion)
+// rather than storing the upload and parsing it on a guess.
+//
+// It runs before the SBOM row is written, so an unsupported upload leaves
+// nothing behind.
 func detectFormatAndVersion(data []byte) (*FormatInfo, error) {
-	var raw map[string]interface{}
+	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 
-	// CycloneDX: check "bomFormat" + extract "specVersion"
+	// CycloneDX: "bomFormat" present; "specVersion" is required by every
+	// CycloneDX JSON schema and decides what the document may contain.
 	if _, ok := raw["bomFormat"]; ok {
-		version, _ := raw["specVersion"].(string)
+		version, ok := jsonString(raw["specVersion"])
+		if !ok || !containsString(supportedCycloneDXVersions, version) {
+			return nil, unsupportedVersionError("CycloneDX", "specVersion", raw["specVersion"], supportedCycloneDXVersions)
+		}
 		return &FormatInfo{Format: model.FormatCycloneDX, Version: version}, nil
 	}
 
-	// SPDX 2.x: check "spdxVersion" (e.g., "SPDX-2.3")
-	if spdxVer, ok := raw["spdxVersion"].(string); ok {
-		version := strings.TrimPrefix(spdxVer, "SPDX-")
+	// SPDX 2.x: "spdxVersion" is "SPDX-2.<minor>". SPDX 3 documents are
+	// JSON-LD and do not carry this key, so an "SPDX-3.x" value here is not a
+	// document parseSPDX3 can read.
+	if rawVer, ok := raw["spdxVersion"]; ok {
+		spdxVer, isString := jsonString(rawVer)
+		version, hasPrefix := strings.CutPrefix(spdxVer, "SPDX-")
+		if !isString || !hasPrefix || !containsString(supportedSPDX2Versions, version) {
+			return nil, unsupportedVersionError("SPDX", "spdxVersion", rawVer, prefixAll("SPDX-", supportedSPDX2Versions))
+		}
 		return &FormatInfo{Format: model.FormatSPDX, Version: version}, nil
 	}
 
-	// SPDX 3.0: check "@context" contains "spdx.org/rdf/3.0"
-	if ctx, ok := raw["@context"].(string); ok {
-		if strings.Contains(ctx, "spdx.org/rdf/3.0") {
-			version := extractSPDX3Version(ctx)
-			return &FormatInfo{Format: model.FormatSPDX, Version: version}, nil
+	// SPDX 3: "@context" points into spdx.org/rdf/3.<...>/.
+	if ctx, ok := jsonString(raw["@context"]); ok && strings.Contains(ctx, "spdx.org/rdf/3") {
+		version, ok := extractSPDX3Version(ctx)
+		if !ok {
+			return nil, unsupportedVersionError("SPDX 3", "@context", raw["@context"], supportedSPDX3Versions)
 		}
+		return &FormatInfo{Format: model.FormatSPDX, Version: version}, nil
 	}
 
 	return nil, fmt.Errorf("unknown SBOM format")
 }
 
-// extractSPDX3Version extracts the SPDX 3.x version from the @context URL
-func extractSPDX3Version(ctx string) string {
-	// Handle patterns like "https://spdx.org/rdf/3.0.1/terms/Core"
-	// or "https://spdx.org/rdf/3.0/terms/Core"
-	if strings.Contains(ctx, "spdx.org/rdf/3.0.1") {
-		return "3.0.1"
+// unsupportedVersionError is the 400 text for an unsupported version. The
+// offending value is quoted (and truncated) so a client sees what it sent.
+func unsupportedVersionError(format, field string, got json.RawMessage, supported []string) error {
+	shown := "missing"
+	if len(got) > 0 {
+		shown = string(got)
+		if len(shown) > 40 {
+			shown = shown[:40] + "..."
+		}
 	}
-	if strings.Contains(ctx, "spdx.org/rdf/3.0") {
-		return "3.0"
+	return fmt.Errorf("%w: %s %s %s (supported: %s)",
+		ErrUnsupportedSpecVersion, format, field, shown, strings.Join(supported, ", "))
+}
+
+// jsonString decodes a JSON string value; anything else (absent, null,
+// number, object) reports false.
+func jsonString(v json.RawMessage) (string, bool) {
+	if len(v) == 0 {
+		return "", false
 	}
-	return "3.0" // default to 3.0
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil {
+		return "", false
+	}
+	return s, true
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func prefixAll(prefix string, list []string) []string {
+	out := make([]string, len(list))
+	for i, v := range list {
+		out[i] = prefix + v
+	}
+	return out
+}
+
+// extractSPDX3Version reads the release from an SPDX 3 @context URL
+// ("https://spdx.org/rdf/3.0.1/terms/Core" → "3.0.1") and reports whether it
+// is one this server supports. The release is the whole path segment after
+// "spdx.org/rdf/", so "3.0.2" is not mistaken for "3.0".
+func extractSPDX3Version(ctx string) (string, bool) {
+	const marker = "spdx.org/rdf/"
+	i := strings.Index(ctx, marker)
+	if i < 0 {
+		return "", false
+	}
+	rest := ctx[i+len(marker):]
+	if j := strings.IndexByte(rest, '/'); j >= 0 {
+		rest = rest[:j]
+	}
+	return rest, containsString(supportedSPDX3Versions, rest)
 }
 
 func parseComponents(data []byte, format model.SbomFormat, version string) ([]model.Component, error) {
