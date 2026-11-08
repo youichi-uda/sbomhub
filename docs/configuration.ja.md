@@ -45,8 +45,11 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 |------|---------|------|
 | `NVD_API_KEY` | (空) | NVD APIキー（レート制限緩和用）。https://nvd.nist.gov/developers/request-an-api-key で取得 |
 | `SBOMHUB_NVD_RECONCILE_INTERVAL` | `30d` | CVE sync が NVD の**全カタログ**を読み直し、日次の差分 feed では届かない (NVD が最近更新していない CVE の) 保存済み metadata を更新する間隔。日数 (`30d`)、Go の duration (`720h`)、または無効化の `off` / `disabled` / `false` / `0` を指定。24h 未満や解釈できない値は起動時に拒否します。`SBOMHUB_OFFLINE=true` のときは実行しませんが、値の検証は起動時に行います。 |
+| `SBOMHUB_SCAN_DEADLINE` | `30m` | SBOM 1 件の脆弱性スキャン (NVD + JVN) 全体の期限。アップロード後のスキャン、`POST /api/v1/projects/:id/scan`、定期スキャンの各プロジェクトに適用。`1m` 以上 `24h` 以下の Go の duration を指定。それ以外 (`off` を含む) は起動時に拒否します (スキャンには常に期限があります)。下記参照。 |
 
 全件の読み直しは NVD への約 300 request・約 2.4 GB (2026-11-08 実測ベース) で、`NVD_API_KEY` ありで約 20 分、なしで 1 時間強かかります。request 間隔は日次 sync の 2 倍です。日次 sync と同じ job の中で日次 sync の後に実行されるため同時には走らず、各実行 (日次 sync の後と、プロセス起動時) に 6 時間の期限があり、期限で中断された窓は次の実行で最初から読み直すため、日次 feed を待たせるのは最大でもおよそその時間です。進捗は `system_settings` の `cve_catalogue_reconcile` 行 (JSON) に保存され、再起動しても途中から再開します。同じ行に直近の結果 (`completed`、または `completed_with_write_failures` と失敗した書き込みの件数・該当 CVE ID 最大 20 件) が記録されます。更新対象はカタログに既にある CVE だけで、新しい CVE は追加しません。[UPGRADE.md §12](./UPGRADE.md) も参照してください。
+
+**スキャン期限。** 既定値 30 分は、計測した中で最も遅いスキャンのおよそ 2 倍です: `NVD_API_KEY` なしで Linux kernel を含む SBOM を cold cache でスキャンすると、NVD への 68 request で 14 分 24 秒かかりました (live NVD、2026-11-08)。API キーなしでは NVD への request が 1 件 6 秒に制限されるため、30 分に入る NVD request は 300 件未満です。component 1 件あたり keyword 経路で 1 request、CPE 経路で通常 1〜5 request かかる (UPGRADE §13.5) ので、distinct な component がおよそ 100〜250 を超える SBOM は `NVD_API_KEY` (1 件 0.7 秒) を設定するか期限を延ばさないと時間内に終わりません。期限に達すると、それまでに得た検出結果は commit され、スキャンは `failed` と報告されます — `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` が `"reasons": ["deadline_exceeded"]` を返し、定期スキャンのログは `scan failed (deadline_exceeded)` になります — また、完全な回答としては何も cache されません。API は期限を名指しする `WARN` を出力します。NVD / JVN の応答を待つ間に DB のトランザクションは保持しないため、期限を長くしても接続やロックは消費しません。
 
 ### LLM プロバイダ (AI 機能・BYOK)
 
