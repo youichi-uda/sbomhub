@@ -412,6 +412,11 @@ describe("malformed value types keep zod 3's messages (Codex R1 Low)", () => {
     assert.deepEqual(firstPerField(reportEditSchema, { draft_text: thenable, decision_note: "" }), [
       ["draft_text", "Expected string, received promise"],
     ]);
+    // ...checked BEFORE the built-in classes (Codex R4 Low).
+    const thenableDate = Object.assign(new Date(0), { then() {}, catch() {} });
+    assert.deepEqual(firstPerField(reportEditSchema, { draft_text: thenableDate, decision_note: "" }), [
+      ["draft_text", "Expected string, received promise"],
+    ]);
   });
   test("enum fields", () => {
     const exp = STATES.map((v) => `'${v}'`).join(" | ");

@@ -21,17 +21,18 @@ export function maxChars(n: number): { error: string } {
 function v3TypeName(input: unknown): string {
   if (input === null) return "null";
   if (Array.isArray(input)) return "array";
-  if (input instanceof Date) return "date";
-  if (input instanceof Map) return "map";
-  if (input instanceof Set) return "set";
+  // zod 3 tests for a thenable (callable then + catch) before Date/Map/Set.
   if (
     (typeof Promise !== "undefined" && input instanceof Promise) ||
     (typeof input === "object" &&
       typeof (input as { then?: unknown }).then === "function" &&
       typeof (input as { catch?: unknown }).catch === "function")
   ) {
-    return "promise"; // zod 3 treats any thenable with catch() as a promise
+    return "promise";
   }
+  if (input instanceof Date) return "date";
+  if (input instanceof Map) return "map";
+  if (input instanceof Set) return "set";
   if (typeof input === "number" && Number.isNaN(input)) return "nan";
   return typeof input;
 }
