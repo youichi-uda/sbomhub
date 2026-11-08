@@ -270,3 +270,57 @@ func TestM60ComponentCPEs_RoundTrip(t *testing.T) {
 		t.Errorf("a component without CPEs is stored as a non-NULL array")
 	}
 }
+
+// Codex M60 R1 Medium: when another transaction inserts a WEAK link for the
+// same pair and commits while this LinkComponent waits on the conflict, the
+// upward relabel must still happen. A single-statement CTE cannot see that
+// row (its snapshot predates the commit), so the call "succeeded" and the
+// weak label stayed. Typical shape: the CVE-sync linker and an upload scan
+// writing the same link at the same time.
+func TestM60LinkComponent_RelabelsARowInsertedConcurrently(t *testing.T) {
+	appURL, migURL := rlsTestEnv(t)
+	appDB := openOrSkip(t, appURL)
+	migDB := openOrSkip(t, migURL)
+
+	tenantID, componentID := m54SeedComponentForLink(t, migDB)
+	v := m57ScannerVuln(t, migDB, m55MetaCVEID())
+	repo := NewVulnerabilityRepository(appDB)
+	if err := repo.Create(context.Background(), v); err != nil {
+		t.Fatal(err)
+	}
+
+	// A: inserts the weak link and holds it uncommitted.
+	_, ctxA, commitA := m57OpenTenantTx(t, appDB, tenantID)
+	if err := repo.LinkComponent(ctxA, componentID, v.ID, model.MatchJVNKeyword); err != nil {
+		t.Fatal(err)
+	}
+
+	// B: the strong write, which must wait on A's uncommitted row.
+	_, ctxB, commitB := m57OpenTenantTx(t, appDB, tenantID)
+	done := make(chan error, 1)
+	go func() { done <- repo.LinkComponent(ctxB, componentID, v.ID, model.MatchNVDCPE) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("B did not wait for A's uncommitted insert (err=%v)", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := commitA(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("B: %v", err)
+	}
+	if err := commitB(); err != nil {
+		t.Fatal(err)
+	}
+
+	var m string
+	if err := migDB.QueryRow(`SELECT match_method FROM component_vulnerabilities WHERE component_id = $1 AND vulnerability_id = $2`,
+		componentID, v.ID).Scan(&m); err != nil {
+		t.Fatal(err)
+	}
+	if m != "nvd_cpe" {
+		t.Errorf("stored method = %s, want nvd_cpe: the relabel was lost to a concurrent weak insert", m)
+	}
+}
