@@ -21,9 +21,9 @@ Strategy doc: `sbomhub-internal/planning/PRODUCT_REBOOT_PLAN.md` (internal).
 
 ## Tech Stack
 
-- Backend: Go 1.22+ (Echo v4)
-- Frontend: Next.js 16 (App Router) + React 19 + TypeScript 5.7
-- UI: shadcn/ui + Tailwind CSS 3.4
+- Backend: Go 1.26 (Echo v4)
+- Frontend: Next.js 16 (App Router) + React 19 + TypeScript 6
+- UI: shadcn/ui + Tailwind CSS 4
 - Database: PostgreSQL 15+ (with Row-Level Security)
 - Cache/Queue: Redis 7+
 - LLM (optional, BYOK): OpenAI / Anthropic / Google Gemini / Ollama
