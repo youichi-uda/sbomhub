@@ -300,6 +300,11 @@ func TestM51RateLimitBucketTTLSelfRepairs(t *testing.T) {
 	budgets := map[string]Budget{"/std": BudgetStandard}
 	h := newM51Harness(t, budgets)
 	ctx := context.Background()
+	// Stay clear of a minute boundary, or the request would charge the next
+	// bucket while this asserts on the current one (Codex R3 Low).
+	if s := time.Now().UTC().Second(); s >= 58 {
+		time.Sleep(time.Duration(61-s) * time.Second)
+	}
 	key := rateLimitRedisKey(h.key, BudgetStandard, time.Now().UTC())
 	// The state a lost EXPIRE leaves behind: a counter with no TTL.
 	if err := h.rdb.Set(ctx, key, 1, 0).Err(); err != nil {

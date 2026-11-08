@@ -220,6 +220,11 @@ func AcquireMigrationLock(ctx context.Context, db *sql.DB, opts MigrateOptions) 
 			return nil, nil, fmt.Errorf("migration lock: %w", err)
 		}
 		if got {
+			if !time.Now().Before(deadline) {
+				// Granted, but the answer arrived after the budget: give it
+				// back rather than start migrating late (Codex R3 Medium).
+				return nil, nil, timedOut()
+			}
 			if waited := time.Since(start); waited >= migrationLockPoll {
 				slog.Info("acquired migration lock", "waited", waited.Round(time.Millisecond).String())
 			}

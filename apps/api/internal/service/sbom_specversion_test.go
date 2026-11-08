@@ -30,7 +30,7 @@ func cdxDoc(specVersion string) []byte {
 }
 
 func TestDetectFormatAndVersion_CycloneDXSupportedVersions(t *testing.T) {
-	for _, v := range []string{"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7"} {
+	for _, v := range []string{"1.2", "1.3", "1.4", "1.5", "1.6", "1.7"} {
 		info, err := detectFormatAndVersion(cdxDoc(`"specVersion":"` + v + `",`))
 		if err != nil {
 			t.Fatalf("specVersion %s: unexpected error %v", v, err)
@@ -51,6 +51,9 @@ func TestDetectFormatAndVersion_CycloneDXUnsupportedVersions(t *testing.T) {
 		"null":           `"specVersion":null,`,
 		"padded":         `"specVersion":" 1.5",`,
 		"patch spelling": `"specVersion":"1.5.0",`,
+		// CycloneDX has a JSON format only from 1.2 (Codex R3 Medium).
+		"1.0 (XML-only)": `"specVersion":"1.0",`,
+		"1.1 (XML-only)": `"specVersion":"1.1",`,
 	}
 	for name, field := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -62,7 +65,7 @@ func TestDetectFormatAndVersion_CycloneDXUnsupportedVersions(t *testing.T) {
 				t.Fatalf("error %v is not ErrUnsupportedSpecVersion", err)
 			}
 			msg := err.Error()
-			if !strings.Contains(msg, "CycloneDX") || !strings.Contains(msg, "1.7") || !strings.Contains(msg, "1.0") {
+			if !strings.Contains(msg, "CycloneDX") || !strings.Contains(msg, "1.7") || !strings.Contains(msg, "1.2") {
 				t.Fatalf("message must name the format and the supported range, got %q", msg)
 			}
 		})

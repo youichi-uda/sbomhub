@@ -229,9 +229,12 @@ func detectFormat(data []byte) (model.SbomFormat, error) {
 var ErrUnsupportedSpecVersion = errors.New("unsupported SBOM spec version")
 
 // supportedCycloneDXVersions lists, in order, the CycloneDX spec versions the
-// linked cyclonedx-go accepts — read from the library rather than written
-// down here, so a library upgrade that adds a version is picked up without a
-// second edit (it is the library that parses the document).
+// linked cyclonedx-go accepts AND that have a JSON format — read from the
+// library rather than written down here, so a library upgrade that adds a
+// version is picked up without a second edit (it is the library that parses
+// the document). CycloneDX 1.0 and 1.1 were XML-only; the library knows them
+// but refuses them for JSON (MediaTypeJSON.WithVersion), so a JSON document
+// claiming them is not a real CycloneDX document (Codex R3 Medium).
 var supportedCycloneDXVersions = func() []string {
 	var out []string
 	for v := cdx.SpecVersion1_0; ; v++ {
@@ -240,13 +243,19 @@ var supportedCycloneDXVersions = func() []string {
 		if probe.UnmarshalJSON(b) != nil || probe != v {
 			return out
 		}
+		if _, err := cdx.MediaTypeJSON.WithVersion(v); err != nil {
+			continue
+		}
 		out = append(out, v.String())
 	}
 }()
 
 // supportedSPDX2Versions are the SPDX 2.x "spdxVersion" values parseSPDX
 // reads. Its reader only uses fields shared by every 2.x JSON document
-// (packages[].name / versionInfo / externalRefs).
+// (packages[].name / versionInfo / externalRefs). JSON became an official
+// SPDX serialisation in 2.2, but 2.0 / 2.1 stay accepted: tools emitted
+// JSON for them before that, the fields read here are the same, and
+// refusing them would break uploads that work today.
 var supportedSPDX2Versions = []string{"2.0", "2.1", "2.2", "2.3"}
 
 // supportedSPDX3Versions are the SPDX 3 releases whose JSON-LD @context
@@ -449,7 +458,7 @@ func parseSPDX(data []byte) ([]model.Component, error) {
 	var components []model.Component
 	rawPackages, present := raw["packages"]
 	packages, isArray := rawPackages.([]interface{})
-	if present && rawPackages != nil && !isArray {
+	if present && !isArray { // null included: the schema requires an array (Codex R3 Medium)
 		return nil, fmt.Errorf("SPDX packages must be an array")
 	}
 	for i, pkg := range packages {

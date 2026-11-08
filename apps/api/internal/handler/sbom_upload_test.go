@@ -181,6 +181,7 @@ func TestSBOMHandler_Upload_ParseFailureTouchesNoRepository(t *testing.T) {
 		"spdx3 graph not an array":          `{"@context":"https://spdx.org/rdf/3.0.1/spdx-context.jsonld","@graph":"x"}`,
 		"spdx2 packages not an array":       `{"spdxVersion":"SPDX-2.3","packages":5}`,
 		"spdx2 package not an object":       `{"spdxVersion":"SPDX-2.3","packages":[1]}`,
+		"spdx2 packages null":               `{"spdxVersion":"SPDX-2.3","packages":null}`,
 	}
 	for name, body := range bodies {
 		t.Run(name, func(t *testing.T) {
