@@ -224,12 +224,20 @@
         "nullable": true,
         "type": "timestamp with time zone"
       },
+      "match_method": {
+        "nullable": true,
+        "type": "character varying(32)"
+      },
       "vulnerability_id": {
         "nullable": false,
         "type": "uuid"
       }
     },
     "components": {
+      "cpes": {
+        "nullable": true,
+        "type": "text[]"
+      },
       "created_at": {
         "nullable": true,
         "type": "timestamp with time zone"
