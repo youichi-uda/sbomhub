@@ -841,7 +841,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 		q.Set("cpeName", c.query())
 		res, err := s.walkNVD(ctx, q, pace, paceFirst, nvdCPEMaxPagesPerComponent)
 		spent += res.pages
-		if err != nil {
+		if err != nil && !partialWalk(ctx, &res, c, err) {
 			return nvdLookup{requests: spent}, false, err
 		}
 		if res.total > 0 || len(res.entries) > 0 {
@@ -875,7 +875,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 	pq.Set("virtualMatchString", c.productQuery())
 	res, err := s.walkNVD(ctx, pq, pace, paceFirst || spent > 0, nvdCPEMaxPagesPerComponent)
 	spent += res.pages
-	if err != nil {
+	if err != nil && !partialWalk(ctx, &res, c, err) {
 		return nvdLookup{requests: spent}, false, err
 	}
 	if res.total == 0 && len(res.entries) == 0 {
@@ -905,6 +905,26 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 		s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
 	}
 	return out, true, nil
+}
+
+// partialWalk decides whether a CPE walk that failed partway is kept as a
+// TRUNCATED answer: only when at least one page validated and the context is
+// still live (a cancelled sweep stays an error). Found by the M60 decision-2
+// end-to-end run: a 35.8 s kernel page past the client timeout made the whole
+// kernel lookup a partial fetch failure — 0 findings, not escalated. A
+// truncated answer IS escalated (the scan reports failed) and never cached,
+// and the verified pages' findings are kept.
+func partialWalk(ctx context.Context, res *nvdSearchResult, c cpeCandidate, err error) bool {
+	if ctx.Err() != nil || len(res.entries) == 0 {
+		return false
+	}
+	res.truncated = true
+	if res.total <= res.fetched {
+		res.total = res.fetched + 1 // at least one record is known to be missing
+	}
+	slog.Warn("nvd: CPE walk failed partway; keeping the verified pages and reporting the answer truncated",
+		"cpe", c.String(), "pages", res.pages, "fetched", res.fetched, "total", res.total, "error", err)
+	return true
 }
 
 // productHasVulnerableEvidence reports whether any criterion of the record

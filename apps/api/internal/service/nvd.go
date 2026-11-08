@@ -85,6 +85,13 @@ const (
 	// under the 30 s client timeout (a 200-record kernel page measured 2.0 s,
 	// 2 MB). There is no overall scan deadline (pre-existing).
 	nvdCPEMaxPagesPerComponent = 60
+
+	// nvdClientTimeout bounds ONE NVD request. It was 30 s; the M60 kernel run
+	// (2026-11-08, live NVD) measured deep kernel pages of 200 records at
+	// 15-36 s, one of them 35.8 s at NVD itself, so 30 s failed a full kernel
+	// walk. 60 s covers the measured worst case with headroom. It bounds a
+	// single request, not a scan (there is no overall scan deadline).
+	nvdClientTimeout = 60 * time.Second
 )
 
 type NVDService struct {
@@ -114,7 +121,7 @@ func NewNVDService(vr *repository.VulnerabilityRepository, cr *repository.Compon
 		baseURL = nvdAPIBase
 	}
 	return &NVDService{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{Timeout: nvdClientTimeout},
 		vulnRepo:   vr,
 		compRepo:   cr,
 		apiKey:     apiKey,
@@ -131,7 +138,7 @@ func NewNVDServiceWithCache(vr *repository.VulnerabilityRepository, cr *reposito
 		baseURL = nvdAPIBase
 	}
 	return &NVDService{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{Timeout: nvdClientTimeout},
 		vulnRepo:   vr,
 		compRepo:   cr,
 		cache:      nvdCache,
@@ -1437,7 +1444,13 @@ func (s *NVDService) searchByKeywordPaced(ctx context.Context, name, version str
 	}
 	q := url.Values{}
 	q.Set("keywordSearch", keyword)
-	return s.walkNVD(ctx, q, pace, paceFirst, nvdMaxPagesPerComponent)
+	res, err := s.walkNVD(ctx, q, pace, paceFirst, nvdMaxPagesPerComponent)
+	if err != nil {
+		// A failed keyword walk is a failed lookup, records and all (M55);
+		// only the page count survives, for the request accounting.
+		return nvdSearchResult{pages: res.pages}, err
+	}
+	return res, nil
 }
 
 // walkNVD pages one NVD CVE query — keywordSearch (searchByKeyword) or
@@ -1490,7 +1503,14 @@ func (s *NVDService) walkNVD(ctx context.Context, query url.Values, pace nvdPace
 			// stop, only with a nicer-looking count. The PAGE COUNT is still
 			// returned, so the sweep's request accounting includes the
 			// requests that were actually spent (Codex M55 R1, Low).
-			return nvdSearchResult{pages: out.pages}, err
+			//
+			// The records of the pages that DID validate are returned with
+			// the error too (M60). The keyword path ignores them and fails
+			// the lookup as before; the CPE path turns a mid-walk failure
+			// into an escalated truncation instead of losing every verified
+			// page (lookupCPECandidate).
+			out.fetched = start
+			return out, err
 		}
 		out.total = *page.TotalResults
 		if firstTotal < 0 {

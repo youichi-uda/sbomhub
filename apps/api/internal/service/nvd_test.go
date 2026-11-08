@@ -572,8 +572,10 @@ func TestNewNVDService(t *testing.T) {
 	if svc.httpClient == nil {
 		t.Error("httpClient should not be nil")
 	}
-	if svc.httpClient.Timeout != 30*time.Second {
-		t.Errorf("expected timeout 30s, got %v", svc.httpClient.Timeout)
+	// M60: 30 s -> nvdClientTimeout (60 s), sized from a measured 35.8 s
+	// deep kernel page.
+	if svc.httpClient.Timeout != nvdClientTimeout {
+		t.Errorf("expected timeout %v, got %v", nvdClientTimeout, svc.httpClient.Timeout)
 	}
 }
 
