@@ -266,14 +266,30 @@ function asserts(node: ts.Node | undefined): boolean {
     return found;
 }
 
-/** Could `node` leave the enclosing block early (shallow: not nested fns)? */
+/**
+ * Could `node` leave the enclosing block SILENTLY, skipping what follows it?
+ * A `return` can. A `throw` cannot — it is a loud failure, not a silent pass.
+ * A `break` / `continue` can only if its target is outside `node`: one that
+ * targets a loop or switch inside `node` resumes after it (Codex R6 Medium).
+ * Labelled jumps are treated as leaving (conservative toward reporting).
+ */
 function canLeave(node: ts.Node): boolean {
     let found = false;
-    walkShallow(node, (n) => {
-        if (found) return true;
-        if (ts.isReturnStatement(n) || ts.isThrowStatement(n) || ts.isBreakStatement(n) || ts.isContinueStatement(n)) found = true;
-        return undefined;
-    });
+    const visit = (n: ts.Node, innerTargets: number): void => {
+        if (found) return;
+        if (n !== node && isFunctionLike(n)) return;
+        if (ts.isReturnStatement(n)) {
+            found = true;
+            return;
+        }
+        if ((ts.isBreakStatement(n) || ts.isContinueStatement(n)) && (n.label !== undefined || innerTargets === 0)) {
+            found = true;
+            return;
+        }
+        const isTarget = ts.isIterationStatement(n, false) || ts.isSwitchStatement(n);
+        ts.forEachChild(n, (c) => visit(c, innerTargets + (isTarget ? 1 : 0)));
+    };
+    visit(node, 0);
     return found;
 }
 
@@ -485,9 +501,9 @@ export function analyzeVacuous(fileName: string, text: string): VacuousSite[] {
                 // if an UNCONDITIONAL assertion is reached — a top-level
                 // expression statement (`await expect(…)`, `await helper()`) or
                 // a `return <assertion>` — before anything that could leave
-                // without one: any statement containing a return/throw/break/
-                // continue (Codex R4 Low, R5 Medium). Nested assertions (in an
-                // if/loop) do not count.
+                // silently without one (see canLeave; a throw is loud and does
+                // not count) (Codex R4 Low, R5/R6 Medium). Nested assertions
+                // (in an if/loop) do not count.
                 for (const st of parent.statements.slice(idx + 1)) {
                     if (ts.isExpressionStatement(st) && branchExpects(st)) return true;
                     if (ts.isReturnStatement(st)) return st.expression !== undefined && branchExpects(st.expression);
@@ -979,6 +995,21 @@ test.describe('b', () => {
         `${HDR}let body = async ({ page }: any) => { await page.goto('/setup'); };
 body = async ({ page }: any) => { await expect(page.locator('main')).toBeVisible(); };
 test('t', body);`,
+    ],
+    [
+        // Codex R6 Medium: a later throw is a loud exit, and a loop's own
+        // break/continue does not bypass what follows the loop.
+        'asserting early return, then a throw guard and a loop with break',
+        `${HDR}test('t', async ({ page }) => {
+    const rows = page.locator('tr');
+    if (await page.getByText('empty').isVisible()) {
+        await expect(rows).toHaveCount(0);
+        return;
+    }
+    if (!rows) throw new Error('bad setup');
+    for (const n of [1, 2]) { if (n > 1) break; }
+    await expect(rows.first()).toBeVisible();
+});`,
     ],
 ];
 

@@ -236,7 +236,16 @@ test.describe("AI CRA Reports (M2-5)", () => {
             await page.goto(`/en/projects/${project.projectId}/cra-reports`);
             // Show only the pending queue (the default "Any" view would bring
             // the approved row straight back on the refetch).
+            const isPendingList = (r: import("@playwright/test").Response) =>
+                r.request().method() === "GET" &&
+                new URL(r.url()).pathname === `/api/v1/projects/${project.projectId}/cra-reports` &&
+                new URL(r.url()).searchParams.get("decision") === "pending";
+            // Let the filter's own pending fetch land completely first, so the
+            // listener below can only match the refetch Approve triggers
+            // (Codex R6 Medium).
+            const filtered = page.waitForResponse(isPendingList);
             await page.getByTestId("filter-decision").selectOption("pending");
+            await (await filtered).finished();
             const card = cardFor(page, report);
             await expect(card).toBeVisible({ timeout: 10000 });
 
@@ -246,12 +255,7 @@ test.describe("AI CRA Reports (M2-5)", () => {
             // applies list responses in arrival order, so a late pending
             // response would overwrite the approved view — a real race,
             // reproduced deterministically in the fixme test that follows.
-            const pendingRefetch = page.waitForResponse(
-                (r) =>
-                    r.request().method() === "GET" &&
-                    new URL(r.url()).pathname === `/api/v1/projects/${project.projectId}/cra-reports` &&
-                    new URL(r.url()).searchParams.get("decision") === "pending",
-            );
+            const pendingRefetch = page.waitForResponse(isPendingList);
             await card.getByTestId("cra-approve").click();
             await expect(card).toHaveCount(0);
             const refetched = await pendingRefetch;
@@ -315,7 +319,14 @@ test.describe("AI CRA Reports (M2-5)", () => {
                 releasePending();
                 // Let the stale answer land completely and React commit it; the approved
                 // view must still be there.
-                await (await stale).finished();
+                const staleResponse = await stale;
+                await staleResponse.finished();
+                // The late answer really is one that would erase the card: a successful
+                // pending list without the approved report (Codex R6 Low). Otherwise the
+                // UI assertion below could pass with the bug present.
+                expect(staleResponse.status()).toBe(200);
+                const staleIds = ((await staleResponse.json()).reports as Array<{ id: string }>).map((r) => r.id);
+                expect(staleIds).not.toContain(report.id);
                 await nextFrame(page);
                 await expect(card).toBeVisible();
             } finally {
