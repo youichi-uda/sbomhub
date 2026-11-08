@@ -229,6 +229,17 @@ func (c cpeCandidate) query() string {
 		escapeCPE23(c.version) + ":" + update + ":*:*:*:*:*:*"
 }
 
+// identity is what the candidate's answer depends on: the query plus the
+// update tri-state. NA and ANY send the same query but verify differently
+// (Codex M60 R11), so they must not share a cache entry or a work item
+// (Codex M60 R12 High).
+func (c cpeCandidate) identity() string {
+	if c.updateNA {
+		return c.query() + "|na"
+	}
+	return c.query()
+}
+
 // productQuery is the version-less virtualMatchString used to ask whether NVD
 // knows the product at all.
 func (c cpeCandidate) productQuery() string {
@@ -472,6 +483,15 @@ func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
 			if c.update != "" {
 				return cpeRejected
 			}
+			// A candidate with update ANY and a version string carrying no
+			// qualifier ("2.0", Syft's default "2.0:*") is taken to BE the
+			// final release, and matches. Deliberate (Codex M60 R12
+			// Medium-1, declined): an SBOM writes a pre-release's qualifier
+			// into the version string ("2.0-beta9", compared below against
+			// the plain "2.0" and rejected), and this is the inclusive
+			// direction — at worst a high-confidence false positive, never
+			// a missed finding. Making it undecidable would downgrade every
+			// exact-version NVD criterion for every Syft SBOM.
 		default:
 			target += "-" + crit.Update
 			if cmp, ok := compareVersions(mine, target); ok && cmp == 0 {
@@ -708,13 +728,25 @@ func versionCharsSupported(v string) bool {
 	if i := strings.IndexByte(v, '+'); i >= 0 {
 		v = v[:i]
 	}
+	// Empty segments ("1..0") and leading/trailing separators (".1",
+	// "1.0.") are read differently by different schemes; the tokenizer
+	// would collapse them (Codex M60 R12 Medium-2).
+	isSep := func(r rune) bool { return r == '.' || r == '-' || r == '_' }
+	prevSep := true // a leading separator is an empty first segment
 	for _, r := range strings.ToLower(v) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
-			continue
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			prevSep = false
+		case isSep(r):
+			if prevSep {
+				return false
+			}
+			prevSep = true
+		default:
+			return false
 		}
-		return false
 	}
-	return true
+	return v != "" && !prevSep
 }
 
 func sameKind(ta []versionToken, i int, tb []versionToken, j int) bool {
@@ -885,7 +917,7 @@ const (
 // The entry holds only CVEs that passed verifyCPEMatch; an EMPTY entry means
 // "NVD knows this product and none of its CVEs covers this version".
 func nvdCPECacheName(c cpeCandidate) string {
-	q := c.query()
+	q := c.identity()
 	sum := sha256.Sum256([]byte(strconv.Itoa(len(q)) + ":" + q))
 	return nvdCPECacheSchema + hex.EncodeToString(sum[:])
 }
@@ -908,7 +940,7 @@ func nvdNoCPECacheName(c cpeCandidate) string {
 func nvdWorkKey(name, version string, cpes []string, purl string) nvdComponentKey {
 	var b strings.Builder
 	for _, c := range cpeCandidates(cpes, version, purl) {
-		q := c.query()
+		q := c.identity()
 		b.WriteString(strconv.Itoa(len(q)))
 		b.WriteByte(':')
 		b.WriteString(q)
