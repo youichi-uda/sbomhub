@@ -116,7 +116,8 @@ func TestM68Schema_GuardSeesQuotedLiterals(t *testing.T) {
 		short VARCHAR(3), state VARCHAR(32),
 		CHECK (short = 'ok' AND state = 'detailed_notification'),
 		CHECK (short ~ '^[a-z]{1,3}$' AND short NOT LIKE 'xxxxxxxxxxxxxxxx%'),
-		CHECK (state IN ('early_warning', 'detailed_notification')))`); err != nil {
+		CHECK (state IN ('early_warning', 'detailed_notification')),
+		CHECK (short <> 'too-long' AND short NOT IN ('also-too-long')))`); err != nil {
 		t.Fatal(err)
 	}
 	got := overlongCheckLiterals(t, tx)
@@ -187,19 +188,28 @@ func overlongCheckLiterals(t *testing.T, db catalogueQueryer) []string {
 	return out
 }
 
-// sqlValueLiterals returns the literals of def that are VALUES the column is
-// compared with: an operand of = / <> or an element of an IN / ARRAY list
+// sqlValueLiterals returns the literals of def that are VALUES the column may
+// hold: an operand of = or an element of an IN / ARRAY list
 // (deparsed as `= ANY ((ARRAY['a'::…, 'b'::…])::text[])`), on either side of
 // the operator. Pattern operands
-// (~, LIKE / ~~) are skipped — a regex is not a value the column holds.
+// (~, LIKE / ~~) and excluded values (<>, NOT IN) are skipped: neither is a
+// value the column must be able to hold. Out of scope: values a CHECK
+// computes (c = lower('...')) — no enum-like CHECK in this schema does that.
 func sqlValueLiterals(def string) []string {
 	var out []string
 	for _, l := range sqlStringLiterals(def) {
 		before := strings.TrimRight(def[:l.start], " (")
 		after := strings.TrimLeft(skipCast(def[l.end:]), " )")
-		if strings.HasSuffix(before, "=") || strings.HasSuffix(before, "<>") ||
-			strings.HasSuffix(before, "ARRAY[") || strings.HasSuffix(before, ",") ||
-			strings.HasPrefix(after, "=") || strings.HasPrefix(after, "<>") {
+		inArray := strings.HasSuffix(before, "ARRAY[") || strings.HasSuffix(before, ",")
+		if inArray {
+			// Only `= ANY (ARRAY[...])` (IN) permits its elements;
+			// `<> ALL (ARRAY[...])` (NOT IN) excludes them.
+			k := strings.LastIndex(def[:l.start], "ARRAY[")
+			inArray = k >= 0 && strings.HasSuffix(strings.TrimRight(def[:k], " ("), "= ANY")
+		}
+		if inArray ||
+			(strings.HasSuffix(before, "=") && !strings.HasSuffix(before, "<=") && !strings.HasSuffix(before, ">=")) ||
+			(strings.HasPrefix(after, "=") && !strings.HasPrefix(after, "=>")) {
 			out = append(out, l.text)
 		}
 	}
