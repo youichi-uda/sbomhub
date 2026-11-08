@@ -20,7 +20,7 @@ import (
 	"github.com/johnfercher/maroto/v2/pkg/consts/align"
 	"github.com/johnfercher/maroto/v2/pkg/consts/fontstyle"
 	"github.com/johnfercher/maroto/v2/pkg/core"
-	"github.com/johnfercher/maroto/v2/pkg/core/entity"
+	"github.com/johnfercher/maroto/v2/pkg/fontrepository"
 	"github.com/johnfercher/maroto/v2/pkg/props"
 	"github.com/sbomhub/sbomhub/internal/assets"
 	"github.com/sbomhub/sbomhub/internal/database"
@@ -726,23 +726,21 @@ func (s *ReportService) generatePDF(data *model.ExecutiveReportData, reportType 
 		return nil, fmt.Errorf("failed to load font: %w", err)
 	}
 
+	customFonts, err := fontrepository.New().
+		AddUTF8FontFromBytes("IPAGothic", fontstyle.Normal, fontBytes).
+		// IPA Gothic doesn't have bold variant, use same font
+		AddUTF8FontFromBytes("IPAGothic", fontstyle.Bold, fontBytes).
+		Load()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load font: %w", err)
+	}
+
 	cfg := config.NewBuilder().
 		WithPageNumber().
 		WithLeftMargin(15).
 		WithTopMargin(15).
 		WithRightMargin(15).
-		WithCustomFonts([]*entity.CustomFont{
-			{
-				Family: "IPAGothic",
-				Style:  fontstyle.Normal,
-				Bytes:  fontBytes,
-			},
-			{
-				Family: "IPAGothic",
-				Style:  fontstyle.Bold,
-				Bytes:  fontBytes, // IPA Gothic doesn't have bold variant, use same font
-			},
-		}).
+		WithCustomFonts(customFonts).
 		WithDefaultFont(&props.Font{Family: "IPAGothic"}).
 		Build()
 

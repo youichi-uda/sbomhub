@@ -301,6 +301,43 @@ func TestParseCycloneDX(t *testing.T) {
 	}
 }
 
+// TestParseCycloneDX_AllSupportedSpecVersions pins that every CycloneDX spec
+// version DetectFormatAndVersion accepts (1.4 - 1.7) also parses. With
+// cyclonedx-go v0.9.3 a "specVersion": "1.7" document passed format detection
+// and was then rejected by the decoder ("invalid specification version");
+// v0.11.0 added 1.7 support.
+func TestParseCycloneDX_AllSupportedSpecVersions(t *testing.T) {
+	for _, v := range []string{"1.4", "1.5", "1.6", "1.7"} {
+		t.Run(v, func(t *testing.T) {
+			data := []byte(`{
+				"bomFormat": "CycloneDX",
+				"specVersion": "` + v + `",
+				"version": 1,
+				"components": [{
+					"type": "library",
+					"bom-ref": "pkg:npm/lodash@4.17.21",
+					"name": "lodash",
+					"version": "4.17.21",
+					"purl": "pkg:npm/lodash@4.17.21",
+					"licenses": [{"license": {"id": "MIT"}}]
+				}],
+				"dependencies": [{"ref": "pkg:npm/lodash@4.17.21", "dependsOn": []}]
+			}`)
+			components, err := parseCycloneDX(data)
+			if err != nil {
+				t.Fatalf("specVersion %s: unexpected error: %v", v, err)
+			}
+			if len(components) != 1 {
+				t.Fatalf("specVersion %s: expected 1 component, got %d", v, len(components))
+			}
+			c := components[0]
+			if c.Name != "lodash" || c.Version != "4.17.21" || c.Purl != "pkg:npm/lodash@4.17.21" || c.License != "MIT" {
+				t.Errorf("specVersion %s: unexpected component %+v", v, c)
+			}
+		})
+	}
+}
+
 func TestParseCycloneDX_EmptyComponents(t *testing.T) {
 	data := []byte(`{
 		"bomFormat": "CycloneDX",

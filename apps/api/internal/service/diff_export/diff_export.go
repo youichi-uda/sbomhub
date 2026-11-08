@@ -27,7 +27,7 @@ import (
 	"github.com/johnfercher/maroto/v2/pkg/consts/align"
 	"github.com/johnfercher/maroto/v2/pkg/consts/fontstyle"
 	"github.com/johnfercher/maroto/v2/pkg/core"
-	"github.com/johnfercher/maroto/v2/pkg/core/entity"
+	"github.com/johnfercher/maroto/v2/pkg/fontrepository"
 	"github.com/johnfercher/maroto/v2/pkg/props"
 
 	"github.com/sbomhub/sbomhub/internal/assets"
@@ -184,15 +184,19 @@ func (s *Service) RenderPDF(ctx context.Context, req Request) ([]byte, string, e
 	if err != nil {
 		return nil, "", fmt.Errorf("load embedded font: %w", err)
 	}
+	customFonts, err := fontrepository.New().
+		AddUTF8FontFromBytes("IPAGothic", fontstyle.Normal, fontBytes).
+		AddUTF8FontFromBytes("IPAGothic", fontstyle.Bold, fontBytes).
+		Load()
+	if err != nil {
+		return nil, "", fmt.Errorf("load embedded font: %w", err)
+	}
 	cfg := config.NewBuilder().
 		WithPageNumber().
 		WithLeftMargin(15).
 		WithTopMargin(15).
 		WithRightMargin(15).
-		WithCustomFonts([]*entity.CustomFont{
-			{Family: "IPAGothic", Style: fontstyle.Normal, Bytes: fontBytes},
-			{Family: "IPAGothic", Style: fontstyle.Bold, Bytes: fontBytes},
-		}).
+		WithCustomFonts(customFonts).
 		WithDefaultFont(&props.Font{Family: "IPAGothic"}).
 		Build()
 
