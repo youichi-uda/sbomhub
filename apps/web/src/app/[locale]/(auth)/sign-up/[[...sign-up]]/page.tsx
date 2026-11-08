@@ -1,6 +1,7 @@
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
-import { AlertTriangle, ArrowRight, Github, Mail } from "lucide-react";
+import { AlertTriangle, ArrowRight, Mail } from "lucide-react";
+import { Github } from "@/components/icons/github";
 import { Button } from "@/components/ui/button";
 import {
   Card,

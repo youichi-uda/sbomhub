@@ -9,7 +9,6 @@ import {
   Building2,
   ClipboardCheck,
   FileText,
-  Github,
   HelpCircle,
   History,
   KeyRound,
@@ -20,6 +19,7 @@ import {
   Sparkles,
   Terminal,
 } from "lucide-react";
+import { Github } from "@/components/icons/github";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {

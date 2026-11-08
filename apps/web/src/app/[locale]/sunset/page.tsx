@@ -1,6 +1,7 @@
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
-import { ArrowLeft, ExternalLink, Github, Mail, Server } from "lucide-react";
+import { ArrowLeft, ExternalLink, Mail, Server } from "lucide-react";
+import { Github } from "@/components/icons/github";
 import { Button } from "@/components/ui/button";
 import {
   Card,
