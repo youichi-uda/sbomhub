@@ -25,7 +25,7 @@ func TestM60R3_ShorthandPreReleasesAndUnknownSuffixes(t *testing.T) {
 		{"4.1.100.Final", "4.1.100", 0, true}, // Maven release marker
 		{"4.1.108.Final", "4.1.100", 1, true},
 		{"5.3.18.RELEASE", "5.3.18", 0, true},
-		{"1.0.post1", "1.0", 0, false}, // unknown qualifier: not guessed
+		{"1.0.post1", "1.0", 0, false},   // unknown qualifier: not guessed
 		{"1.2.3+dfsg", "1.2.3", 0, true}, // SemVer build metadata (Codex M60 R5)
 		{"2.0-final2", "2.0", 0, false},
 	} {
