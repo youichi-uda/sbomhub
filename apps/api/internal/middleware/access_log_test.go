@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -345,6 +346,13 @@ func TestAccessLog_ErrorFieldURLsCutToHost(t *testing.T) {
 		"fragment":        {"see https://x.example.com/#access_token=FRAGSECRET77", "FRAGSECRET77", "https://x.example.com"},
 		"userinfo":        {"dial postgres://app:USERINFOPW@db:5432/sbomhub failed", "USERINFOPW", "postgres://db:5432"},
 		"bearer no url":   {"upstream said: Bearer eyJhbGciOiJIUzI1NiJ9.BEARERX1", "BEARERX1", "upstream said"},
+		// Codex R6 High: quotes are legal inside a URL, and Go renders URLs
+		// in errors with %q (escaped \" and raw spaces inside the quotes).
+		"slash in userinfo": {"dial postgres://app:SLA/SHPW@db:5432/x failed", "SLA", "postgres://"},
+		"apostrophe":        {"get https://api.example/a'?opaque=APOSTSECRET1 failed", "APOSTSECRET1", "https://api.example"},
+		"apostrophe host":   {"get https://api.example'?opaque=APOSTSECRET2 failed", "APOSTSECRET2", "https://api.example"},
+		"quoted escaped":    {fmt.Sprintf("Get %q: EOF", `https://h.example/a"b?opaque=QESCSECRET`), "QESCSECRET", "https://h.example"},
+		"quoted space":      {`parse "https://h.example/?k=a b&opaque=QSPACESECRET": invalid character`, "QSPACESECRET", "https://h.example"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

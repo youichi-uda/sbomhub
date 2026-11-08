@@ -286,10 +286,8 @@ func asciiLower(s string) string {
 	return string(b)
 }
 
-// accessLogURLRe matches a URL with an explicit scheme up to the next
-// whitespace or quote (*url.Error renders its URL in double quotes). Groups:
-// 1 scheme, 2 optional userinfo, 3 host[:port].
-var accessLogURLRe = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.\-]*)://([^/\s"'?#@]*@)?([^/\s"'?#]*)[^\s"']*`)
+// accessLogURLStartRe finds the start of a URL with an explicit scheme.
+var accessLogURLStartRe = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.\-]*://`)
 
 // accessLogErrorText renders a handler error for the access log without the
 // credentials error text routinely carries. It fails closed on the main
@@ -301,13 +299,75 @@ var accessLogURLRe = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.\-]*)://([^/\s"'?#
 // Authorization headers and auth-shaped name=value pairs outside URLs. It
 // works on the rendered string; the error chain is not modified.
 func accessLogErrorText(err error) string {
-	s := accessLogURLRe.ReplaceAllStringFunc(err.Error(), func(u string) string {
-		m := accessLogURLRe.FindStringSubmatch(u)
-		cut := m[1] + "://" + m[3]
-		if len(cut) < len(u) {
-			cut += "/" + accessLogRedacted
+	return redact.String(cutURLsToHost(err.Error()))
+}
+
+// cutURLsToHost replaces every scheme-bearing URL in s with scheme://host
+// plus a redaction marker when anything followed the host.
+//
+// Where a URL ends is decided conservatively, because quotes and spaces can
+// sit inside one: a URL that opens right after a double quote (Go renders
+// URLs in errors with %q — *url.Error, url.Parse failures) runs to the
+// closing unescaped quote, skipping \" escapes and spaces; any other URL
+// runs to the next whitespace, so an apostrophe or quote inside it does not
+// end it. Over-consuming a little trailing punctuation is the fail-closed
+// side.
+func cutURLsToHost(s string) string {
+	var b strings.Builder
+	rest := s
+	for {
+		loc := accessLogURLStartRe.FindStringIndex(rest)
+		if loc == nil {
+			b.WriteString(rest)
+			return b.String()
 		}
-		return cut
-	})
-	return redact.String(s)
+		start, i := loc[0], loc[1]
+		quoted := start > 0 && rest[start-1] == '"'
+
+		// Authority: up to the first byte that cannot be part of it.
+		authEnd := i
+		for authEnd < len(rest) && !strings.ContainsRune("/?#\\\"' \t\r\n", rune(rest[authEnd])) {
+			authEnd++
+		}
+		host := rest[i:authEnd]
+		if at := strings.LastIndexByte(host, '@'); at >= 0 {
+			host = host[at+1:] // drop userinfo
+		}
+
+		// End of the URL.
+		end := authEnd
+		if quoted {
+			for end < len(rest) && rest[end] != '"' {
+				if rest[end] == '\\' {
+					end++ // skip the escaped byte
+				}
+				end++
+			}
+			if end > len(rest) {
+				end = len(rest)
+			}
+		} else {
+			for end < len(rest) && !isASCIISpace(rest[end]) {
+				end++
+			}
+		}
+
+		// An "@" after the authority means the authority boundary is not
+		// trustworthy (an unescaped "/" inside userinfo): keep no host.
+		if strings.IndexByte(rest[authEnd:end], '@') >= 0 {
+			host = accessLogRedacted
+		}
+
+		b.WriteString(rest[:start])
+		b.WriteString(rest[start:loc[1]]) // scheme://
+		b.WriteString(host)
+		if end > authEnd || len(host) < authEnd-i {
+			b.WriteString("/" + accessLogRedacted)
+		}
+		rest = rest[end:]
+	}
+}
+
+func isASCIISpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
