@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -60,7 +61,12 @@ const (
 // lands in slog at the caller's site.
 func validateMetiOverrideNote(note string) (string, int, map[string]string) {
 	cleaned := strings.TrimSpace(note)
-	if len(cleaned) < MinMetiOverrideNoteLen || len(cleaned) > MaxMetiOverrideNoteLen {
+	// Counted in characters, as the message (and the web form's 2000-character
+	// cap) say. It used to be len() — bytes — so a 1,366-character Japanese
+	// note (3 bytes each) was already refused. 4096 characters is at most
+	// 16 KiB of UTF-8, which keeps the audit_logs.details bound above.
+	n := utf8.RuneCountInString(cleaned)
+	if n < MinMetiOverrideNoteLen || n > MaxMetiOverrideNoteLen {
 		return "", http.StatusBadRequest, map[string]string{
 			"error": "override_note is required and must be 1-4096 characters",
 		}
