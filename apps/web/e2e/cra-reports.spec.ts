@@ -221,7 +221,6 @@ test.describe("AI CRA Reports (M2-5)", () => {
         });
 
         test("should draft a 72h detailed notification", async ({ request }) => {
-            test.fixme(true, "BUG: cra_reports.report_type is VARCHAR(20) but 'detailed_notification' is 21 chars, so every detailed_notification run fails with 500 (pq 22001)");
             const report = await runCRA(request, project, "CVE-2021-44228", "detailed_notification");
             expect(report.report_type).toBe("detailed_notification");
             expect(report.state).toBe("draft");
@@ -254,7 +253,7 @@ test.describe("AI CRA Reports (M2-5)", () => {
             // for that refetch before switching filters below: the page
             // applies list responses in arrival order, so a late pending
             // response would overwrite the approved view — a real race,
-            // reproduced deterministically in the fixme test that follows.
+            // reproduced deterministically in the regression test that follows.
             const pendingRefetch = page.waitForResponse(isPendingList);
             await card.getByTestId("cra-approve").click();
             await expect(card).toHaveCount(0);
@@ -282,7 +281,8 @@ test.describe("AI CRA Reports (M2-5)", () => {
         });
 
         test("should show the approved filter's rows even when an older list response lands late", async ({ page, request }) => {
-            test.fixme(true, "BUG: cra-reports page.tsx loadReports applies list responses in arrival order with no staleness guard, so a slow earlier response (e.g. the un-awaited pending refetch after Approve) overwrites a newer filter's rows; seen as a flake of the approve test on 2026-11-09");
+            // Regression (M65 bug 2): the page applied list responses in arrival
+            // order, so this late pending answer used to erase the approved view.
             // Its own project: the shared one's CVEs are used by sibling tests.
             const own = await createVulnerableProject(request, "CRA Stale Response");
             try {

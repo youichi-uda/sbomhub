@@ -99,6 +99,11 @@ function allKeys(projectId) {
     k.projects.diffGraph(projectId, "a", "b"),
     k.projects.componentPaths(projectId, "c1", undefined),
     k.projects.componentPaths(projectId, "c1", "s1"),
+    k.projects.craReports(projectId, { limit: 100 }),
+    k.projects.craReports(projectId, { limit: 100, decision: "pending" }),
+    k.projects.craReports(projectId, { limit: 100, decision: "approved" }),
+    k.projects.craSubmissions(projectId, "r1"),
+    k.projects.craSubmissions(projectId, "r2"),
     k.dashboard.summary(),
     k.analytics.summary(30),
     k.analytics.summary(90),
@@ -180,6 +185,49 @@ describe("query key factory", () => {
       hashKey(queryKeys.audit.logs({ limit: 50, action: "x" }, 1)),
       hashKey(queryKeys.audit.logs({ limit: 50 }, 1)),
     );
+  });
+
+  test("CRA report keys: one per filter; empty / undefined members and order do not matter", () => {
+    assert.equal(
+      hashKey(queryKeys.projects.craReports(P, { limit: 100, decision: "", lang: undefined })),
+      hashKey(queryKeys.projects.craReports(P, { limit: 100 })),
+    );
+    assert.equal(
+      hashKey(queryKeys.projects.craReports(P, { decision: "approved", limit: 100 })),
+      hashKey(queryKeys.projects.craReports(P, { limit: 100, decision: "approved" })),
+    );
+    assert.notEqual(
+      hashKey(queryKeys.projects.craReports(P, { limit: 100, decision: "pending" })),
+      hashKey(queryKeys.projects.craReports(P, { limit: 100, decision: "approved" })),
+    );
+  });
+
+  // M65 bug 2, at the cache level: a slow answer for the previous filter
+  // lands in THAT filter's entry and can never become the current filter's
+  // data, whatever order the two answers arrive in.
+  test("CRA reports: a late response for an older filter never lands in the newer filter's entry", async () => {
+    const client = makeQueryClient();
+    const pendingKey = queryKeys.projects.craReports(P, { limit: 100, decision: "pending" });
+    const approvedKey = queryKeys.projects.craReports(P, { limit: 100, decision: "approved" });
+    let releasePending;
+    const pendingHeld = new Promise((r) => (releasePending = r));
+    const pendingFetch = client.fetchQuery({
+      queryKey: pendingKey,
+      queryFn: async () => {
+        await pendingHeld;
+        return { data: [], totalCount: 0 };
+      },
+    });
+    const approved = await client.fetchQuery({
+      queryKey: approvedKey,
+      queryFn: async () => ({ data: [{ id: "approved-row" }], totalCount: 1 }),
+    });
+    assert.deepEqual(approved.data.map((r) => r.id), ["approved-row"]);
+    releasePending();
+    await pendingFetch;
+    assert.deepEqual(client.getQueryData(approvedKey).data.map((r) => r.id), ["approved-row"]);
+    assert.deepEqual(client.getQueryData(pendingKey).data, []);
+    client.clear();
   });
 
   test("diff keys: missing from/to are null (not dropped), so ?to=b differs from ?from=b", () => {

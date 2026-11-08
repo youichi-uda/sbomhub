@@ -65,6 +65,13 @@ export const queryKeys = {
       [...byId(projectId), "diff-graph", { from: from ?? null, to: to ?? null }] as const,
     componentPaths: (projectId: string, componentId: string, sbomId: string | undefined) =>
       [...byId(projectId), "component-paths", { componentId, sbomId: sbomId ?? null }] as const,
+    // CRA report queue, one entry per filter (M65 bug 2: the page used to
+    // apply list responses in arrival order, so a late answer for an old
+    // filter overwrote the current filter's rows).
+    craReports: (projectId: string, filter: object) =>
+      [...byId(projectId), "cra-reports", compact(filter)] as const,
+    craSubmissions: (projectId: string, reportId: string) =>
+      [...byId(projectId), "cra-submissions", reportId] as const,
   },
   dashboard: {
     summary: () => ["dashboard", "summary"] as const,

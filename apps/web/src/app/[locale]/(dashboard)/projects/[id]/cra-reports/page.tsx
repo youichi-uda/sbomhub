@@ -21,9 +21,24 @@
  *
  * Client Component: every primitive in this page is interactive
  * (filter dropdowns, mutations, optimistic state).
+ *
+ * M65 bug 2: the list used to be loaded by a hand-written effect that
+ * applied responses in arrival order, so a slow earlier response (e.g. the
+ * un-awaited pending-queue refetch after Approve) overwrote a newer
+ * filter's rows. This page was never migrated to react-query in M64, which
+ * is why per-filter keys did not protect it. The list is now one
+ * react-query entry per filter (queryKeys.projects.craReports), optimistic
+ * edits write into the entry they started on, and the rows shown are
+ * always the current filter's entry.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+interface ReportPage {
+  data: CRAReport[];
+  totalCount: number;
+}
+
+import { useCallback, useMemo, useState } from "react";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
@@ -37,8 +52,9 @@ import {
   CRAReportListFilter,
   CRASubmission,
   CRASubmissionInput,
-  Project,
 } from "@/lib/api";
+import { queryKeys } from "@/lib/query/keys";
+import { LoadError } from "@/components/ui/load-error";
 import { AIDisabledBanner } from "@/components/triage/ai-disabled-banner";
 import {
   ReportCard,
@@ -99,16 +115,7 @@ export default function CRAReportsPage() {
   const tDecision = useTranslations("CRAReports.Decision");
   const tc = useTranslations("Common");
 
-  const [project, setProject] = useState<Project | null>(null);
-  const [reports, setReports] = useState<CRAReport[]>([]);
-  // Submission timelines keyed by report id. Fetched lazily for approved
-  // reports only (non-approved reports cannot carry submissions — the
-  // backend rejects them with 409).
-  const [submissionsByReport, setSubmissionsByReport] = useState<
-    Record<string, CRASubmission[]>
-  >({});
-  const [totalCount, setTotalCount] = useState(0);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [refreshing, setRefreshing] = useState(false);
   const [busyReportId, setBusyReportId] = useState<string | null>(null);
   const [aiDisabledReason, setAiDisabledReason] = useState<string | null>(null);
@@ -150,16 +157,13 @@ export default function CRAReportsPage() {
     [pushError],
   );
 
-  const loadProject = useCallback(async () => {
-    try {
-      const data = await api.projects.get(projectId);
-      setProject(data);
-    } catch (err) {
-      handleError(err, t("loadProjectFailed"));
-    }
-  }, [projectId, t, handleError]);
+  const projectQuery = useQuery({
+    queryKey: queryKeys.projects.detail(projectId),
+    queryFn: () => api.projects.get(projectId),
+  });
+  const project = projectQuery.data ?? null;
 
-  const buildFilter = useCallback((): CRAReportListFilter => {
+  const filter = useMemo((): CRAReportListFilter => {
     const f: CRAReportListFilter = { limit: PAGE_LIMIT };
     if (filterReportType) f.report_type = filterReportType;
     if (filterLang) f.lang = filterLang;
@@ -169,74 +173,75 @@ export default function CRAReportsPage() {
     return f;
   }, [filterReportType, filterLang, filterState, filterDecision]);
 
+  // The current filter's entry. Rows are only ever read from here, so an
+  // answer for any other filter (however late) cannot be displayed.
+  const reportsKey = queryKeys.projects.craReports(projectId, filter);
+  const reportsQuery = useQuery({
+    queryKey: reportsKey,
+    queryFn: (): Promise<ReportPage> =>
+      api.craReports.listWithMeta(projectId, filter),
+  });
+  const reports = useMemo(() => reportsQuery.data?.data ?? [], [reportsQuery.data]);
+  const totalCount = reportsQuery.data?.totalCount ?? 0;
+  const loading = reportsQuery.isPending && !reportsQuery.isError;
+  const loadError = reportsQuery.error;
+  const loadAIDisabled = loadError instanceof APIError && loadError.isAIDisabled();
+  const shownAIDisabledReason =
+    aiDisabledReason ??
+    (loadAIDisabled ? (loadError.disabledReason() ?? loadError.message) : null);
+  // A failed load with nothing to show is an error, not "no reports"
+  // (AI-disabled keeps its own banner and the empty queue, as before).
+  const loadFailed =
+    reportsQuery.isError && reportsQuery.data === undefined && !loadAIDisabled;
+
   /**
-   * Fetch submission timelines for the approved reports in the current
-   * page and merge them into submissionsByReport. Best-effort: a per-report
-   * failure is swallowed (the timeline just stays empty) so one bad row does
-   * not blank the whole queue. Only approved reports are queried since the
-   * backend guarantees no submissions exist for any other decision.
+   * Submission timelines for the approved reports on screen (non-approved
+   * reports cannot carry submissions — the backend rejects them with 409).
+   * Best-effort: a per-report failure leaves that timeline empty, so one
+   * bad row does not blank the whole queue.
    */
-  const loadSubmissions = useCallback(
-    async (rows: CRAReport[]) => {
-      const approved = rows.filter((r) => r.decision === "approved");
-      if (approved.length === 0) return;
-      const results = await Promise.all(
-        approved.map(async (r) => {
-          try {
-            const subs = await api.craSubmissions.list(projectId, r.id);
-            return [r.id, subs] as const;
-          } catch {
-            return [r.id, [] as CRASubmission[]] as const;
-          }
-        }),
-      );
-      setSubmissionsByReport((prev) => {
-        const next = { ...prev };
-        for (const [id, subs] of results) next[id] = subs;
-        return next;
-      });
-    },
-    [projectId],
+  const approvedIds = useMemo(
+    () => reports.filter((r) => r.decision === "approved").map((r) => r.id),
+    [reports],
   );
+  const submissionQueries = useQueries({
+    queries: approvedIds.map((reportId) => ({
+      queryKey: queryKeys.projects.craSubmissions(projectId, reportId),
+      queryFn: async (): Promise<CRASubmission[]> => {
+        try {
+          return await api.craSubmissions.list(projectId, reportId);
+        } catch {
+          return [];
+        }
+      },
+    })),
+  });
+  const submissionsByReport: Record<string, CRASubmission[]> = {};
+  approvedIds.forEach((id, i) => {
+    submissionsByReport[id] = submissionQueries[i]?.data ?? [];
+  });
 
-  const loadReports = useCallback(async () => {
-    try {
-      const res = await api.craReports.listWithMeta(projectId, buildFilter());
-      setReports(res.data);
-      setTotalCount(res.totalCount);
-      // Fire-and-forget: populate submission timelines for approved rows.
-      void loadSubmissions(res.data);
-    } catch (err) {
-      handleError(err, t("loadReportsFailed"));
-    }
-  }, [projectId, buildFilter, t, handleError, loadSubmissions]);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      await Promise.all([loadProject(), loadReports()]);
-      if (!cancelled) setLoading(false);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [loadProject, loadReports]);
+  /** Refetch one filter's entry (the one an action started on). */
+  const reloadReports = useCallback(
+    (key: readonly unknown[]) =>
+      queryClient.refetchQueries({ queryKey: key, exact: true }),
+    [queryClient],
+  );
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await loadReports();
+      await reloadReports(reportsKey);
     } finally {
       setRefreshing(false);
     }
-  }, [loadReports]);
+  }, [reloadReports, reportsKey]);
 
   /**
    * Optimistic update: drop the report from the visible list
-   * immediately, then call the API. On failure re-fetch so the row
-   * reappears in its real state (mirrors triage page's
-   * decideOptimistically).
+   * immediately, then call the API. On failure restore the entry so the
+   * row reappears (mirrors triage page's decideOptimistically). Every
+   * write targets the entry of the filter the action started on.
    */
   const decideOptimistically = useCallback(
     async (
@@ -244,24 +249,32 @@ export default function CRAReportsPage() {
       input: CRAReportDecisionInput,
       errorKey: string,
     ) => {
+      const key = reportsKey;
       setBusyReportId(report.id);
-      const previous = reports;
-      const previousTotal = totalCount;
-      setReports((prev) => prev.filter((r) => r.id !== report.id));
-      setTotalCount((n) => Math.max(0, n - 1));
+      // An in-flight fetch for this entry would overwrite the optimistic
+      // removal with the pre-decision rows.
+      await queryClient.cancelQueries({ queryKey: key, exact: true });
+      const previous = queryClient.getQueryData<ReportPage>(key);
+      queryClient.setQueryData<ReportPage>(key, (old) =>
+        old
+          ? {
+              data: old.data.filter((r) => r.id !== report.id),
+              totalCount: Math.max(0, old.totalCount - 1),
+            }
+          : old,
+      );
       try {
         await api.craReports.decide(projectId, report.id, input);
         // background refresh so e.g. server-side state mutations land
-        loadReports();
+        void reloadReports(key);
       } catch (err) {
-        setReports(previous);
-        setTotalCount(previousTotal);
+        queryClient.setQueryData<ReportPage>(key, previous);
         handleError(err, t(errorKey));
       } finally {
         setBusyReportId(null);
       }
     },
-    [reports, totalCount, projectId, loadReports, handleError, t],
+    [reportsKey, queryClient, projectId, reloadReports, handleError, t],
   );
 
   const handleApprove = useCallback(
@@ -300,19 +313,20 @@ export default function CRAReportsPage() {
 
   const handleReanalyse = useCallback(
     async (report: CRAReport) => {
+      const key = reportsKey;
       setBusyReportId(report.id);
       try {
         await api.craReports.reanalyse(projectId, report.id);
         // Reanalyse creates a NEW cra_reports row; refresh so the
         // newcomer shows up and the source row's age stamps move down.
-        await loadReports();
+        await reloadReports(key);
       } catch (err) {
         handleError(err, t("reanalyseFailed"));
       } finally {
         setBusyReportId(null);
       }
     },
-    [projectId, loadReports, handleError, t],
+    [reportsKey, projectId, reloadReports, handleError, t],
   );
 
   /**
@@ -320,22 +334,23 @@ export default function CRAReportsPage() {
    * Non-optimistic (mirrors handleReanalyse, not decideOptimistically): an
    * awareness edit never removes the row from any pending list, so we just
    * PATCH and refetch. The server recomputes deadline_status/deadline_at on
-   * read (M34 compute-on-read), so loadReports() lands the recomputed verdict
+   * read (M34 compute-on-read), so the refetch lands the recomputed verdict
    * along with the new awareness_time. Pass null to clear (unset to NULL).
    */
   const handleSetAwareness = useCallback(
     async (report: CRAReport, awarenessTime: string | null) => {
+      const key = reportsKey;
       setBusyReportId(report.id);
       try {
         await api.craReports.awareness(projectId, report.id, awarenessTime);
-        await loadReports();
+        await reloadReports(key);
       } catch (err) {
         handleError(err, t("setAwarenessFailed"));
       } finally {
         setBusyReportId(null);
       }
     },
-    [projectId, loadReports, handleError, t],
+    [reportsKey, projectId, reloadReports, handleError, t],
   );
 
   /**
@@ -347,6 +362,7 @@ export default function CRAReportsPage() {
    */
   const handleRecordSubmission = useCallback(
     async (report: CRAReport, values: ReportSubmitFormValues) => {
+      const key = reportsKey;
       setBusyReportId(report.id);
 
       const input: CRASubmissionInput = { authority: values.authority };
@@ -363,11 +379,17 @@ export default function CRAReportsPage() {
         input.reference_number = values.reference_number;
       if (values.notes) input.notes = values.notes;
 
-      const previous = reports;
-      setReports((prev) =>
-        prev.map((r) =>
-          r.id === report.id ? { ...r, state: "submitted" } : r,
-        ),
+      await queryClient.cancelQueries({ queryKey: key, exact: true });
+      const previous = queryClient.getQueryData<ReportPage>(key);
+      queryClient.setQueryData<ReportPage>(key, (old) =>
+        old
+          ? {
+              ...old,
+              data: old.data.map((r) =>
+                r.id === report.id ? { ...r, state: "submitted" } : r,
+              ),
+            }
+          : old,
       );
       try {
         const created = await api.craSubmissions.record(
@@ -375,20 +397,22 @@ export default function CRAReportsPage() {
           report.id,
           input,
         );
-        setSubmissionsByReport((prev) => ({
-          ...prev,
-          [report.id]: [created, ...(prev[report.id] ?? [])],
-        }));
+        const subsKey = queryKeys.projects.craSubmissions(projectId, report.id);
+        queryClient.setQueryData<CRASubmission[]>(subsKey, (prev) => [
+          created,
+          ...(prev ?? []),
+        ]);
         // Background reconcile so the authoritative state lands.
-        loadReports();
+        void reloadReports(key);
+        void queryClient.invalidateQueries({ queryKey: subsKey, exact: true });
       } catch (err) {
-        setReports(previous);
+        queryClient.setQueryData<ReportPage>(key, previous);
         handleError(err, t("recordSubmissionFailed"));
       } finally {
         setBusyReportId(null);
       }
     },
-    [reports, projectId, loadReports, handleError, t],
+    [reportsKey, queryClient, projectId, reloadReports, handleError, t],
   );
 
   // F4 carry-over: drop evidence-less reports from the visible queue,
@@ -435,8 +459,18 @@ export default function CRAReportsPage() {
         </div>
       </div>
 
-      {aiDisabledReason !== null && (
-        <AIDisabledBanner reason={aiDisabledReason || undefined} />
+      {shownAIDisabledReason !== null && (
+        <AIDisabledBanner reason={shownAIDisabledReason || undefined} />
+      )}
+
+      {projectQuery.isError && (
+        <div
+          role="alert"
+          data-testid="cra-reports-project-error"
+          className="mb-4 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
+        >
+          {t("loadProjectFailed")}
+        </div>
       )}
 
       {/* Filter row — plain <select>s mirror the M1 DraftCard edit-form
@@ -522,10 +556,29 @@ export default function CRAReportsPage() {
         </div>
       )}
 
+      {reportsQuery.isError && !loadFailed && !loadAIDisabled && (
+        <LoadError
+          compact
+          testId="cra-reports-load-error"
+          message={t("loadReportsFailed")}
+          retryLabel={tc("retry")}
+          onRetry={handleRefresh}
+          retrying={refreshing}
+        />
+      )}
+
       {loading ? (
         <div className="flex h-64 items-center justify-center text-muted-foreground">
           {tc("loading")}
         </div>
+      ) : loadFailed ? (
+        <LoadError
+          testId="cra-reports-load-error"
+          message={t("loadReportsFailed")}
+          retryLabel={tc("retry")}
+          onRetry={handleRefresh}
+          retrying={refreshing}
+        />
       ) : visibleReports.length === 0 ? (
         <Card>
           <CardHeader>
