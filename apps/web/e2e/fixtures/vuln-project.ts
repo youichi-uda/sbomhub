@@ -73,9 +73,19 @@ export async function createProject(
     return { id: body.id as string, name };
 }
 
+/**
+ * Cleanup that is loud when it does not happen: a leaked project shows up in
+ * later specs' tenant-wide lists and searches. A project the test already
+ * deleted is fine — but DELETE of an absent project answers 500, not 404
+ * (observed 2026-11-09), so "gone" is decided by a follow-up GET, not by the
+ * DELETE status.
+ */
 export async function deleteProject(request: APIRequestContext, projectId: string | null | undefined): Promise<void> {
     if (!projectId) return;
-    await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
+    const res = await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
+    if (res.status() === 204) return;
+    const after = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}`);
+    expect(after.status(), `DELETE /projects/${projectId} returned ${res.status()} and the project is still there`).toBe(404);
 }
 
 /**
@@ -171,7 +181,16 @@ export async function createVulnerableProject(
     extra: Array<Record<string, unknown>> = [],
 ): Promise<VulnerableProject> {
     const project = await createProject(request, uniqueName(prefix), 'Project with fixture vulnerabilities (E2E)');
-    const { sbomId, vulns } = await uploadVulnerableSbom(request, project.id, extra);
+    let uploaded: { sbomId: string; vulns: ProjectVuln[] };
+    try {
+        uploaded = await uploadVulnerableSbom(request, project.id, extra);
+    } catch (e) {
+        // The caller never receives the id, so it cannot clean up: do it here
+        // before failing, or a retry leaves a stray project behind.
+        await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`).catch(() => undefined);
+        throw e;
+    }
+    const { sbomId, vulns } = uploaded;
     return {
         projectId: project.id,
         projectName: project.name,

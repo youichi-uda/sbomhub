@@ -598,7 +598,9 @@ CREATE OR REPLACE FUNCTION e2e_link_fixture_vulns() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
     INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at, match_method)
-    SELECT NEW.id, v.id, NOW(), 'nvd_cpe'
+    -- 'nvd_keyword', not 'nvd_cpe': this is a name match, and nvd_cpe
+    -- claims a verified CPE match the fixture never established.
+    SELECT NEW.id, v.id, NOW(), 'nvd_keyword'
       FROM (VALUES
                 ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', 'CVE-2021-44228'),
                 ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', 'CVE-2021-45046'),
@@ -618,5 +620,35 @@ CREATE TRIGGER e2e_link_fixture_vulns
     FOR EACH ROW
     WHEN (NEW.purl LIKE 'pkg:generic/sbomhub-e2e/%')
     EXECUTE FUNCTION e2e_link_fixture_vulns();
+
+-- ---------------------------------------------------------------------
+-- 9. Minimal KEV catalogue (hermetic KEV specs)
+-- ---------------------------------------------------------------------
+-- kev_catalog is otherwise filled only by POST /kev/sync, which downloads
+-- the live CISA feed. Two real entries — the two KEV-flagged CVEs of
+-- section 3 — plus one successful sync log let the catalogue / stats /
+-- project-KEV specs run without egress. Only kev.spec.ts's explicit
+-- "should sync KEV catalog" test still talks to CISA (as it did before).
+-- Values are CISA's published ones; `seed` marks the catalogue version.
+INSERT INTO kev_catalog (cve_id, vendor_project, product, vulnerability_name, short_description,
+                         required_action, date_added, due_date, known_ransomware_use)
+VALUES
+    ('CVE-2021-44228', 'Apache', 'Log4j2', 'Apache Log4j2 Remote Code Execution Vulnerability',
+     'Apache Log4j2 contains a vulnerability where JNDI features do not protect against attacker-controlled JNDI-related endpoints, allowing for remote code execution.',
+     'For all affected software assets for which updates exist, the only acceptable remediation actions are: 1) Apply updates; OR 2) remove affected assets from agency networks.',
+     '2021-12-10', '2021-12-24', TRUE),
+    ('CVE-2021-45046', 'Apache', 'Log4j2', 'Apache Log4j2 Deserialization of Untrusted Data Vulnerability',
+     'Apache Log4j2 contains a deserialization of untrusted data vulnerability due to the incomplete fix of CVE-2021-44228.',
+     'Apply mitigations per vendor instructions or discontinue use of the product if mitigations are unavailable.',
+     '2023-05-01', '2023-05-22', TRUE)
+ON CONFLICT (cve_id) DO NOTHING;
+
+INSERT INTO kev_sync_logs (id, started_at, completed_at, status, new_entries, updated_entries, total_processed, catalog_version)
+VALUES ('00000000-0000-0000-0000-0000000000c0'::uuid, NOW(), NOW(), 'success', 2, 0, 2, 'seed')
+ON CONFLICT (id) DO NOTHING;
+
+UPDATE kev_sync_settings
+   SET last_sync_at = NOW(), last_catalog_version = 'seed', total_entries = 2
+ WHERE last_sync_at IS NULL;
 
 COMMIT;

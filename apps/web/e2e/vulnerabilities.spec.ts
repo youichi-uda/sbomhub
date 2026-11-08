@@ -43,7 +43,40 @@ test.describe('Vulnerabilities', () => {
     // The scan mutates link state in the background, so it gets its own
     // project rather than racing the read-only tests on the shared one.
     const own = await createVulnerableProject(request, 'Vuln Scan Project');
+    const statusUrl = `${API_BASE_URL}/api/v1/projects/${own.projectId}/sboms/${own.sbomId}/scan-status`;
+    type ScanStatus = { status?: string; error?: string; reasons?: string[]; vulnerabilities?: { total?: number } };
+    const pollTerminal = async (): Promise<ScanStatus> => {
+      let last: ScanStatus = {};
+      await expect
+        .poll(
+          async () => {
+            const res = await request.get(statusUrl);
+            expect(res.status()).toBe(200);
+            last = await res.json();
+            return last.status;
+          },
+          { timeout: 45000, intervals: [1000] },
+        )
+        .toMatch(/^(completed|failed)$/);
+      return last;
+    };
+    // A terminal state must explain itself: "failed" carries an error and
+    // reasons (the hermetic stack has no NVD/JVN egress, so it ends there
+    // with fetch_failed), "completed" carries neither (an online runner).
+    // A scanner that marked every run failed without saying why fails here.
+    const expectExplained = (s: ScanStatus): void => {
+      if (s.status === 'failed') {
+        expect(s.error, 'a failed scan must say why').toBeTruthy();
+        expect(s.reasons?.length, 'a failed scan must list reasons').toBeGreaterThan(0);
+      } else {
+        expect(s.error ?? '', 'a completed scan carries no error').toBe('');
+      }
+    };
     try {
+      // The upload already started a scan; let it finish so the rescan below
+      // does not overlap it.
+      expectExplained(await pollTerminal());
+
       const scanResponse = await request.post(
         `${API_BASE_URL}/api/v1/projects/${own.projectId}/scan?sbom_id=${own.sbomId}`
       );
@@ -52,22 +85,8 @@ test.describe('Vulnerabilities', () => {
       expect(started.sbom_id).toBe(own.sbomId);
       expect(started.status_url).toBe(`/api/v1/projects/${own.projectId}/sboms/${own.sbomId}/scan-status`);
 
-      // The run is tracked: it reaches a terminal state. (The hermetic CI
-      // stack has no NVD/JVN access, so there it ends "failed" with
-      // reasons; online it ends "completed". Either way it must not hang
-      // in "running" or report "unknown".)
-      let last: { status?: string; vulnerabilities?: { total?: number } } = {};
-      await expect
-        .poll(
-          async () => {
-            const res = await request.get(`${API_BASE_URL}${started.status_url}`);
-            expect(res.status()).toBe(200);
-            last = await res.json();
-            return last.status;
-          },
-          { timeout: 45000, intervals: [1000] },
-        )
-        .toMatch(/^(completed|failed)$/);
+      const last = await pollTerminal();
+      expectExplained(last);
       // The already-linked vulnerabilities survive a (failed) rescan.
       expect(last.vulnerabilities?.total).toBe(FIXTURE_CVES.length);
 

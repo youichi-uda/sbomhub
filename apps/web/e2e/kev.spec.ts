@@ -15,24 +15,22 @@ const KEV_CVES = FIXTURE_CVES.filter((c) => c.inKev).map((c) => c.cveId).sort();
 const NON_KEV_CVES = FIXTURE_CVES.filter((c) => !c.inKev).map((c) => c.cveId);
 
 /**
- * The catalog endpoints read kev_catalog, which only POST /kev/sync fills
- * (the seed does not). Make sure it is populated so every catalog test is
- * independent of test order; a failing sync FAILS the suite.
+ * The catalog endpoints read kev_catalog, which docker/seed/web-e2e.sql §9
+ * pre-fills with the two KEV-flagged fixture CVEs and one successful sync
+ * log, so these tests need no egress and do not depend on test order. A
+ * missing seed FAILS here; it is not papered over with a live sync.
  */
-async function ensureCatalogSynced(request: APIRequestContext): Promise<void> {
+async function expectCatalogSeeded(request: APIRequestContext): Promise<void> {
   const statsRes = await request.get(`${API_BASE_URL}/api/v1/kev/stats`);
   expect(statsRes.status()).toBe(200);
   const stats = await statsRes.json();
-  if (stats.total_entries === 0) {
-    const syncRes = await request.post(`${API_BASE_URL}/api/v1/kev/sync`);
-    expect(syncRes.status(), `KEV sync: ${await syncRes.text()}`).toBe(200);
-  }
+  expect(stats.total_entries, 'kev_catalog is empty — is docker/seed/web-e2e.sql §9 loaded?').toBeGreaterThanOrEqual(KEV_CVES.length);
 }
 
 test.describe('KEV (Known Exploited Vulnerabilities)', () => {
   test.describe('KEV Catalog API', () => {
     test.beforeAll(async ({ request }) => {
-      await ensureCatalogSynced(request);
+      await expectCatalogSeeded(request);
     });
 
     test('should sync KEV catalog', async ({ request }) => {
