@@ -9,6 +9,8 @@
     "//eslint-config": "Next 16 removed `next lint`; we invoke eslint v9 against eslint.config.mjs (flat config). M11-5 #80.",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "//test": "Every hermetic unit test under src/ (node:test; .ts modules load through Node >= 22.18 type stripping). The patterns are quoted so node expands them itself: its glob matches the [locale] / [id] directories as ordinary path segments, whereas a literal path containing them is read as a glob character class and silently collects 0 tests. e2e/ (Playwright) is outside src/ and is not run here.",
+    "test": "node --test \"src/**/*.test.mjs\" \"src/**/*.test.ts\"",
     "test:schemas": "node --test src/lib/form-schemas/__tests__/form-schemas.test.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",

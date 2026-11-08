@@ -2,19 +2,23 @@
 //
 // Why .test.mjs (not .test.tsx): the apps/web workspace does not ship a
 // React component test runner (no Vitest, no Jest, no React Testing
-// Library). The only existing JS-side test pattern in the repo is the
-// node:assert script at src/proxy.matcher.test.mjs. Adding a new test
-// framework is out of scope for M10-6 (per file scope: only NEW
-// components specific to diff, no new dependencies unless absolutely
-// required).
+// Library). diff-helpers.ts is plain TypeScript with no imports, so Node's
+// built-in type stripping (Node >= 22.18) loads it directly — the same
+// mechanism the form-schema pins use.
 //
-// What this covers: the pure helpers in diff-helpers.ts, which are the
-// load-bearing pieces of the page that are not directly exercised by
-// the backend tests (the React component itself is exercised manually
-// + via the backend handler contract pinned by diff_test.go).
+// 2026-11: until this revision the file re-implemented each helper inline
+// and only grep-checked that diff-helpers.ts still exported the names, so
+// the assertions exercised copies, never the production code. It was also
+// never wired into CI, and `node --test <path>` with this path collects 0
+// tests: node --test treats its arguments as glob patterns, and `[locale]`
+// / `[id]` are glob character classes that do not match the literal
+// directory names. It now imports the real helpers and runs as part of
+// `pnpm --filter web test` (a `src/**/*.test.mjs` glob, which matches the
+// bracketed directories as ordinary path segments).
 //
 // Run:
-//   node apps/web/src/app/\[locale\]/\(dashboard\)/projects/\[id\]/diff/page.test.mjs
+//   pnpm --filter web test
+//   node "apps/web/src/app/[locale]/(dashboard)/projects/[id]/diff/page.test.mjs"
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -22,42 +26,20 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const helpersSrc = readFileSync(join(__dirname, "diff-helpers.ts"), "utf8");
+import {
+  buildDiffQuery,
+  diffCounts,
+  isInitialBaseline,
+  normaliseSeverity,
+} from "./diff-helpers.ts";
 
-// Sanity guard: the helpers file must export the four symbols the page
-// imports. A future rename without updating the page would fail to
-// build, but a future *removal* could land silently if the page were
-// also gutted. Pin the exports here so the surface is loud.
-test("diff-helpers exports the expected symbols", () => {
-  const exports = [
-    "export function diffCounts",
-    "export function buildDiffQuery",
-    "export function normaliseSeverity",
-    "export function isInitialBaseline",
-  ];
-  for (const sig of exports) {
-    assert.ok(
-      helpersSrc.includes(sig),
-      `diff-helpers.ts missing export: ${sig}`,
-    );
-  }
-});
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // buildDiffQuery contract: round-trip the query-string format that the
 // timeline rows feed into <Link href={...}>. The page consumes this
 // pattern in TimelineRowView.detailHref — a regression here breaks the
 // click-through from timeline to detail.
 test("buildDiffQuery is empty when both args missing", () => {
-  // Reimplemented inline so the test does not need a TS loader. The
-  // grep guard in the previous test ensures the production helper still
-  // implements the same shape.
-  function buildDiffQuery(from, to) {
-    const params = [];
-    if (from) params.push(`from=${encodeURIComponent(from)}`);
-    if (to) params.push(`to=${encodeURIComponent(to)}`);
-    return params.length ? `?${params.join("&")}` : "";
-  }
   assert.equal(buildDiffQuery(undefined, undefined), "");
   assert.equal(buildDiffQuery("", ""), "");
   assert.equal(buildDiffQuery("a", undefined), "?from=a");
@@ -75,19 +57,12 @@ test("buildDiffQuery is empty when both args missing", () => {
 // Anything outside the canonical set lands on "unknown" so the page
 // renders a neutral outline badge (never crashes on novel inputs).
 test("normaliseSeverity buckets every input", () => {
-  function normaliseSeverity(sev) {
-    if (!sev) return "unknown";
-    const v = sev.trim().toLowerCase();
-    if (v === "critical" || v === "high" || v === "medium" || v === "low") {
-      return v;
-    }
-    return "unknown";
-  }
   assert.equal(normaliseSeverity("CRITICAL"), "critical");
   assert.equal(normaliseSeverity("critical"), "critical");
   assert.equal(normaliseSeverity("High"), "high");
   assert.equal(normaliseSeverity("MEDIUM"), "medium");
   assert.equal(normaliseSeverity("low"), "low");
+  assert.equal(normaliseSeverity("  High "), "high", "trims whitespace");
   assert.equal(normaliseSeverity(""), "unknown");
   assert.equal(normaliseSeverity(null), "unknown");
   assert.equal(normaliseSeverity(undefined), "unknown");
@@ -99,9 +74,6 @@ test("normaliseSeverity buckets every input", () => {
 // banner copy on the timeline page. Wrong here = wrong banner shown
 // when the project has 2+ SBOMs.
 test("isInitialBaseline reads from=null + to=non-null only", () => {
-  function isInitialBaseline(d) {
-    return d.from === null && d.to !== null;
-  }
   assert.equal(isInitialBaseline({ from: null, to: {} }), true);
   assert.equal(isInitialBaseline({ from: {}, to: {} }), false);
   assert.equal(isInitialBaseline({ from: null, to: null }), false);
@@ -113,18 +85,6 @@ test("isInitialBaseline reads from=null + to=non-null only", () => {
 // churn. We compare against a fixture that mirrors the backend's
 // envelope shape (see internal/service/diff/diff.go Response).
 test("diffCounts flattens every envelope bucket", () => {
-  function diffCounts(d) {
-    return {
-      componentsAdded: d.components.added.length,
-      componentsRemoved: d.components.removed.length,
-      componentsChanged: d.components.version_changed.length,
-      vulnsAdded: d.vulnerabilities.added.length,
-      vulnsResolved: d.vulnerabilities.resolved.length,
-      vulnsSeverityChanged: d.vulnerabilities.severity_changed.length,
-      licensesAdded: d.licenses.added_policy_violations.length,
-      licensesRemoved: d.licenses.removed_policy_violations.length,
-    };
-  }
   const fixture = {
     components: {
       added: [1, 2],
