@@ -109,6 +109,26 @@ func TestVerifyClerkJWT_Contract(t *testing.T) {
 		}
 	})
 
+	// Clerk session token v2 carries the organisation in the compressed
+	// `o` object instead of org_id / org_role. SDK >= v2.3 maps it onto the
+	// same fields, with the role prefixed "org:" — the exact value
+	// handleClerkAuth compares against for owner promotion. (SDK v2.0.0 left
+	// both fields empty for v2 tokens.)
+	t.Run("v2 session token maps org id and role", func(t *testing.T) {
+		v2 := baseClaims()
+		delete(v2, "org_id")
+		delete(v2, "org_role")
+		v2["v"] = 2
+		v2["o"] = map[string]any{"id": "org_v2", "slg": "acme", "rol": "admin"}
+		got, err := verify(sign("RS256", nil, v2, rs256(key)))
+		if err != nil {
+			t.Fatalf("valid v2 token rejected: %v", err)
+		}
+		if got.UserID != "user_123" || got.OrgID != "org_v2" || got.OrgRole != "org:admin" {
+			t.Fatalf("unexpected v2 claims: %+v", got)
+		}
+	})
+
 	reject := map[string]string{}
 	expired := baseClaims()
 	expired["exp"] = now.Add(-10 * time.Minute).Unix()

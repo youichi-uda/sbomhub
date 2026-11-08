@@ -1018,6 +1018,12 @@ func main() {
 		os.Exit(1)
 	}
 	e.IPExtractor = ipExtractor
+	if strings.TrimSpace(cfg.TrustedProxies) == "" {
+		slog.Info("client IP: using the TCP peer address; X-Forwarded-For / X-Real-IP are ignored. " +
+			"Behind a reverse proxy set SBOMHUB_TRUSTED_PROXIES to its address, or every client shares the proxy's rate-limit bucket and audit IP")
+	} else {
+		slog.Info("client IP: honouring X-Forwarded-For from trusted proxies", "trusted_proxies", cfg.TrustedProxies)
+	}
 
 	// F444: wrap the error handler so every 5xx *echo.HTTPError is collapsed
 	// to a generic body (detail logged server-side), closing the whole
