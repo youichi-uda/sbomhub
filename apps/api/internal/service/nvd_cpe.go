@@ -482,8 +482,9 @@ func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
 //
 //   - PRE-RELEASE: a known qualifier word ("alpha", "beta", "rc", "dev", ...)
 //     or a shorthand letter immediately followed by a number ("1.0a1",
-//     "1.0b2", Tomcat's "9.0.0.M1"). Sorts BEFORE the release it qualifies,
-//     in Maven order: dev < alpha < beta < milestone < preview < rc < snapshot.
+//     "1.0b2", Tomcat's "9.0.0.M1"). Sorts BEFORE the release it qualifies.
+//     Between two pre-releases only alpha < beta < rc is decided — the one
+//     chain every scheme agrees on; other pairs are undecidable.
 //   - POST-RELEASE: one or two bare letters with no number after them —
 //     OpenSSL's patch releases ("1.1.1k" > "1.1.1", "1.1.1za" > "1.1.1z").
 //     OpenSSL 1.1.1m is a patch release, not a milestone.
@@ -522,6 +523,10 @@ var preReleaseRank = map[string]int{
 	"dev": 0, "alpha": 1, "a": 1, "beta": 2, "b": 2, "milestone": 3, "m": 3,
 	"pre": 4, "preview": 4, "rc": 5, "cr": 5, "snapshot": 6,
 }
+
+// agreedPreRelease are the qualifiers every supported scheme orders the same
+// way among themselves (see compareTokens).
+var agreedPreRelease = map[string]bool{"a": true, "alpha": true, "b": true, "beta": true, "rc": true}
 
 // shorthandPreRelease are qualifiers that are pre-releases ONLY when a number
 // follows them. Bare, "m" is an OpenSSL patch letter (1.1.1m), while a bare
@@ -695,13 +700,23 @@ func compareTokens(ta, tb []versionToken) (int, bool) {
 				return 1, true
 			}
 			if kx == kindPre {
-				if c := preReleaseRank[x.value] - preReleaseRank[y.value]; c != 0 {
-					if c < 0 {
-						return -1, true
-					}
-					return 1, true
+				if x.value == y.value {
+					continue
 				}
-				continue
+				// Only alpha < beta < rc (and their a/b shorthands) is
+				// ordered alike by SemVer (lexically), Maven and PEP 440,
+				// and within that set lexical and rank order coincide when
+				// the ranks differ. "dev", "pre"/"preview", "cr", "m",
+				// "snapshot" — and "a" vs "alpha" — are ordered differently
+				// by different schemes (M60 self-review).
+				rx, ry := preReleaseRank[x.value], preReleaseRank[y.value]
+				if !agreedPreRelease[x.value] || !agreedPreRelease[y.value] || rx == ry {
+					return 0, false
+				}
+				if rx < ry {
+					return -1, true
+				}
+				return 1, true
 			}
 			if c := strings.Compare(x.value, y.value); c != 0 {
 				return c, true
