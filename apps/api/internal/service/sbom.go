@@ -297,6 +297,17 @@ func parseCycloneDX(data []byte) ([]model.Component, error) {
 			if c.PackageURL != "" {
 				comp.Purl = c.PackageURL
 			}
+			// M60: `cpe` is the primary CPE; Syft writes its remaining
+			// candidates as `syft:cpe23` properties, in order.
+			cpes := []string{c.CPE}
+			if c.Properties != nil {
+				for _, p := range *c.Properties {
+					if p.Name == "syft:cpe23" {
+						cpes = append(cpes, p.Value)
+					}
+				}
+			}
+			comp.CPEs = normaliseSBOMCPEs(cpes)
 			if c.Licenses != nil && len(*c.Licenses) > 0 {
 				for _, lic := range *c.Licenses {
 					if lic.License != nil && lic.License.ID != "" {
@@ -329,15 +340,76 @@ func parseSPDX(data []byte) ([]model.Component, error) {
 					Type:      "library",
 					CreatedAt: time.Now(),
 				}
-				if purl := getString(p, "externalRefs"); purl != "" {
-					comp.Purl = purl
-				}
+				// M60: externalRefs is an ARRAY in SPDX 2.x JSON. The code
+				// here used to read it with getString, which only accepts a
+				// string, so every SPDX 2 purl was silently dropped.
+				comp.Purl, comp.CPEs = spdx2ExternalRefs(p)
 				components = append(components, comp)
 			}
 		}
 	}
 
 	return components, nil
+}
+
+// spdx2ExternalRefs reads the purl and the CPE names from an SPDX 2.x
+// package's externalRefs array (M60). The first purl wins; CPEs keep document
+// order (Syft lists its candidates most-specific first).
+func spdx2ExternalRefs(pkg map[string]interface{}) (purl string, cpes []string) {
+	refs, _ := pkg["externalRefs"].([]interface{})
+	var raw []string
+	for _, r := range refs {
+		ref, ok := r.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		loc := strings.TrimSpace(getString(ref, "referenceLocator"))
+		switch getString(ref, "referenceType") {
+		case "purl":
+			if purl == "" {
+				purl = loc
+			}
+		case "cpe23Type", "cpe22Type":
+			raw = append(raw, loc)
+		}
+	}
+	return purl, normaliseSBOMCPEs(raw)
+}
+
+// maxStoredCPEsPerComponent bounds the CPE list kept per component. Syft
+// emits up to 18 candidates for one Debian kernel package (measured
+// 2026-11-08); the scanner only ever tries the first few, and the column is
+// uploaded data, so it is capped rather than stored unbounded.
+const maxStoredCPEsPerComponent = 16
+
+// maxStoredCPELength rejects strings that cannot be a sane CPE name.
+const maxStoredCPELength = 512
+
+// normaliseSBOMCPEs trims, keeps only strings shaped like a CPE 2.3 formatted
+// string or a CPE 2.2 URI, drops duplicates (first occurrence wins, so the
+// SBOM's order is preserved) and caps the list. It returns nil when nothing
+// survives, so a component without CPEs is stored as NULL.
+func normaliseSBOMCPEs(in []string) []string {
+	var out []string
+	seen := make(map[string]struct{}, len(in))
+	for _, c := range in {
+		c = strings.TrimSpace(c)
+		if c == "" || len(c) > maxStoredCPELength {
+			continue
+		}
+		if !strings.HasPrefix(c, "cpe:2.3:") && !strings.HasPrefix(c, "cpe:/") {
+			continue
+		}
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+		if len(out) == maxStoredCPEsPerComponent {
+			break
+		}
+	}
+	return out
 }
 
 func getString(m map[string]interface{}, key string) string {
@@ -381,6 +453,14 @@ func parseSPDX3(data []byte) ([]model.Component, error) {
 				break
 			}
 		}
+		// M60: CPE external identifiers, in document order.
+		var cpes []string
+		for _, ext := range elem.ExternalIdentifier {
+			if ext.ExternalIDType == "cpe23" || ext.ExternalIDType == "cpe22" {
+				cpes = append(cpes, ext.Identifier)
+			}
+		}
+		comp.CPEs = normaliseSBOMCPEs(cpes)
 
 		// Extract license if available
 		if elem.DeclaredLicense != "" {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
@@ -34,9 +35,45 @@ func (r *ComponentRepository) q(ctx context.Context) database.Queryable {
 // is `comp.TenantID = sbom.TenantID` inside SbomService.Import /
 // CLIService.UploadSBOM, since every component is scoped to a single SBOM.
 func (r *ComponentRepository) Create(ctx context.Context, c *model.Component) error {
-	query := `INSERT INTO components (id, tenant_id, sbom_id, name, version, type, purl, license, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
-	_, err := r.q(ctx).ExecContext(ctx, query, c.ID, c.TenantID, c.SbomID, c.Name, c.Version, c.Type, c.Purl, c.License, c.CreatedAt)
+	// M60: cpes is written as NULL (not '{}') when the SBOM declared none —
+	// pq.Array of a nil slice binds NULL.
+	query := `INSERT INTO components (id, tenant_id, sbom_id, name, version, type, purl, license, created_at, cpes) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+	_, err := r.q(ctx).ExecContext(ctx, query, c.ID, c.TenantID, c.SbomID, c.Name, c.Version, c.Type, c.Purl, c.License, c.CreatedAt, pq.Array(c.CPEs))
 	return err
+}
+
+// ListScanTargetsBySbom is ListBySbom plus the component's CPE names (M60).
+// It exists as a separate reader so the CPE column reaches the NVD scanner
+// without changing the shape of ListBySbom, which many unrelated readers
+// (compliance, public links, reports) share. Same RLS contract: callers run it
+// inside the tenant transaction.
+func (r *ComponentRepository) ListScanTargetsBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error) {
+	query := `
+		SELECT id, sbom_id, name, COALESCE(version, ''), COALESCE(type, ''),
+			COALESCE(purl, ''), cpes
+		FROM components WHERE sbom_id = $1 ORDER BY name`
+	rows, err := r.q(ctx).QueryContext(ctx, query, sbomID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var components []model.Component
+	for rows.Next() {
+		var c model.Component
+		var cpes pq.StringArray
+		if err := rows.Scan(&c.ID, &c.SbomID, &c.Name, &c.Version, &c.Type, &c.Purl, &cpes); err != nil {
+			return nil, err
+		}
+		if len(cpes) > 0 {
+			c.CPEs = []string(cpes)
+		}
+		components = append(components, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return components, nil
 }
 
 // ListBySbom reads the components of one SBOM.

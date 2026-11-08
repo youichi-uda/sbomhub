@@ -42,7 +42,7 @@ func TestComponentRepository_Create(t *testing.T) {
 			},
 			setupMock: func() {
 				mock.ExpectExec("INSERT INTO components").
-					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "lodash", "4.17.21", "library", "pkg:npm/lodash@4.17.21", "MIT", sqlmock.AnyArg()).
+					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "lodash", "4.17.21", "library", "pkg:npm/lodash@4.17.21", "MIT", sqlmock.AnyArg(), sqlmock.AnyArg()).
 					WillReturnResult(sqlmock.NewResult(1, 1))
 			},
 			wantErr: false,
@@ -61,7 +61,7 @@ func TestComponentRepository_Create(t *testing.T) {
 			},
 			setupMock: func() {
 				mock.ExpectExec("INSERT INTO components").
-					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "express", "4.18.2", "library", "", "", sqlmock.AnyArg()).
+					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "express", "4.18.2", "library", "", "", sqlmock.AnyArg(), sqlmock.AnyArg()).
 					WillReturnResult(sqlmock.NewResult(1, 1))
 			},
 			wantErr: false,
@@ -78,7 +78,7 @@ func TestComponentRepository_Create(t *testing.T) {
 			},
 			setupMock: func() {
 				mock.ExpectExec("INSERT INTO components").
-					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "axios", "1.4.0", "library", "", "", sqlmock.AnyArg()).
+					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "axios", "1.4.0", "library", "", "", sqlmock.AnyArg(), sqlmock.AnyArg()).
 					WillReturnError(errors.New("foreign key violation"))
 			},
 			wantErr: true,
@@ -95,7 +95,7 @@ func TestComponentRepository_Create(t *testing.T) {
 			},
 			setupMock: func() {
 				mock.ExpectExec("INSERT INTO components").
-					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "react", "18.2.0", "library", "", "", sqlmock.AnyArg()).
+					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "react", "18.2.0", "library", "", "", sqlmock.AnyArg(), sqlmock.AnyArg()).
 					WillReturnError(errors.New("duplicate key value violates unique constraint"))
 			},
 			wantErr: true,
@@ -566,7 +566,7 @@ func TestComponentRepository_Create_VariousTypes(t *testing.T) {
 			}
 
 			mock.ExpectExec("INSERT INTO components").
-				WithArgs(component.ID, component.TenantID, component.SbomID, tc.name, "1.0.0", tc.compType, tc.purl, "MIT", sqlmock.AnyArg()).
+				WithArgs(component.ID, component.TenantID, component.SbomID, tc.name, "1.0.0", tc.compType, tc.purl, "MIT", sqlmock.AnyArg(), sqlmock.AnyArg()).
 				WillReturnResult(sqlmock.NewResult(1, 1))
 
 			err := repo.Create(context.Background(), component)
@@ -924,7 +924,7 @@ func TestComponentRepository_Create_PassesTenantID(t *testing.T) {
 	createdAt := time.Now()
 
 	mock.ExpectExec("INSERT INTO components").
-		WithArgs(compID, tenantID, sbomID, "lodash", "4.17.21", "library", "pkg:npm/lodash@4.17.21", "MIT", createdAt).
+		WithArgs(compID, tenantID, sbomID, "lodash", "4.17.21", "library", "pkg:npm/lodash@4.17.21", "MIT", createdAt, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	err = repo.Create(context.Background(), &model.Component{
