@@ -540,17 +540,16 @@ const (
 func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
 	undecidable := false
 	sawProduct := false
+	sawNegatedProduct := false
 	for _, cfg := range cve.Configurations {
-		if cfg.Negate {
-			continue
-		}
 		for _, node := range cfg.Nodes {
-			if node.Negate {
-				continue
-			}
 			for _, m := range node.CpeMatch {
 				crit, ok := parseCPE(m.Criteria)
 				if !ok || crit.Part != c.part || crit.Vendor != c.vendor || crit.Product != c.product {
+					continue
+				}
+				if cfg.Negate || node.Negate {
+					sawNegatedProduct = true
 					continue
 				}
 				sawProduct = true
@@ -570,9 +569,16 @@ func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
 			}
 		}
 	}
-	if undecidable || !sawProduct {
+	switch {
+	case undecidable:
+		return cpeUndecidable
+	case !sawProduct && !sawNegatedProduct:
+		// The configurations never name the product: no evidence either way.
 		return cpeUndecidable
 	}
+	// Named only as a vulnerable=false platform, or only under negated
+	// branches ("NOT running on X"): configuration evidence that this is not
+	// the product's own vulnerability (Codex M60 R21 High).
 	return cpeRejected
 }
 
