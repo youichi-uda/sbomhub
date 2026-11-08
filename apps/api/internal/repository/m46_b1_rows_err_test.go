@@ -57,12 +57,12 @@ func componentVulnRows() *sqlmock.Rows {
 		"id", "cve_id", "description", "severity", "cvss_score",
 		"epss_score", "epss_percentile", "source",
 		"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
-		"published_at", "updated_at",
+		"published_at", "updated_at", "match_method",
 	}).
 		AddRow(uuid.New(), "CVE-2024-0001", "d1", "HIGH", 7.5,
-			0.5, 0.9, "NVD", false, nil, nil, nil, now, now).
+			0.5, 0.9, "NVD", false, nil, nil, nil, now, now, nil).
 		AddRow(uuid.New(), "CVE-2024-0002", "d2", "LOW", 1.0,
-			0.0, 0.0, "NVD", false, nil, nil, nil, now, now).
+			0.0, 0.0, "NVD", false, nil, nil, nil, now, now, nil).
 		RowError(1, errMidIteration)
 }
 

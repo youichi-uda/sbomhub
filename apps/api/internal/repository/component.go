@@ -130,6 +130,33 @@ func vulnListOrderBy(sortBy string) string {
 	return "ORDER BY v.cvss_score DESC NULLS LAST, v.id"
 }
 
+// bestMatchMethodSQL selects, for vulnerability v, the strongest
+// match_method among the links from components of SBOM $1 (M60). The CASE
+// mirrors model.MatchMethod.Rank; NULL (a pre-M60 link) ranks lowest and is
+// returned only when every link is NULL.
+const bestMatchMethodSQL = `(
+		SELECT bm.match_method
+		FROM component_vulnerabilities bm
+		JOIN components bc ON bc.id = bm.component_id
+		WHERE bm.vulnerability_id = v.id AND bc.sbom_id = $1
+		ORDER BY CASE bm.match_method
+			WHEN 'nvd_cpe' THEN 3
+			WHEN 'nvd_cpe_distro' THEN 2
+			WHEN 'nvd_keyword' THEN 1
+			WHEN 'jvn_keyword' THEN 1
+			WHEN 'cve_sync_keyword' THEN 1
+			ELSE 0 END DESC
+		LIMIT 1
+	)`
+
+// setMatch fills the M60 projection fields from the scanned best method.
+func setMatch(v *model.Vulnerability, best sql.NullString) {
+	if best.Valid {
+		v.MatchMethod = best.String
+	}
+	v.MatchConfidence = model.MatchMethod(v.MatchMethod).Confidence()
+}
+
 func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uuid.UUID, sortBy string) ([]model.Vulnerability, error) {
 	// M47 W4 (supersedes F446's COALESCE): epss_score/epss_percentile are
 	// read BARE into sql.NullFloat64 and only a NULL leaves the model
@@ -145,7 +172,8 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 		       v.epss_score, v.epss_percentile,
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
-		       v.published_at, v.updated_at
+		       v.published_at, v.updated_at,
+		       ` + bestMatchMethodSQL + `
 		FROM vulnerabilities v
 		JOIN component_vulnerabilities cv ON cv.vulnerability_id = v.id
 		JOIN components c ON c.id = cv.component_id
@@ -162,13 +190,15 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 	for rows.Next() {
 		var v model.Vulnerability
 		var epssScore, epssPercentile sql.NullFloat64
+		var best sql.NullString
 		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
 			&epssScore, &epssPercentile,
 			&v.Source,
 			&v.InKEV, &v.KEVDateAdded, &v.KEVDueDate, &v.KEVRansomwareUse,
-			&v.PublishedAt, &v.UpdatedAt); err != nil {
+			&v.PublishedAt, &v.UpdatedAt, &best); err != nil {
 			return nil, err
 		}
+		setMatch(&v, best)
 		if epssScore.Valid {
 			v.EPSSScore = &epssScore.Float64
 		}
@@ -282,7 +312,8 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 		       v.epss_score, v.epss_percentile,
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
-		       v.published_at, v.updated_at
+		       v.published_at, v.updated_at,
+		       ` + bestMatchMethodSQL + `
 		FROM vulnerabilities v
 		WHERE EXISTS (
 			SELECT 1
@@ -303,13 +334,15 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 	for rows.Next() {
 		var v model.Vulnerability
 		var epssScore, epssPercentile sql.NullFloat64
+		var best sql.NullString
 		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
 			&epssScore, &epssPercentile,
 			&v.Source,
 			&v.InKEV, &v.KEVDateAdded, &v.KEVDueDate, &v.KEVRansomwareUse,
-			&v.PublishedAt, &v.UpdatedAt); err != nil {
+			&v.PublishedAt, &v.UpdatedAt, &best); err != nil {
 			return nil, err
 		}
+		setMatch(&v, best)
 		if epssScore.Valid {
 			v.EPSSScore = &epssScore.Float64
 		}
