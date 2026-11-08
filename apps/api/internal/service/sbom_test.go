@@ -301,8 +301,9 @@ func TestParseCycloneDX(t *testing.T) {
 	}
 }
 
-// TestParseCycloneDX_AllSupportedSpecVersions pins that every CycloneDX spec
-// version DetectFormatAndVersion accepts (1.4 - 1.7) also parses. With
+// TestParseCycloneDX_AllSupportedSpecVersions pins that the decoder accepts
+// every CycloneDX spec version the DetectFormatAndVersion tests cover
+// (1.4 - 1.7). It does not constrain detection itself. With
 // cyclonedx-go v0.9.3 a "specVersion": "1.7" document passed format detection
 // and was then rejected by the decoder ("invalid specification version");
 // v0.11.0 added 1.7 support.

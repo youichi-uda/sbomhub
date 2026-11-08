@@ -25,7 +25,9 @@ import (
 //   - Non-empty spec: X-Forwarded-For is honoured only for hops that come from
 //     the listed ranges. echo's broad implicit trust (loopback, link-local,
 //     every RFC1918 network) is switched OFF, so only what the operator names
-//     is trusted — a co-tenant on the same private network cannot spoof.
+//     is trusted — a co-tenant on the same private network cannot spoof
+//     unless its address falls inside a range the operator listed, so exact
+//     proxy addresses are preferred over CIDRs.
 //
 // An unparseable entry is an error so a typo is a startup refusal rather than
 // a silently untrusted proxy.
