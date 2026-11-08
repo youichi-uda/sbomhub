@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -27,7 +28,7 @@ func TestGetAppliedMigrations_RowErrReturnsNoPartialResult(t *testing.T) {
 		RowError(1, errors.New("iteration boom"))
 	mock.ExpectQuery(`SELECT version FROM schema_migrations`).WillReturnRows(rows)
 
-	applied, err := getAppliedMigrations(db)
+	applied, err := getAppliedMigrations(context.Background(), db)
 	if err == nil {
 		t.Fatalf("want iteration error, got nil (applied=%v — a partial result)", applied)
 	}

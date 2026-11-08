@@ -2082,10 +2082,12 @@ const legacyBaselineRationale = "" +
 	"schema_migrations: an instance that already applied it will never " +
 	"re-execute it, so a retroactive budget would be dead text there, and a " +
 	"fresh install runs the whole sequence against a database with no " +
-	"application traffic yet. (That second half assumes ONE runner: nothing " +
-	"in cmd/migrate or internal/database/migrate.go takes an advisory lock, " +
-	"so two replicas booting against the same empty database can both read " +
-	"an empty schema_migrations and race.) " +
+	"application traffic yet. (That second half assumes ONE runner at a " +
+	"time, which the runners enforce: cmd/migrate and " +
+	"internal/database/migrate.go both hold the session-level advisory lock " +
+	"database.MigrationLockKey for the whole run, so replicas booting against " +
+	"the same empty database apply the sequence one after another; the " +
+	"waiter then finds everything recorded and applies nothing.) " +
 	"RESIDUAL RISK, stated rather than papered over: an " +
 	"instance that is BEHIND — applied through, say, 025 — really will " +
 	"execute 026 onwards on its next upgrade, and those files will run with " +

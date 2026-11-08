@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+
+	"github.com/sbomhub/sbomhub/internal/database"
 )
 
 func main() {
@@ -48,52 +51,78 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
-
-	// Ensure migrations table exists
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version VARCHAR(255) PRIMARY KEY,
-			applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-		)
-	`)
-	if err != nil {
-		log.Fatalf("Failed to create migrations table: %v", err)
-	}
 
 	command := os.Args[1]
+	if err := run(db, command, os.Args[2:]); err != nil {
+		_ = db.Close()
+		log.Fatal(err)
+	}
+	_ = db.Close()
+}
+
+// run executes one command while holding the migration lock
+// (database.MigrationLockKey), the same session-level advisory lock the API
+// takes for its startup auto-migration, so this tool and booting replicas
+// never apply (or roll back) migrations at the same time. The lock is taken
+// before schema_migrations is created or read, and every statement runs on
+// the locked session. `status` takes it too, so it never reports a run that
+// is half way through.
+func run(db *sql.DB, command string, args []string) error {
+	steps := 1
 	switch command {
-	case "up":
-		if err := migrateUp(db); err != nil {
-			log.Fatalf("Migration failed: %v", err)
-		}
+	case "up", "status":
 	case "down":
-		steps := 1
-		if len(os.Args) > 2 {
+		if len(args) > 0 {
 			var perr error
-			steps, perr = parseSteps(os.Args[2])
+			steps, perr = parseSteps(args[0])
 			if perr != nil {
 				// `down` is destructive: refuse to guess. The pre-fix
 				// fmt.Sscanf silently ran with steps=1 on garbage input.
 				// perr already carries the offending value quoted by
 				// strconv, so the raw os.Args value is not echoed (G706).
-				log.Fatalf("Invalid steps argument: %v", perr)
+				return fmt.Errorf("invalid steps argument: %w", perr)
 			}
-		}
-		if err := migrateDown(db, steps); err != nil {
-			log.Fatalf("Migration rollback failed: %v", err)
-		}
-	case "status":
-		if err := showStatus(db); err != nil {
-			log.Fatalf("Failed to show status: %v", err)
 		}
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
 		os.Exit(1)
 	}
+
+	ctx := context.Background()
+	conn, release, err := database.AcquireMigrationLock(ctx, db, database.MigrateOptions{})
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := database.EnsureMigrationsTable(ctx, conn); err != nil {
+		return err
+	}
+
+	switch command {
+	case "up":
+		if err := migrateUp(conn); err != nil {
+			return fmt.Errorf("migration failed: %w", err)
+		}
+	case "down":
+		if err := migrateDown(conn, steps); err != nil {
+			return fmt.Errorf("migration rollback failed: %w", err)
+		}
+	case "status":
+		if err := showStatus(conn); err != nil {
+			return fmt.Errorf("failed to show status: %w", err)
+		}
+	}
+	return nil
 }
 
-func migrateUp(db *sql.DB) error {
+// migrationSession is what the commands need from the locked connection
+// (*sql.Conn in production; tests pass a sqlmock *sql.DB).
+type migrationSession interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
+func migrateUp(db migrationSession) error {
 	// Get applied migrations
 	applied, err := getAppliedMigrations(db)
 	if err != nil {
@@ -120,7 +149,7 @@ func migrateUp(db *sql.DB) error {
 			return fmt.Errorf("failed to read %s: %w", file, err)
 		}
 
-		tx, err := db.Begin()
+		tx, err := db.BeginTx(context.Background(), nil)
 		if err != nil {
 			return err
 		}
@@ -146,9 +175,9 @@ func migrateUp(db *sql.DB) error {
 	return nil
 }
 
-func migrateDown(db *sql.DB, steps int) error {
+func migrateDown(db migrationSession, steps int) error {
 	// Get applied migrations in reverse order
-	rows, err := db.Query("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT $1", steps)
+	rows, err := db.QueryContext(context.Background(), "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT $1", steps)
 	if err != nil {
 		return err
 	}
@@ -183,7 +212,7 @@ func migrateDown(db *sql.DB, steps int) error {
 			return err
 		}
 
-		tx, err := db.Begin()
+		tx, err := db.BeginTx(context.Background(), nil)
 		if err != nil {
 			return err
 		}
@@ -208,7 +237,7 @@ func migrateDown(db *sql.DB, steps int) error {
 	return nil
 }
 
-func showStatus(db *sql.DB) error {
+func showStatus(db migrationSession) error {
 	applied, err := getAppliedMigrations(db)
 	if err != nil {
 		return err
@@ -235,8 +264,8 @@ func showStatus(db *sql.DB) error {
 	return nil
 }
 
-func getAppliedMigrations(db *sql.DB) (map[string]bool, error) {
-	rows, err := db.Query("SELECT version FROM schema_migrations")
+func getAppliedMigrations(db migrationSession) (map[string]bool, error) {
+	rows, err := db.QueryContext(context.Background(), "SELECT version FROM schema_migrations")
 	if err != nil {
 		return nil, err
 	}
