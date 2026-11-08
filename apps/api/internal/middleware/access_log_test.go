@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -154,6 +155,12 @@ func TestAccessLog_PublicLinkTokenRedacted(t *testing.T) {
 		// Codex R2 High: invalid UTF-8 before the prefix made strings.ToLower
 		// grow the string, so its index cut the original past the prefix.
 		{"invalid utf8 before prefix", "/%FF%FF%FF%FF%FF%FF%FF%FF/API/v1/public/" + tok, "", "", 404},
+		// Codex R3 High: a malformed escape elsewhere made the strict decoder
+		// give up, and a deep enough encoding outlasted its fixed budget.
+		{"malformed inner escape", "/%25zz/api%252Fv1%252Fpublic%252F" + tok, "[REDACTED]", "", 404},
+		{"encoded letters", "/%2561pi/v1/public/" + tok, "[REDACTED]", "", 404},
+		{"deeply encoded", "/api/v1/" + deepEncode("public/", 12) + tok, "[REDACTED]", "", 404},
+		{"encoded past the decode budget", "/api/v1/" + deepEncode("public/", 20) + tok, "[REDACTED]", "", 404},
 		{"no separator after prefix", "/api/v1/public" + tok, "/api/v1/public[REDACTED]", "", 404},
 	}
 	for _, tc := range cases {
@@ -258,5 +265,37 @@ func TestAccessLog_BytesInIsNumeric(t *testing.T) {
 				t.Fatalf("bytes_in = %#v (%T), want JSON number %v", got["bytes_in"], got["bytes_in"], tc.want)
 			}
 		})
+	}
+}
+
+// deepEncode percent-encodes every byte of s once, then re-encodes the "%"
+// signs (layers-1) more times.
+func deepEncode(s string, layers int) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		b.WriteString("%" + strings.ToUpper(hex.EncodeToString([]byte{s[i]})))
+	}
+	out := b.String()
+	for i := 1; i < layers; i++ {
+		out = strings.ReplaceAll(out, "%", "%25")
+	}
+	return out
+}
+
+// Ordinary paths, including ones with literal or malformed escapes, are
+// logged as-is: redaction is confined to the secret prefix.
+func TestAccessLog_NonSecretPathsUntouched(t *testing.T) {
+	for _, p := range []string{
+		"/api/v1/projects/p1",
+		"/api/v1/projects/a%25b",
+		"/api/v1/projects/%zz",
+		"/api/v1/public",
+	} {
+		if got := redactSecretPrefixes(p); got != p {
+			t.Errorf("redactSecretPrefixes(%q) = %q, want unchanged", p, got)
+		}
+	}
+	if got := redactSecretPrefixes("/x/" + deepEncode("a", 20)); got != accessLogRedacted {
+		t.Errorf("a path still decodable past the budget = %q, want fully redacted (fail closed)", got)
 	}
 }

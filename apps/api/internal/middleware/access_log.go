@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"log/slog"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -169,7 +168,8 @@ func accessLogPath(c echo.Context) string {
 // It fails closed: when the prefix shows up only after further
 // percent-decoding (a double-encoded "%252F" separator survives URL.Path's
 // single decode), the whole path is replaced, because there is no reliable
-// offset to cut at.
+// offset to cut at. Decoding is lenient (a malformed escape cannot abort it)
+// and bounded; running out of budget with escapes left also redacts.
 func redactSecretPrefixes(p string) string {
 	if i, ok := indexSecretPrefix(p); ok {
 		if i < len(p) {
@@ -181,17 +181,58 @@ func redactSecretPrefixes(p string) string {
 		return p
 	}
 	d := p
-	for n := 0; n < 8 && strings.Contains(d, "%"); n++ {
-		u, err := url.PathUnescape(d)
-		if err != nil || u == d {
-			break
+	for n := 0; ; n++ {
+		u := lenientPercentDecode(d)
+		if u == d {
+			return p // fully decoded and no prefix anywhere: nothing secret
+		}
+		if n == accessLogMaxDecodeLayers {
+			return accessLogRedacted // still decodable past the budget
 		}
 		d = u
 		if _, ok := indexSecretPrefix(d); ok {
 			return accessLogRedacted
 		}
 	}
-	return p
+}
+
+// accessLogMaxDecodeLayers bounds the decode loop (each layer is O(len)). A
+// path still holding decodable escapes past it is redacted whole, so depth is
+// never a way around redaction.
+const accessLogMaxDecodeLayers = 16
+
+// lenientPercentDecode decodes every well-formed %XX escape and copies
+// anything else (a malformed "%zz", a lone "%") through unchanged. Unlike
+// url.PathUnescape it never fails, so one bad escape cannot stop the search.
+func lenientPercentDecode(s string) string {
+	if !strings.Contains(s, "%") {
+		return s
+	}
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) && isHex(s[i+1]) && isHex(s[i+2]) {
+			b = append(b, unhex(s[i+1])<<4|unhex(s[i+2]))
+			i += 2
+			continue
+		}
+		b = append(b, s[i])
+	}
+	return string(b)
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func unhex(c byte) byte {
+	switch {
+	case '0' <= c && c <= '9':
+		return c - '0'
+	case 'a' <= c && c <= 'f':
+		return c - 'a' + 10
+	default:
+		return c - 'A' + 10
+	}
 }
 
 // indexSecretPrefix returns the offset just past the first secret prefix in p
