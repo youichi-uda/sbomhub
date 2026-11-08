@@ -157,7 +157,6 @@ test.describe('Security Tests', () => {
         });
 
         test('should reject null bytes and control characters as invalid input', async ({ request }) => {
-            test.fixme(true, 'BUG: a project name containing a NUL byte makes POST /api/v1/projects return 500 "failed to create project" (Postgres rejects \\x00) instead of a 400 validation error');
             const controlChars = `Project\x00Test\x1F${Date.now()}`;
 
             const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
@@ -312,15 +311,40 @@ test.describe('Security Tests', () => {
     });
 
     test.describe('Content Security', () => {
+        // M65 bug 9: pages used to carry no security headers and sent
+        // X-Powered-By. Policy: apps/web/security-headers.mjs.
         test('should have appropriate security headers', async ({ page }) => {
-            test.fixme(true, 'BUG: web pages are served with no security headers (no X-Content-Type-Options, X-Frame-Options / CSP frame-ancestors, Referrer-Policy) and with X-Powered-By: Next.js');
             const response = await page.goto('/en/projects');
             expect(response).not.toBeNull();
             const headers = response!.headers();
             expect(headers['x-content-type-options']).toBe('nosniff');
-            expect(headers['x-frame-options'] ?? headers['content-security-policy'] ?? '').toMatch(/DENY|SAMEORIGIN|frame-ancestors/i);
-            expect(headers['referrer-policy']).toBeTruthy();
+            expect(headers['x-frame-options']).toBe('DENY');
+            expect(headers['content-security-policy']).toContain("frame-ancestors 'none'");
+            expect(headers['referrer-policy']).toBe('strict-origin-when-cross-origin');
+            expect(headers['permissions-policy']).toContain('camera=()');
             expect(headers['x-powered-by']).toBeUndefined();
+        });
+
+        test('should load the main pages without any CSP violation', async ({ page }) => {
+            const violations: string[] = [];
+            page.on('console', (msg) => {
+                if (/Content[- ]Security[- ]Policy|Refused to (load|execute|connect|apply|frame)/i.test(msg.text())) {
+                    violations.push(`${page.url()}: ${msg.text()}`);
+                }
+            });
+            await page.addInitScript(() => {
+                document.addEventListener('securitypolicyviolation', (e) => {
+                    console.error(`Content Security Policy violation: ${e.violatedDirective} ${e.blockedURI}`);
+                });
+            });
+            for (const path of ['/en', '/en/dashboard', '/en/projects', '/en/search', '/en/settings/apikeys', '/en/settings/sso', '/ja/projects']) {
+                const res = await page.goto(path);
+                expect(res?.status(), path).toBe(200);
+                expect(res?.headers()['content-security-policy'], path).toContain("default-src 'self'");
+                // The page really ran its client code (hydrated + talked to the API).
+                await page.waitForLoadState('networkidle');
+            }
+            expect(violations).toEqual([]);
         });
 
         test('should not expose sensitive information in error pages', async ({ page }) => {
