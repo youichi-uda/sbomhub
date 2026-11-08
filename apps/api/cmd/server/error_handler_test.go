@@ -269,3 +269,27 @@ func TestSanitizingErrorHandler_4xxNotLoggedAs5xx(t *testing.T) {
 		t.Fatalf("4xx produced %d 5xx records:\n%s", n, buf.String())
 	}
 }
+
+// Codex R1 Low: once the response is committed echo's default handler does
+// not render the error, so the client got whatever was already written (a
+// 204 here). Logging it as "http 5xx error" status=500 contradicts the
+// access log and raises false alerts.
+func TestSanitizingErrorHandler_CommittedResponseNotLoggedAs5xx(t *testing.T) {
+	buf := captureDefaultSlog(t)
+	e := echo.New()
+	e.HTTPErrorHandler = sanitizingErrorHandler(e.HTTPErrorHandler)
+	e.GET("/late", func(c echo.Context) error {
+		if err := c.NoContent(http.StatusNoContent); err != nil {
+			return err
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, "after commit")
+	})
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/late", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want the committed 204", rec.Code)
+	}
+	if n := len(fiveXXRecords(t, buf)); n != 0 {
+		t.Fatalf("committed 204 produced %d 5xx records:\n%s", n, buf.String())
+	}
+}

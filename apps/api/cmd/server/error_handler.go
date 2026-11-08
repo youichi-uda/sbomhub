@@ -46,6 +46,14 @@ import (
 // each handler owns that wording. The access log records them.
 func sanitizingErrorHandler(next echo.HTTPErrorHandler) echo.HTTPErrorHandler {
 	return func(err error, c echo.Context) {
+		if c.Response().Committed {
+			// echo's default handler renders nothing once the response is
+			// committed: the client got what was already written, and the
+			// access log records that status. Not a 5xx, so not logged as one
+			// (Codex R1 Low).
+			next(err, c)
+			return
+		}
 		if he, ok := err.(*echo.HTTPError); ok {
 			// Mirror Echo's DefaultHTTPErrorHandler: when Internal is itself an
 			// *echo.HTTPError it is PROMOTED to the effective error (its code +
@@ -65,12 +73,11 @@ func sanitizingErrorHandler(next echo.HTTPErrorHandler) echo.HTTPErrorHandler {
 				slog.Error("http 5xx error", attrs...)
 				err = echo.NewHTTPError(eff.Code)
 			}
-		} else if err != nil && !c.Response().Committed {
+		} else if err != nil {
 			// echo's default handler answers any other error with a generic
 			// 500 (it asserts *echo.HTTPError directly, so a wrapped one is a
 			// 500 too). The response is already generic; only the log needs
-			// to say it happened. A committed response is not re-rendered by
-			// echo, so it is not reported as a 5xx here either.
+			// to say it happened.
 			slog.Error("http 5xx error", fiveXXLogAttrs(c, http.StatusInternalServerError, err)...)
 		}
 		next(err, c)
