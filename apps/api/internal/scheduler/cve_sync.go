@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/sbomhub/sbomhub/internal/cache"
 	"github.com/sbomhub/sbomhub/internal/client"
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -49,6 +50,49 @@ const (
 // than 120 leaves margin for clock skew between us and NVD and for the run's
 // own duration.
 const cveSyncMaxFetchSpan = 110 * 24 * time.Hour
+
+// cveSyncReplayOverlap is how far BEFORE the stored watermark each tick starts
+// reading (M57). Every record whose lastModified falls in the last
+// cveSyncReplayOverlap of the previous window is therefore offered twice.
+//
+// # Why
+//
+// The catalogue has two writers with different clocks. This job reads NVD's
+// modification window; the per-component NVD scanner (service/nvd.go) creates
+// rows on a miss from its Redis-cached answer, which can be up to
+// cache.NVDCacheTTL old. A keyword-less CVE that NVD re-scored at M is
+// offered to this job ONCE, in the tick whose window contains M; if it is not
+// in the catalogue at that moment the update-only refresh skips it (correctly
+// — see Run), and if a scanner then creates it from a copy cached before M,
+// no later window contains M, so the newer record is never offered again.
+// Measured on PostgreSQL 15: the scanner's LOW stood after the next tick
+// (TestM57CVESync_ScannerRowCreatedAfterTheSyncPassedIsStillRefreshed).
+//
+// # Why this size closes it
+//
+// Let tick k skip the CVE (start S_k, so M <= S_k) and the scanner create it
+// at T > S_k from a cache entry fetched at F < M. The entry is still cached at
+// T, so F > T - NVDCacheTTL > S_k - NVDCacheTTL, hence M > S_k - NVDCacheTTL.
+// The next tick's window starts at S_k - overlap, so any overlap >=
+// NVDCacheTTL contains M. The extra hour is margin for skew between NVD's
+// lastModified clock and ours. If the scanner creates the row only after tick
+// k+1 has ALSO passed it, the same argument applies to tick k+1 and k+2.
+//
+// # What it costs, and what it does NOT do
+//
+// One extra day of NVD's modification feed per tick (typically one more
+// 2000-record page) and a re-run of the per-tenant match phase for those
+// CVEs, whose writes are all idempotent (links ON CONFLICT DO NOTHING,
+// advisory excerpts upserted). A record offered twice is refused the second
+// time by UpdateMetadata's strict `<` guard, so the replay cannot overwrite
+// anything with itself.
+//
+// It is NOT a reconciliation pass: rows whose CVE NVD last modified before
+// the overlap — legacy rows from before migration 066, and rows JVN created
+// with JVN's metadata — are still reached only when NVD next modifies them.
+// That needs fetching by id with a rate-limit budget, a fetch-policy decision
+// that remains open (see the note in Run).
+const cveSyncReplayOverlap = cache.NVDCacheTTL + time.Hour
 
 // catalogueFailureLogSample caps how many CVE ids the failure report names.
 // The point of naming them is that an operator can go and look; a log line
@@ -354,10 +398,11 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 		lastSync = startTime.Add(-24 * time.Hour)
 	}
 
-	// Clamp the request span to what NVD will accept (see cveSyncMaxFetchSpan).
-	// windowStart is what we ASK for; lastSync stays the value the retry policy
-	// reasons about.
-	windowStart := lastSync
+	// Start the window cveSyncReplayOverlap before the watermark (M57), then
+	// clamp the request span to what NVD will accept (see
+	// cveSyncMaxFetchSpan). windowStart is what we ASK for; the watermark
+	// written at the end is still startTime, so the overlap never accumulates.
+	windowStart := lastSync.Add(-cveSyncReplayOverlap)
 	if startTime.Sub(windowStart) > cveSyncMaxFetchSpan {
 		clamped := startTime.Add(-cveSyncMaxFetchSpan)
 		slog.Error("CVE sync: the gap since the last sync exceeds what NVD will answer in one request; "+
@@ -411,13 +456,21 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	//
 	// WHAT THIS STILL DOES NOT REACH (Codex M55 R1, High; honest limitation).
 	// This job is a delta reader: it only ever sees CVEs upstream modified
-	// AFTER the stored watermark. A catalogue row whose CVE was last modified
-	// BEFORE the watermark is never offered here, however stale its stored
-	// metadata is. That covers every row the per-component scanners created
-	// while this gate was closed, and every legacy row (migration 066 leaves
-	// their source_modified_at NULL and performs no backfill — the column
-	// makes such rows IDENTIFIABLE, `WHERE source_modified_at IS NULL`, which
-	// is what a reconciliation pass would need).
+	// AFTER the stored watermark (less cveSyncReplayOverlap since M57, which
+	// closes the case of a row a scanner creates just after this job passed
+	// its record). A catalogue row whose CVE was last modified BEFORE that is
+	// never offered here, however stale its stored metadata is. That covers
+	// every row the per-component scanners created while this gate was
+	// closed, every row JVN created with JVN's metadata, and every legacy row
+	// (migration 066 leaves their source_modified_at NULL and performs no
+	// backfill — the column makes such rows IDENTIFIABLE, `WHERE
+	// source_modified_at IS NULL`, which is what a reconciliation pass would
+	// need).
+	//
+	// M57 also found that until then this job reached NOTHING: it parsed NVD's
+	// zoneless timestamps with time.RFC3339, so every record was undateable
+	// and every refresh was refused. Rows refreshed by no sync since 066
+	// shipped are therefore exactly the NULL rows described above.
 	//
 	// Closing it means fetching those CVEs BY ID rather than by window: a
 	// bounded, rate-limited backfill pass over the NULL rows. That is a
@@ -1577,10 +1630,12 @@ func (j *CVESyncJob) writeCatalogueMetadata(ctx context.Context, cve CVEInfo) (r
 		return repository.MetadataRowAbsent, err
 	}
 	if outcome == repository.MetadataRefusedStale {
-		// Not an error: the row already holds a NEWER upstream record. Logged
-		// because a persistent stream of these means the feed is replaying an
-		// old window and nothing else would say so.
-		slog.Info("CVE sync: kept the stored metadata; the stored record is at least as new as the fetched one",
+		// Not an error: the row already holds a record at least as new. Debug,
+		// not Info, since M57: every tick deliberately re-reads the last
+		// cveSyncReplayOverlap of the previous window, so a refusal per
+		// re-offered CVE is the steady state rather than a sign that the feed
+		// is replaying old data.
+		slog.Debug("CVE sync: kept the stored metadata; the stored record is at least as new as the fetched one",
 			"cve_id", cve.ID, "fetched_last_modified", cve.ModifiedAt.Format(time.RFC3339))
 	}
 	return outcome, nil
@@ -1594,26 +1649,17 @@ func (j *CVESyncJob) writeCatalogueMetadata(ctx context.Context, cve CVEInfo) (r
 // window is the whole feed, so the overwhelming majority of what arrives here
 // is a CVE nobody's SBOM mentions.
 //
-// KNOWN RACE, NOT FIXED HERE (Codex M55 S2, High). "Absent" is also what a row
-// looks like while some scanner's tenant transaction holds an uncommitted
-// INSERT of it: VulnerabilityRepository.Create still runs through the
-// scanner's ctx, so on the miss path the new row is invisible to this
-// connection until that transaction commits. This refresh then correctly
-// reports MetadataRowAbsent, skips, and the scanner's own metadata — which may
-// be older — is what commits.
+// The race M55 recorded here (Codex M55 S2, High) is closed as of M57. "Absent"
+// used to be what a row looked like for the whole of a scanner's sweep,
+// because VulnerabilityRepository.Create inserted it inside that scanner's
+// tenant transaction; this refresh then skipped it and the scanner's possibly
+// older copy committed. Create now writes on its own pool, so the row is
+// visible here the moment it exists.
 //
-// The OUTCOME is the accepted limitation, not a new class: the row lands with
-// source_modified_at NULL, which is writable exactly once, so the next record
-// for that CVE repairs it. What it costs is one refresh opportunity, the same
-// thing a failed write costs.
-//
-// The fix is to detach Create's insert from the tenant transaction, and that
-// is deliberately NOT done from this side: Create's write ordering is what
-// makes the scanner's component_vulnerabilities FK resolve inside its own
-// transaction, and M54's refused-write accounting is built on the current
-// contract. Changing it belongs in a wave that owns service/nvd.go and
-// service/jvn.go together with this file, not in a one-sided edit to the
-// repository they both call.
+// What remains is the ordinary interleaving — this refresh runs before the
+// scanner creates the row at all, and the scanner's copy is older than the
+// record skipped here (its NVD answer can be up to cache.NVDCacheTTL old).
+// That is covered by reading the window again: see cveSyncReplayOverlap.
 func (j *CVESyncJob) refreshCatalogueMetadata(ctx context.Context, cve CVEInfo) error {
 	_, err := j.writeCatalogueMetadata(ctx, cve)
 	return err

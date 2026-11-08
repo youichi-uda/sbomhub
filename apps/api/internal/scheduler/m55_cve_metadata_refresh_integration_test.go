@@ -706,9 +706,13 @@ func TestM55CVEMetadata_FutureWatermarkIsIgnored(t *testing.T) {
 		t.Errorf("requested window is inverted: start %s > end %s. NVD rejects that outright, so every tick "+
 			"repeats the same impossible request and the whole catalogue stops updating", start, end)
 	}
-	if age := end.Sub(start); age > 48*time.Hour {
-		t.Errorf("requested window span = %s, want the normal ~24h fallback: a future watermark must be "+
-			"discarded, not merely survived", age)
+	// The normal fallback is 24h plus the replay overlap every tick reads
+	// before its watermark (M57, cveSyncReplayOverlap). A future watermark
+	// that were merely "survived" would show up as a span near zero or
+	// inverted, not as this.
+	if age, want := end.Sub(start), 24*time.Hour+cveSyncReplayOverlap; age > want+time.Minute || age < want-time.Minute {
+		t.Errorf("requested window span = %s, want the normal fallback %s: a future watermark must be "+
+			"discarded, not merely survived", age, want)
 	}
 }
 
