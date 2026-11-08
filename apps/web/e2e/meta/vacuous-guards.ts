@@ -68,6 +68,10 @@
  *   - `expect(a || b).toBeTruthy()` — weak, but it asserts something.
  *   - `.catch(() => false)` on a probe (that is how probes are written);
  *     only a `.catch` whose RECEIVER contains `expect` is reported.
+ *   - A `throw` counts as a loud exit even when an enclosing `try` catches it
+ *     and the catch can finish without asserting on that path (V4 accepts a
+ *     catch that asserts on SOME path). Codex R7 Low; left as a documented
+ *     miss rather than adding path-sensitive catch analysis.
  */
 import * as ts from 'typescript';
 
@@ -275,21 +279,29 @@ function asserts(node: ts.Node | undefined): boolean {
  */
 function canLeave(node: ts.Node): boolean {
     let found = false;
-    const visit = (n: ts.Node, innerTargets: number): void => {
+    // Loops are targets for both `break` and `continue`; a switch only for
+    // `break` — a `continue` inside a switch targets the enclosing loop
+    // (Codex R7 Medium).
+    const visit = (n: ts.Node, breakTargets: number, continueTargets: number): void => {
         if (found) return;
         if (n !== node && isFunctionLike(n)) return;
         if (ts.isReturnStatement(n)) {
             found = true;
             return;
         }
-        if ((ts.isBreakStatement(n) || ts.isContinueStatement(n)) && (n.label !== undefined || innerTargets === 0)) {
+        if (ts.isBreakStatement(n) && (n.label !== undefined || breakTargets === 0)) {
             found = true;
             return;
         }
-        const isTarget = ts.isIterationStatement(n, false) || ts.isSwitchStatement(n);
-        ts.forEachChild(n, (c) => visit(c, innerTargets + (isTarget ? 1 : 0)));
+        if (ts.isContinueStatement(n) && (n.label !== undefined || continueTargets === 0)) {
+            found = true;
+            return;
+        }
+        const loop = ts.isIterationStatement(n, false) ? 1 : 0;
+        const sw = ts.isSwitchStatement(n) ? 1 : 0;
+        ts.forEachChild(n, (c) => visit(c, breakTargets + loop + sw, continueTargets + loop));
     };
-    visit(node, 0);
+    visit(node, 0, 0);
     return found;
 }
 
@@ -795,6 +807,25 @@ test('smoke', smoke);`,
     }
     if (process.env.SHORT) return;
     await expect(rows.first()).toBeVisible();
+});`,
+    ],
+    [
+        // Codex R7 Medium: `continue` inside a switch targets the LOOP.
+        'continue in a switch skips the later assertion',
+        'V1',
+        `${HDR}test('t', async ({ page }) => {
+    const mode = process.env.MODE;
+    for (const row of await page.locator('tr').all()) {
+        if (await row.isVisible()) {
+            await expect(row).toContainText('ready');
+            return;
+        }
+        switch (mode) {
+            case 'skip':
+                continue;
+        }
+        await expect(row).toContainText('fallback');
+    }
 });`,
     ],
 ];
