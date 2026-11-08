@@ -296,7 +296,7 @@ P3 = それ以降):
 | Guard | 何を守るか |
 |---|---|
 | `Guard pnpm-workspace.yaml against placeholder` | `pnpm-workspace.yaml` に `'@clerk/shared': set this to true or false` 等の `pnpm approve-builds` scaffold が紛れ込んだ際に PR を block。 M5-M9 で 数回 stale commit が発生し `git checkout --` revert が必要だった (詳細: pnpm-workspace.yaml header comment) |
-| `Proxy matcher invariant (M10-4)` | `apps/web/src/proxy.matcher.test.mjs` を `node` で実行し、 proxy.ts の middleware matcher が `/secret.json` / `/leak.txt` 等 static-extension path を auth から bypass させない不変条件を pin |
+| `Web unit tests (node --test)` (旧 `Proxy matcher invariant (M10-4)` ほか 3 step を M64 で統合) | `pnpm --filter web test` で `apps/web/src` 配下の hermetic な node:test を全件実行する。proxy.ts の middleware matcher が `/secret.json` / `/leak.txt` 等 static-extension path を auth から bypass させない不変条件 (`proxy.matcher.test.mjs`)、Clerk の公開ルート判定、UI primitive の ARIA 不変条件、form schema の zod 3 parity pin、SBOM diff helper、react-query の pin を含む |
 | `pnpm 10 lifecycle script skip probe (M10-4)` | pnpm 10.34.3 が自動 skip する `@clerk/shared` / `@parcel/watcher` / `@swc/core` / `sharp` / `unrs-resolver` の native binding が **install 後に require できる**ことを確認。 binding が壊れていれば runtime まで露見せず CI で先に fail (詳細: package.json `// pnpm-skip-monitor` 参照) |
 
 これら 3 つは全て M10-4 #72 で追加。 過去 M5-M9 で manual revert / stale catch を要した polish item を CI gate 化した。

@@ -129,21 +129,6 @@ jobs:
       - name: pnpm 10 lifecycle script skip probe (M10-4 / F161)
         run: node .github/scripts/pnpm-native-probe.mjs
 
-      # M10-4 #72: proxy.ts middleware matcher regression fixture.
-      # Asserts the matcher does not let arbitrary `.json` / `.txt`
-      # files at root bypass the auth path (the pre-M10-4 `.*\..*`
-      # rule used to). Hard gate (no continue-on-error): the matcher
-      # is a security invariant, regressing it is a release blocker.
-      - name: Proxy matcher invariant (M10-4)
-        run: node apps/web/src/proxy.matcher.test.mjs
-
-      # Clerk 7 upgrade: runs the real `createRouteMatcher` over the
-      # public-route patterns from proxy.ts against 41 paths, so a
-      # protected path turning public (or a Clerk matcher semantics
-      # change in a future major) fails CI. Hard gate, same rationale as
-      # the matcher invariant above.
-      - name: Proxy public-route classification (Clerk createRouteMatcher)
-        run: node apps/web/src/proxy.public-routes.test.mjs
 
       # e2e skip-reachability meta-gate — fast, hermetic copy of a check
       # that also runs inside `web-e2e.yml::web-e2e-full` (which is the
@@ -172,34 +157,24 @@ jobs:
           pnpm exec playwright test --reporter=list --retries=0 \
             e2e/skip-reachability.spec.ts
 
-      # M14-2 #94: UI primitive ARIA + type/render invariants
-      # (F209 Tooltip role + aria-describedby, F210 AlertDescription
-      # type/render alignment, F211 CardTitle ref/props symmetry,
-      # F212 AlertDialogTitle wrapper role=presentation). The 4
-      # primitives close the cosmetic class of anti-pattern 48
-      # (fix-one-instance-leave-pattern) — a regression here means
-      # SR contracts at every callsite (eol-badge, kev-badge,
-      # ssvc-badge, ticket-status, settings/apikeys delete confirm,
-      # settings/integrations delete confirm, etc.) silently
-      # degrade at once. node --test runs all four files in one
-      # process, ~50ms total.
-      - name: UI primitive invariants (M14-2 F209-F212)
-        run: |
-          node --test \
-            apps/web/src/components/ui/__tests__/tooltip.test.mjs \
-            apps/web/src/components/ui/__tests__/alert.test.mjs \
-            apps/web/src/components/ui/__tests__/card.test.mjs \
-            apps/web/src/components/ui/__tests__/alert-dialog.test.mjs
-
-      # M59 (zod 3 -> 4 migration, GHSA-mrhx-c7xc-m3w5): pins every form
-      # schema's accept/reject set and the exact user-visible messages to
-      # the zod 3 behaviour, including the diff-webhook URL scheme gate
-      # (javascript: / data: / file: must stay rejected). The test imports
-      # the schema modules as .ts directly, which needs Node's default type
+      # All hermetic node:test unit tests under apps/web/src, as one hard gate
+      # (no continue-on-error). Since M64 this single step replaces four
+      # separately wired steps and covers more than they did together:
+      #   - proxy.ts matcher invariant (M10-4 #72): `.json` / `.txt` at root
+      #     must not bypass auth;
+      #   - Clerk public-route classification (Clerk 7 upgrade): runs the real
+      #     createRouteMatcher over the proxy.ts patterns;
+      #   - UI primitive ARIA + type/render invariants (M14-2 F209-F212);
+      #   - form schema zod 3 parity pins (M59, incl. the diff-webhook URL
+      #     scheme gate);
+      #   - SBOM diff helpers, which previously collected 0 tests because
+      #     node --test treated `[locale]` / `[id]` as glob classes;
+      #   - react-query client, key and error-slot pins (M64).
+      # The .ts files are imported directly, which needs Node's default type
       # stripping (Node >= 22.18; `node-version: 22` resolves to the newest
-      # 22.x).
-      - name: Form schema zod 3 parity pins (M59)
-        run: pnpm --filter web test:schemas
+      # 22.x). e2e/ is Playwright and not part of this script.
+      - name: Web unit tests (node --test)
+        run: pnpm --filter web test
 
       # M11-5 #80: hard gate after the ESLint v9 flat-config migration.
       # Next 16 removed `next lint`; we now invoke eslint directly against
