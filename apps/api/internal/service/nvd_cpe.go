@@ -21,7 +21,8 @@ package service
 //  2. For a candidate with a plain dotted-numeric version, NVD is asked
 //     `cpeName=<part:vendor:product:version:*...>` (exact name, NVD evaluates
 //     the version ranges server-side); the walk pages exactly like the
-//     keyword walk (same budget, same truncation and page-identity checks).
+//     keyword walk (same truncation and page-identity checks; its own page
+//     budget, nvdCPEMaxPagesPerComponent, sized for a full kernel).
 //  3. Every returned CVE is VERIFIED locally against its configurations
 //     (verifyCPEMatch). Measured: cpeName for openssl 1.1.1k returned 47
 //     CVEs, 5 of them only because openssl appears as a vulnerable=false
@@ -838,7 +839,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 	if c.plain() {
 		q := url.Values{}
 		q.Set("cpeName", c.query())
-		res, err := s.walkNVD(ctx, q, pace, paceFirst)
+		res, err := s.walkNVD(ctx, q, pace, paceFirst, nvdCPEMaxPagesPerComponent)
 		spent += res.pages
 		if err != nil {
 			return nvdLookup{requests: spent}, false, err
@@ -863,7 +864,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 	}
 
 	// Step 2: the product-level walk (virtualMatchString=part:vendor:product,
-	// same page budget, truncation reported as for every walk), verified
+	// CPE page budget, truncation reported as for every walk), verified
 	// locally against each record's configurations. Zero records means NVD
 	// configures no CVE for this product: try the next candidate. Otherwise
 	// "none at this version" comes from local verification of NVD's own
@@ -872,7 +873,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 	// one-record probe did.
 	pq := url.Values{}
 	pq.Set("virtualMatchString", c.productQuery())
-	res, err := s.walkNVD(ctx, pq, pace, paceFirst || spent > 0)
+	res, err := s.walkNVD(ctx, pq, pace, paceFirst || spent > 0, nvdCPEMaxPagesPerComponent)
 	spent += res.pages
 	if err != nil {
 		return nvdLookup{requests: spent}, false, err
@@ -937,11 +938,12 @@ func productHasVulnerableEvidence(cve NVDCVE, c cpeCandidate) bool {
 // reject, labelling each, and carries the walk's completeness.
 func (s *NVDService) verifyCPEAnswer(res nvdSearchResult, c cpeCandidate, method model.MatchMethod) nvdLookup {
 	out := nvdLookup{
-		truncated: res.truncated,
-		shifted:   res.shifted,
-		total:     res.total,
-		fetched:   res.fetched,
-		method:    method,
+		truncated:  res.truncated,
+		shifted:    res.shifted,
+		total:      res.total,
+		fetched:    res.fetched,
+		method:     method,
+		pageBudget: res.pageBudget,
 	}
 	for i, e := range res.entries {
 		if productHasVulnerableEvidence(e.CVE, c) {

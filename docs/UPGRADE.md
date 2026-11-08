@@ -1630,8 +1630,8 @@ SPDX 3 `cpe23`/`cpe22` identifiers):
    `versionStart*`/`versionEnd*` range) contains the component's version;
 4. if that answer is empty — or the version is not plain dotted numbers
    (`1.1.1k`, `2.0-beta9`), whose encoding in NVD is ambiguous — NVD is asked
-   for the whole product (`virtualMatchString=<part:vendor:product>`, same page
-   budget) and every record is verified the same way. No records → NVD does not
+   for the whole product (`virtualMatchString=<part:vendor:product>`, same CPE
+   page budget, see 13.5) and every record is verified the same way. No records → NVD does not
    know the product → the next candidate; no candidate known → the old keyword
    search. "No CVE at this version" therefore always comes from checking NVD's
    own configurations, never from an empty `cpeName` answer.
@@ -1734,7 +1734,8 @@ move; it is now labelled `jvn_keyword`.
 CPE names are read at import time. SBOMs uploaded before this release have no
 stored CPEs, so scheduled re-scans of them keep using the keyword search
 (`nvd_keyword`), and their existing links show `unknown` until a scan
-reproduces them. **Re-upload an SBOM to get CPE matching.** Re-scans add links;
+reproduces them. **Re-upload an SBOM to get CPE matching** — this release
+does not backfill CPEs into existing SBOMs. Re-scans add links;
 they never remove one, so a stale keyword link stays until the SBOM is
 replaced.
 
@@ -1754,11 +1755,23 @@ replaced.
   are not — here the kernel's 5 pages, openssl's 2, and the other answers
   holding an unverified CVE). Without an NVD API key
   that is ~6 s per request.
-- **Truncation.** The CPE path uses the same page budget as the keyword path
-  (5 pages, 996 records). A Linux kernel component exceeds it (NVD: 7,059 CVEs
-  for 5.10.46), so the scan is reported **failed / truncated**. Before, the
-  keyword search found 0 CVEs for the kernel and the scan reported success.
-  Whether to raise the budget for the CPE path is an open decision.
+- **Truncation and the CPE page budget.** The keyword path keeps its budget of
+  5 pages / 996 records. The CPE path has its own, larger budget of **60 pages
+  / 11,941 records**, sized for a full Linux kernel: NVD lists 7,059 CVEs for
+  kernel 5.10.46 (measured 2026-11-08), which is 36 pages, plus headroom
+  because kernel CVE counts grow quickly. A kernel component is therefore no
+  longer reported truncated; an answer larger than 11,941 records still is, and
+  the scan is then reported **failed / truncated** as before.
+- **Scan time for a kernel.** Every page is one NVD request and goes through
+  the same rate limiter as every other request, so NVD's published rate limit
+  is respected however many pages a component needs. A full kernel costs ~36
+  requests: **about 3.6 minutes without an NVD API key** (6 s per request) or
+  ~25 s with one. The worst case, a 60-page answer, is 6 minutes / 42 s. Each
+  page is a single request under the 30-second client timeout (a 200-record
+  kernel page measured 2.0 s, 2 MB). There is no overall scan deadline (this
+  predates M60), and the scan's database transaction stays open for the whole
+  sweep, so a kernel lengthens it by that much. A complete answer is cached for
+  24 h unless it holds an `nvd_cpe_unverified` CVE; truncated answers never are.
 - **SPDX 2 purls.** The SPDX 2 importer never stored a package's purl (it read
   the `externalRefs` array as if it were a string). Purls are now stored, which
   also changes VEX purl matching and the reachability ecosystem for SPDX 2

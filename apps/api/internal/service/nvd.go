@@ -64,6 +64,27 @@ const (
 	// budget is exhausted (the result is REPORTED as truncated, never silently
 	// returned as complete).
 	nvdMaxPagesPerComponent = 5
+
+	// nvdCPEMaxPagesPerComponent is the page budget of ONE CPE lookup walk
+	// (cpeName or the product walk) — M60 decision 2. It is larger than the
+	// keyword budget because the reason the keyword budget is small does not
+	// apply: a keyword match set past ~1000 records is text-search noise
+	// (anti-pattern 117), while a CPE answer is NVD's affected-configuration
+	// data, verified record by record.
+	//
+	// Sized from measurement plus margin. Measured 2026-11-08 (live NVD):
+	// cpeName for linux_kernel 5.10.46 has totalResults=7059, i.e. 36 pages.
+	// 60 pages reach 200 + 59*199 = 11,941 records (69% headroom; kernel CVE
+	// counts grow by thousands a year). Past that the answer is reported
+	// truncated exactly as before.
+	//
+	// Cost: every page is one NVD request paced by the sweep's shared limiter
+	// (walkNVD's pacer), so the published rate limit holds: a full kernel is
+	// ~36 requests = ~3.6 min without an API key (6 s/request) or ~25 s with
+	// one; the 60-page worst case is 6 min / 42 s. Each page is one request
+	// under the 30 s client timeout (a 200-record kernel page measured 2.0 s,
+	// 2 MB). There is no overall scan deadline (pre-existing).
+	nvdCPEMaxPagesPerComponent = 60
 )
 
 type NVDService struct {
@@ -665,7 +686,7 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 						"fetched", lookup.fetched,
 						"total", lookup.total,
 						"page_size", nvdPageSize,
-						"page_budget", nvdMaxPagesPerComponent)
+						"page_budget", lookup.pageBudget)
 				}
 
 				mu.Lock()
@@ -815,10 +836,10 @@ func (r NVDScanReport) incompleteErr() error {
 	// failure mode this product exists to prevent.
 	if r.TruncatedComponents > 0 {
 		return fmt.Errorf("nvd: %d component(s) could not be enumerated completely "+
-			"(the paging budget of %d pages x %d ran out, or the result set changed "+
-			"underneath the walk); at least %d known match(es) were not retrieved and the "+
-			"findings for those components are incomplete",
-			r.TruncatedComponents, nvdMaxPagesPerComponent, nvdPageSize, r.DroppedMatches)
+			"(the paging budget ran out — %d pages x %d for a keyword lookup, %d pages for a CPE "+
+			"lookup — or the result set changed underneath the walk); at least %d known "+
+			"match(es) were not retrieved and the findings for those components are incomplete",
+			r.TruncatedComponents, nvdMaxPagesPerComponent, nvdPageSize, nvdCPEMaxPagesPerComponent, r.DroppedMatches)
 	}
 
 	// STILL NOT escalated, and this is the honest remainder: a PARTIAL fetch
@@ -982,6 +1003,9 @@ type nvdLookup struct {
 	fetched   int
 	// requests is how many NVD HTTP requests this lookup spent.
 	requests int
+	// pageBudget is the page budget of the walk that produced the answer
+	// (keyword or CPE, M60 decision 2); logged with a truncation.
+	pageBudget int
 	// method is how the vulns were matched (M60): nvd_cpe / nvd_cpe_distro
 	// for the CPE path, nvd_keyword for the keyword path. It is what the
 	// links are labelled with, unless methods overrides it per CVE.
@@ -1211,12 +1235,13 @@ func (s *NVDService) keywordLookup(ctx context.Context, name, version string, pa
 	}
 
 	return nvdLookup{
-		vulns:     vulns,
-		truncated: res.truncated,
-		shifted:   res.shifted,
-		total:     res.total,
-		fetched:   res.fetched,
-		requests:  res.pages,
+		vulns:      vulns,
+		truncated:  res.truncated,
+		shifted:    res.shifted,
+		total:      res.total,
+		fetched:    res.fetched,
+		requests:   res.pages,
+		pageBudget: res.pageBudget,
 	}, nil
 }
 
@@ -1243,6 +1268,8 @@ type nvdSearchResult struct {
 	// pages is the number of HTTP requests this lookup issued, INCLUDING the
 	// one that failed when the walk ends in an error.
 	pages int
+	// pageBudget is the page limit this walk ran under (M60 decision 2).
+	pageBudget int
 	// shifted records that the result set moved underneath the walk.
 	//
 	// # Why an offset walk needs this at all (Codex M55 R1/R2, Critical)
@@ -1410,7 +1437,7 @@ func (s *NVDService) searchByKeywordPaced(ctx context.Context, name, version str
 	}
 	q := url.Values{}
 	q.Set("keywordSearch", keyword)
-	return s.walkNVD(ctx, q, pace, paceFirst)
+	return s.walkNVD(ctx, q, pace, paceFirst, nvdMaxPagesPerComponent)
 }
 
 // walkNVD pages one NVD CVE query — keywordSearch (searchByKeyword) or
@@ -1424,8 +1451,11 @@ func (s *NVDService) searchByKeywordPaced(ctx context.Context, name, version str
 // the item and nothing else; since M60 one item can issue several queries
 // (CPE candidates, the product probe, the keyword fallback), and every query
 // after the item's first must pay for its first page too.
-func (s *NVDService) walkNVD(ctx context.Context, query url.Values, pace nvdPacer, paceFirst bool) (nvdSearchResult, error) {
-	var out nvdSearchResult
+//
+// maxPages is the walk's page budget: nvdMaxPagesPerComponent for keyword
+// walks, nvdCPEMaxPagesPerComponent for CPE walks (M60 decision 2).
+func (s *NVDService) walkNVD(ctx context.Context, query url.Values, pace nvdPacer, paceFirst bool, maxPages int) (nvdSearchResult, error) {
+	out := nvdSearchResult{pageBudget: maxPages}
 	// seen de-duplicates by canonical CVE id ACROSS pages, and — see the
 	// shifted-window discussion on nvdSearchResult.shifted — a hit that is not
 	// the deliberate overlap record is also evidence that the offsets this walk
@@ -1440,7 +1470,7 @@ func (s *NVDService) walkNVD(ctx context.Context, query url.Values, pace nvdPace
 	anchorID := ""
 	start := 0
 
-	for out.pages < nvdMaxPagesPerComponent {
+	for out.pages < maxPages {
 		// Every page after the first is an EXTRA request that the worker
 		// pool's per-work-item tick did not pay for, so it takes its own tick.
 		// Without this the pool would issue up to maxConcurrentWithKey * 5
