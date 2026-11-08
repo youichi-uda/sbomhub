@@ -294,21 +294,28 @@ describe("diff-webhook settings form", () => {
   });
   test("url issue still reported alongside a threshold issue", () => {
     // The form shows both at once; the refinement must not be skipped
-    // because a sibling field failed.
-    for (const v of ["-1", "1.5"]) {
+    // because a sibling field failed with a VALUE error. "1e999" /
+    // "Infinity" coerce to ±Infinity, which zod 3 failed in int()
+    // (non-aborting), so the URL error still showed (Codex R2 Low); a
+    // number input accepts "1e999" as typed text. Distinct [path(, url
+    // message)] pairs: the issue COUNT per threshold is not pinned
+    // ("-Infinity" fails two checks under zod 3).
+    const distinct = (value) => [
+      ...new Map(
+        issuesOf(diffWebhookSchema, value).map(([p, m]) => [
+          p,
+          p === "webhook_url" ? [p, m] : [p],
+        ]),
+      ).values(),
+    ];
+    for (const v of ["-1", "1.5", "1e999", "Infinity", "-Infinity"]) {
       assert.deepEqual(
-        issuesOf(diffWebhookSchema, { ...ok, webhook_url: "", critical_threshold: v }).map(
-          ([p, m]) => (p === "webhook_url" ? [p, m] : [p]),
-        ),
+        distinct({ ...ok, webhook_url: "", critical_threshold: v }),
         [["critical_threshold"], ["webhook_url", "url_required"]],
         v,
       );
       assert.deepEqual(
-        issuesOf(diffWebhookSchema, {
-          ...ok,
-          webhook_url: "javascript:x",
-          high_threshold: v,
-        }).map(([p, m]) => (p === "webhook_url" ? [p, m] : [p])),
+        distinct({ ...ok, webhook_url: "javascript:x", high_threshold: v }),
         [["high_threshold"], ["webhook_url", "url_protocol"]],
         v,
       );
@@ -390,6 +397,11 @@ describe("malformed value types keep zod 3's messages (Codex R1 Low)", () => {
       ]);
     }
     assert.deepEqual(firstPerField(reportEditSchema, { decision_note: "" }), [["draft_text", "Required"]]);
+    // zod 3 classified any thenable (callable then + catch) as "promise" (Codex R2 Low).
+    const thenable = { then() {}, catch() {} };
+    assert.deepEqual(firstPerField(reportEditSchema, { draft_text: thenable, decision_note: "" }), [
+      ["draft_text", "Expected string, received promise"],
+    ]);
   });
   test("enum fields", () => {
     const exp = STATES.map((v) => `'${v}'`).join(" | ");

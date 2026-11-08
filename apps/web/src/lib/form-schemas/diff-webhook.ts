@@ -25,19 +25,37 @@ export type DiffWebhookFormat = (typeof DIFF_WEBHOOK_FORMATS)[number];
 //     reasons. (1) zod 4's int() reports a fractional value as an ABORTING
 //     issue, which skips the url_required / url_protocol refinement below;
 //     zod 3 treated it as non-aborting and showed both errors together.
-//     Refinement issues are non-aborting, so the default refinement gating
-//     now matches zod 3: type failures (NaN, a bad `format`) abort and skip
-//     the URL check, value failures (fractional, negative) do not.
+//     Refinement issues are non-aborting, so fractional and negative values
+//     leave the URL check running, as in zod 3 (see v3RefinementGate).
 //     (2) zod 4's int() is Number.isSafeInteger and refuses e.g. 2^53;
 //     zod 3's was Number.isInteger.
 //   - z.number() itself refuses NaN and, new in zod 4, ±Infinity; both were
 //     already rejected under zod 3 (NaN by the type check, ±Infinity by int()).
+//     The refinement gate below keeps zod 3's "±Infinity is a value failure".
 //   - The messages are zod 3's; the page does not render threshold errors.
 const threshold = () =>
   z.coerce
     .number()
     .refine((n) => Number.isInteger(n), { error: "Expected integer, received float" })
     .refine((n) => n >= 0, { error: "Number must be greater than or equal to 0" });
+
+// When the URL refinement runs: exactly when zod 3 ran it.
+//
+// zod 3 skipped an object refinement after a TYPE failure (a non-boolean
+// `enabled`, a non-string url, NaN from a threshold, an unknown `format`)
+// and ran it after VALUE failures. zod 4's default gating matches that for
+// every issue here except one: z.number() now rejects ±Infinity as a type
+// failure, where zod 3 accepted the number and failed it in int() (a value
+// failure). So the gate is "no type failure other than an infinite number".
+// It also guarantees `enabled` is a boolean and `webhook_url` a string when
+// the refinement reads them.
+function v3RefinementGate(payload: { issues: readonly { code?: string; input?: unknown }[] }) {
+  return payload.issues.every((issue) => {
+    if (issue.code === "invalid_value") return false;
+    if (issue.code !== "invalid_type") return true;
+    return typeof issue.input === "number" && Math.abs(issue.input) === Infinity;
+  });
+}
 
 export const diffWebhookSchema = z
   .object({
@@ -67,7 +85,7 @@ export const diffWebhookSchema = z
         message: "url_protocol",
       });
     }
-  });
+  }, { when: v3RefinementGate });
 
 export type DiffWebhookFormInput = z.input<typeof diffWebhookSchema>;
 export type DiffWebhookFormValues = z.output<typeof diffWebhookSchema>;

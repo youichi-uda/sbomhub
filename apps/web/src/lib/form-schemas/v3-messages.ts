@@ -24,7 +24,14 @@ function v3TypeName(input: unknown): string {
   if (input instanceof Date) return "date";
   if (input instanceof Map) return "map";
   if (input instanceof Set) return "set";
-  if (typeof Promise !== "undefined" && input instanceof Promise) return "promise";
+  if (
+    (typeof Promise !== "undefined" && input instanceof Promise) ||
+    (typeof input === "object" &&
+      typeof (input as { then?: unknown }).then === "function" &&
+      typeof (input as { catch?: unknown }).catch === "function")
+  ) {
+    return "promise"; // zod 3 treats any thenable with catch() as a promise
+  }
   if (typeof input === "number" && Number.isNaN(input)) return "nan";
   return typeof input;
 }
