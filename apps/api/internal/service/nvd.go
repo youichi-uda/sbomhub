@@ -992,6 +992,9 @@ type nvdLookup struct {
 	methods []model.MatchMethod
 	// uncacheable is set when the answer must not be cached.
 	uncacheable bool
+	// productEvidence counts records that name the candidate's product as
+	// vulnerable (CPE path only; Codex M60 R17).
+	productEvidence int
 	// keywordFallback: the item HAD CPE candidates, none of which named a
 	// product NVD knows, so the keyword path answered.
 	keywordFallback bool

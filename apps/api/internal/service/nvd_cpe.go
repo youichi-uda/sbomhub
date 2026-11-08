@@ -112,6 +112,11 @@ func parseCPE(s string) (cpeName, bool) {
 			return cpeName{}, false
 		}
 		for _, f := range raw {
+			// %01 / %02 are the CPE 2.2 URI wildcards ('?' and '*'): not one
+			// concrete product (Codex M60 R17 Medium).
+			if lf := strings.ToLower(f); strings.Contains(lf, "%01") || strings.Contains(lf, "%02") {
+				return cpeName{}, false
+			}
 			u, err := url.PathUnescape(f)
 			if err != nil {
 				return cpeName{}, false
@@ -139,28 +144,56 @@ func parseCPE(s string) (cpeName, bool) {
 
 // splitCPE23 splits a CPE 2.3 formatted string body on unescaped colons and
 // removes the backslash escapes. ok is false for a dangling escape.
+//
+// It follows the NIST CPE 2.3 formatted-string rules strictly enough that a
+// malformed name cannot turn into a DIFFERENT valid identity (Codex M60 R17
+// Medium): a backslash may only quote a non-alphanumeric character other than
+// '_'; unquoted characters are limited to letters, digits, '_', '-', '.';
+// and an unquoted '*' or '?' is accepted only as the whole value ANY ("*").
+// A partial wildcard ("widget*") names many products, not one, so it is
+// rejected rather than queried as a literal.
 func splitCPE23(s string) ([]string, bool) {
 	var out []string
 	var b strings.Builder
 	esc := false
+	unquotedStar := false // this field holds an UNQUOTED '*'
+	endField := func() bool {
+		v := b.String()
+		if unquotedStar && v != "*" {
+			return false // a partial wildcard such as "widget*"
+		}
+		out = append(out, v)
+		b.Reset()
+		unquotedStar = false
+		return true
+	}
 	for _, r := range s {
 		switch {
 		case esc:
+			if r < 0x80 && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_') {
+				return nil, false // "\q": an illegal escape
+			}
 			b.WriteRune(r)
 			esc = false
 		case r == '\\':
 			esc = true
 		case r == ':':
-			out = append(out, b.String())
-			b.Reset()
-		default:
+			if !endField() {
+				return nil, false
+			}
+		case r < 0x80 && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.'):
 			b.WriteRune(r)
+		case r == '*':
+			unquotedStar = true
+			b.WriteRune(r)
+		default:
+			return nil, false // unquoted punctuation or '?'
 		}
 	}
-	if esc {
+	if esc || !endField() {
 		return nil, false
 	}
-	return append(out, b.String()), true
+	return out, true
 }
 
 // cpeConcrete is false for the logical values ANY ("*") and NA ("-") and for
@@ -782,11 +815,16 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 		}
 		if res.total > 0 || len(res.entries) > 0 {
 			out := s.verifyCPEAnswer(res, c, method)
-			out.requests = spent
-			if !out.uncacheable {
-				s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
+			// An answer in which the product only ever appears as a
+			// vulnerable=false platform says nothing about the product's own
+			// CVEs (Codex M60 R17 High): step 2 decides instead.
+			if out.productEvidence > 0 || res.truncated {
+				out.requests = spent
+				if !out.uncacheable {
+					s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
+				}
+				return out, true, nil
 			}
-			return out, true, nil
 		}
 		// A zero is NOT taken as "clean": it is equally the answer for a
 		// version encoded differently from NVD's. Step 2 decides.
@@ -819,11 +857,39 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 			"cannot tell whether NVD knows it", c.productQuery())
 	}
 	out := s.verifyCPEAnswer(res, c, method)
+	if out.productEvidence == 0 && !res.truncated {
+		// NVD names this product only as a vulnerable=false platform: no CVE
+		// is configured FOR it, which is "unknown product" for our purpose —
+		// a wrong early Syft guess must not end the candidate walk with a
+		// cached empty answer (Codex M60 R17 High). A truncated walk might
+		// hold such evidence on an unfetched page, so it stays decided and
+		// is reported as truncated.
+		s.cacheVulns(ctx, nvdNoCPECacheName(c), c.String(), nil)
+		return nvdLookup{requests: spent}, false, nil
+	}
 	out.requests = spent
 	if !out.uncacheable {
 		s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
 	}
 	return out, true, nil
+}
+
+// productHasVulnerableEvidence reports whether any criterion of the record
+// names the candidate's product as vulnerable (or without saying, which is
+// not evidence of the opposite).
+func productHasVulnerableEvidence(cve NVDCVE, c cpeCandidate) bool {
+	for _, cfg := range cve.Configurations {
+		for _, n := range cfg.Nodes {
+			for _, m := range n.CpeMatch {
+				crit, ok := parseCPE(m.Criteria)
+				if ok && crit.Part == c.part && crit.Vendor == c.vendor && crit.Product == c.product &&
+					(m.Vulnerable || m.vulnerableMissing) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // verifyCPEAnswer keeps the records of one walk that verifyCPEMatch does not
@@ -837,6 +903,9 @@ func (s *NVDService) verifyCPEAnswer(res nvdSearchResult, c cpeCandidate, method
 		method:    method,
 	}
 	for i, e := range res.entries {
+		if productHasVulnerableEvidence(e.CVE, c) {
+			out.productEvidence++
+		}
 		switch verifyCPEMatch(e.CVE, c) {
 		case cpeMatched:
 			out.vulns = append(out.vulns, res.vulns[i])
