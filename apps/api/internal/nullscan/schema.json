@@ -370,7 +370,7 @@
       },
       "report_type": {
         "nullable": false,
-        "type": "character varying(20)"
+        "type": "character varying(32)"
       },
       "response_hash": {
         "nullable": true,

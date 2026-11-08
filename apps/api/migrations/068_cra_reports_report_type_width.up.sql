@@ -1,0 +1,50 @@
+-- ============================================
+-- Widen cra_reports.report_type from VARCHAR(20) to VARCHAR(32) so the 72h
+-- report type fits (found by the M65 E2E work).
+--
+-- The defect:
+--   Migration 038 declared
+--     report_type VARCHAR(20) NOT NULL
+--         CHECK (report_type IN ('early_warning', 'detailed_notification',
+--                                'final_report'))
+--   'detailed_notification' is 21 characters. The CHECK allows it, the
+--   column cannot hold it, so every 72h CRA report insert has failed with
+--   `pq: value too long for type character varying(20)` (SQLSTATE 22001)
+--   and POST /api/v1/projects/:id/cra/reports answered 500 for
+--   report_type=detailed_notification since 038 shipped. No row with that
+--   value can exist, so no data is affected; 24h and final reports were
+--   never affected.
+--
+-- Why VARCHAR(32) and not TEXT + CHECK:
+--   Every enum-like column in this schema is VARCHAR(n) + CHECK (038, 035,
+--   054 ...). The CHECK stays the authority on allowed values; 32 leaves room
+--   for a longer future milestone name ('interim_update' was the one 038
+--   anticipated) without another migration. A catalogue-wide guard test
+--   (internal/repository TestM68Schema_NoCheckLiteralExceedsColumnWidth)
+--   now fails if any CHECK literal is ever longer than its column again.
+--
+-- What the statement does (measured 2026-11-09, PostgreSQL 15, 300,000
+--   rows, inside a rolled-back transaction):
+--   * no table rewrite: pg_relation_filenode('cra_reports') is unchanged
+--     (widening a varchar is binary-coercible);
+--   * no index rebuild: no index covers report_type;
+--   * ONE sequential scan: PostgreSQL re-checks the CHECK constraints that
+--     reference the column (cra_reports_report_type_check), 25 ms for the
+--     300k rows. cra_reports holds one row per (project, CVE, report type,
+--     language) a human asked for, so real tables are orders of magnitude
+--     smaller.
+--   The CHECK constraint itself is unchanged (same name, same values).
+--
+-- RLS: untouched. cra_reports keeps the ENABLE + FORCE + tenant_isolation
+--   policy from 038; this file declares none.
+--
+-- LOCK BUDGET: see 063. ALTER COLUMN ... TYPE takes ACCESS EXCLUSIVE on
+--   cra_reports and holds it until COMMIT, so acquiring it can queue behind
+--   a live reader and every later request queues behind us. A bounded wait
+--   turns an indefinite stall into a retry: the runner's transaction rolls
+--   back the DDL and the schema_migrations row together.
+-- ============================================
+
+SET LOCAL lock_timeout = '5s';
+
+ALTER TABLE cra_reports ALTER COLUMN report_type TYPE VARCHAR(32);
