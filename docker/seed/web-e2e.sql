@@ -555,4 +555,68 @@ VALUES (
 )
 ON CONFLICT (id) DO NOTHING;
 
+-- ---------------------------------------------------------------------
+-- 8. Hermetic vulnerability matcher for spec-created projects
+-- ---------------------------------------------------------------------
+-- WHY THIS EXISTS. Every spec that needs a project WITH vulnerabilities
+-- (vex / ssvc / kev / triage / search / vulnerabilities / workflow ...)
+-- creates its own project and uploads an SBOM through the API. But the
+-- only code paths that write component_vulnerabilities are the NVD / JVN
+-- scanners and the CVE-sync scheduler (apps/api/internal/service/nvd.go,
+-- jvn.go, scheduler/cve_sync.go) — all of which need the live internet.
+-- There is no API that links a CVE to a component. So in the hermetic CI
+-- stack those projects had zero vulnerabilities and the specs either
+-- `test.skip()`ped or asserted nothing behind `if (vulns.length > 0)`.
+--
+-- This trigger stands in for the scanner's LINK step, and only that: when
+-- the upload path inserts a component whose purl is one of the fixture
+-- purls below, it is linked to the CVE rows seeded in section 3 — exactly
+-- the row the scanner's phase 3 would write (nvd.go -> vulnRepo.
+-- LinkComponent). Everything downstream (vulnerability list, VEX, SSVC,
+-- KEV, search, triage) then runs the real code.
+--
+-- The fixture purls live in a namespace no real scanner can match
+-- (`pkg:generic/sbomhub-e2e/...`), so an internet-connected runner's own
+-- scan adds nothing on top and the counts stay deterministic:
+--   vuln-fixture-critical@1.0.0 -> CVE-2021-44228 + CVE-2021-45046 (CRITICAL, KEV)
+--   vuln-fixture-high@1.0.0     -> CVE-2021-23337 + CVE-2020-8203  (HIGH, not KEV)
+-- Specs use apps/web/e2e/fixtures/vuln-project.ts rather than these
+-- literals.
+--
+-- SECURITY DEFINER: the upload runs as sbomhub_app, which must not need
+-- grants on this test-only table. The function is owned by the seeding
+-- superuser-equivalent role and pins search_path. CI-ONLY, like the rest
+-- of this file: never load it into a real deployment.
+CREATE TABLE IF NOT EXISTS e2e_vuln_fixture (
+    purl             TEXT NOT NULL,
+    vulnerability_id UUID NOT NULL REFERENCES vulnerabilities(id),
+    PRIMARY KEY (purl, vulnerability_id)
+);
+
+INSERT INTO e2e_vuln_fixture (purl, vulnerability_id) VALUES
+    ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', '00000000-0000-0000-0000-000000000040'::uuid),
+    ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', '00000000-0000-0000-0000-000000000041'::uuid),
+    ('pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',     '00000000-0000-0000-0000-000000000042'::uuid),
+    ('pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',     '00000000-0000-0000-0000-000000000043'::uuid)
+ON CONFLICT DO NOTHING;
+
+CREATE OR REPLACE FUNCTION e2e_link_fixture_vulns() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+    INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at, match_method)
+    SELECT NEW.id, f.vulnerability_id, NOW(), 'nvd_cpe'
+      FROM e2e_vuln_fixture f
+     WHERE f.purl = NEW.purl
+    ON CONFLICT (component_id, vulnerability_id) DO NOTHING;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS e2e_link_fixture_vulns ON components;
+CREATE TRIGGER e2e_link_fixture_vulns
+    AFTER INSERT ON components
+    FOR EACH ROW
+    WHEN (NEW.purl LIKE 'pkg:generic/sbomhub-e2e/%')
+    EXECUTE FUNCTION e2e_link_fixture_vulns();
+
 COMMIT;
