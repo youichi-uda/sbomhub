@@ -1438,6 +1438,10 @@ SBOMHUB_TRUSTED_PROXIES=172.18.0.10
 - `X-Real-IP` is never used; configure the proxy to send `X-Forwarded-For`, and
   have the outermost proxy overwrite (not append to) any client-supplied value.
 - A malformed entry refuses startup rather than silently trusting nothing.
+- Each `X-Forwarded-For` entry must be a bare IP address (what nginx's
+  `$proxy_add_x_forwarded_for` and most load balancers send). An entry with a
+  port (`203.0.113.7:53123`) or an IPv6 zone is not parsed, and the request is
+  attributed to the proxy's address instead.
 
 `docker compose` passes the variable through from `.env` (`env_file`); no
 compose edit is needed. See [configuration.md](./configuration.md#client-ip-and-reverse-proxies).
@@ -1447,11 +1451,14 @@ compose edit is needed. See [configuration.md](./configuration.md#client-ip-and-
 - **CycloneDX 1.7 uploads now parse.** The previous `cyclonedx-go` rejected
   `specVersion: "1.7"` although format detection accepted it, so such uploads
   failed.
-- **`lib/pq` 1.12 requires PostgreSQL 14+.** The bundled compose uses 15; check
-  an external database if you bring your own.
+- **`lib/pq` 1.12 supports and tests PostgreSQL 14+ only.** Older servers may
+  still work but are unsupported. The bundled compose uses 15; check an external
+  database if you bring your own.
 - **Go toolchain go1.26.10** for the API image and the CLI (17–19 reachable
-  standard-library advisories fixed). Building the CLI from source now needs Go
-  1.26+.
+  standard-library advisories fixed). Building from source needs go1.26.10, or
+  an older Go 1.26+ with automatic toolchain download allowed (the default
+  `GOTOOLCHAIN=auto`); with `GOTOOLCHAIN=local` on an older patch the build
+  either fails or ships the unfixed standard library.
 - **Next.js 16.4.5 / `@clerk/nextjs` 6.39.8** in the web image (unauthenticated
   RCE in the image-optimisation API and a Clerk middleware route-protection
   bypass were fixed upstream). Pull the new images.

@@ -95,6 +95,26 @@ func TestFixtures(t *testing.T) {
 			},
 		},
 		{
+			// Codex review 2026-11-08: official golang images set
+			// GOTOOLCHAIN=local, so the go.mod toolchain directive is NOT
+			// honoured inside the image. A minor-only tag (golang:1.26-alpine)
+			// resolves to whatever 1.26.x the host has cached, which can be an
+			// unpatched release. Dockerfile pins must therefore be patch-precise
+			// (workflow pins may stay minor-only: setup-go resolves the newest).
+			name:     "bad_dockerfile_minor_only exits 1 (Dockerfile must pin patch)",
+			fixture:  "bad_dockerfile_minor_only",
+			wantExit: 1,
+			wantStdoutContain: []string{
+				"drift: Dockerfile",
+				"apps/api/Dockerfile",
+				"expected: 1.26.4",
+				"actual:   1.26",
+			},
+			wantStderrContain: []string{
+				"FAIL",
+			},
+		},
+		{
 			name:     "bad_workflow_drift exits 1 with workflow path + expected + actual",
 			fixture:  "bad_workflow_drift",
 			wantExit: 1,

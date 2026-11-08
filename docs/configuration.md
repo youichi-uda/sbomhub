@@ -35,7 +35,7 @@ The client IP is used for per-IP rate-limit buckets and recorded in the audit lo
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SBOMHUB_TRUSTED_PROXIES` | (empty) | Comma- or space-separated IP addresses and CIDRs of **your own** reverse-proxy hops. Empty: the TCP peer address is the client IP and `X-Forwarded-For` / `X-Real-IP` are ignored. Set: `X-Forwarded-For` is honoured only for hops that arrive from a listed address; loopback, link-local and private networks are **not** trusted implicitly. `X-Real-IP` is never used. A malformed entry refuses startup. The mode in effect is logged at startup. |
+| `SBOMHUB_TRUSTED_PROXIES` | (empty) | Comma- or space-separated IP addresses and CIDRs of **your own** reverse-proxy hops. Empty: the TCP peer address is the client IP and `X-Forwarded-For` / `X-Real-IP` are ignored. Set: `X-Forwarded-For` is honoured only for hops that arrive from a listed address; loopback, link-local and private networks are **not** trusted implicitly. `X-Real-IP` is never used. A malformed entry refuses startup. The mode in effect is logged at startup. Each `X-Forwarded-For` entry must be a bare IP (no port, no IPv6 zone); an unparseable entry makes the request count as coming from the proxy. |
 
 If the API sits behind nginx, Traefik, a load balancer or a PaaS router and this is left empty, every client shares the proxy's address — one rate-limit bucket for everyone, and the proxy's IP in every audit record. Prefer exact proxy addresses over ranges: every host inside a listed range can make the API believe any client IP it likes. Have the outermost proxy overwrite (not append to) any client-supplied `X-Forwarded-For`. See [UPGRADE.md §10](./UPGRADE.md) for why this changed.
 

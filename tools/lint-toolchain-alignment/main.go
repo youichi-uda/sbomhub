@@ -155,7 +155,9 @@ type versionRef struct {
 //     major, minor, AND patch exactly.
 //   - minor-precision downstream (`1.26`)   → must match the truth's
 //     major and minor. The patch is not asserted (operator opted out of
-//     patch pinning by omitting it).
+//     patch pinning by omitting it). Accepted for workflows only; the
+//     Dockerfile scan rejects minor-precision tags before calling this
+//     (golang images set GOTOOLCHAIN=local, see checkDockerfiles).
 //
 // The truth is expected to always be patch-precision — that's what a
 // well-formed `apps/api/go.mod` toolchain line looks like — but the
@@ -450,7 +452,13 @@ func checkDockerfiles(root string, truth versionRef, report *scanReport) error {
 				hasPatch: hasPatch,
 				raw:      versionRefRaw(major, minor, patch, hasPatch),
 			}
-			if truth.covers(ref) {
+			// Dockerfile pins must be patch-precise. Official golang images
+			// set GOTOOLCHAIN=local, so go.mod's toolchain directive is not
+			// honoured inside the build; a minor-only tag resolves to whatever
+			// 1.x patch the build host has cached, which may predate the
+			// security fix the toolchain line demands. (Workflow pins may stay
+			// minor-only: setup-go resolves the newest patch.)
+			if ref.hasPatch && truth.covers(ref) {
 				report.checked = append(report.checked,
 					fmt.Sprintf("Dockerfile: %s:%d (FROM golang:%s)", rel, i+1, ref.raw))
 				continue
