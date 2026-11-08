@@ -76,7 +76,16 @@ const cveSyncMaxFetchSpan = 110 * 24 * time.Hour
 // The next tick's window starts at S_k - overlap, so any overlap >=
 // NVDCacheTTL contains M. The extra hour is margin for skew between NVD's
 // lastModified clock and ours. If the scanner creates the row only after tick
-// k+1 has ALSO passed it, the same argument applies to tick k+1 and k+2.
+// k+1 has ALSO passed it, the same argument applies to tick k+1 and k+2 — as
+// long as the cache entry was still live when the scanner WROTE the row, i.e.
+// T < F + NVDCacheTTL.
+//
+// That last condition is the argument's edge, and it is not enforced (Codex
+// M57 R2, Medium): a worker holds its lookup in memory between reading it and
+// persisting it, and nothing bounds that gap — a sweep stalled for more than a
+// day between the two (behind dbMu, say, with no statement timeout) creates
+// the row from data older than the overlap covers. That is a stalled scan, not
+// a normal one; it is recorded rather than given a deadline of its own.
 //
 // # What it costs, and what it does NOT do
 //

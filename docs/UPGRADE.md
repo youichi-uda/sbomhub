@@ -1484,6 +1484,13 @@ The insert uses a separate pool of at most **4** connections (same
 transaction never waits on the pool it is holding. Each API process can
 therefore open up to **29** PostgreSQL connections instead of 25.
 
+Because a refused catalogue insert no longer discards the rest of a scheduled
+scan, the scheduled scan's log now records `failed` whenever any project's scan
+reported an error (it used to say `completed` and skip that project's count),
+and the findings that did commit are counted in `new_vulnerabilities` and
+notified. Before, a project whose NVD lookups all failed was also logged
+`completed`; it is now `failed` too.
+
 ### 11.2 Correction to §9.4: the refresh did not run on real NVD data
 
 §9.4 says the first sync after migration 066 refreshes and stamps every legacy
@@ -1519,10 +1526,15 @@ one 2000-record page to two (11.4 MB / 2.8 s for a full page). A record seen
 twice is refused the second time by the freshness guard, so the replay changes
 nothing it has already applied.
 
-One race remains, bounded to one sync interval: if NVD re-scores a CVE while a
-sync is still writing an older copy it fetched minutes earlier, and a scan
-creates the row from the newer copy in between, the sync's older copy is
-written; the next sync's window contains the newer record and repairs it.
+What this does not cover:
+
+- a race bounded to one sync interval: if NVD re-scores a CVE while a sync is
+  still writing an older copy it fetched minutes earlier, and a scan creates the
+  row from the newer copy in between, the sync's older copy is written; the
+  next sync's window contains the newer record and repairs it;
+- a scan that stalls for more than a day between looking a component up and
+  writing its findings creates the row from data older than the overlap
+  covers. Scans have no deadline of their own today.
 
 ### 11.4 Still not reached
 
