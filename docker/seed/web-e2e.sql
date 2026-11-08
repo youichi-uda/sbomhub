@@ -583,29 +583,29 @@ ON CONFLICT (id) DO NOTHING;
 -- Specs use apps/web/e2e/fixtures/vuln-project.ts rather than these
 -- literals.
 --
--- SECURITY DEFINER: the upload runs as sbomhub_app, which must not need
--- grants on this test-only table. The function is owned by the seeding
--- superuser-equivalent role and pins search_path. CI-ONLY, like the rest
--- of this file: never load it into a real deployment.
-CREATE TABLE IF NOT EXISTS e2e_vuln_fixture (
-    purl             TEXT NOT NULL,
-    vulnerability_id UUID NOT NULL REFERENCES vulnerabilities(id),
-    PRIMARY KEY (purl, vulnerability_id)
-);
-
-INSERT INTO e2e_vuln_fixture (purl, vulnerability_id) VALUES
-    ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', '00000000-0000-0000-0000-000000000040'::uuid),
-    ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', '00000000-0000-0000-0000-000000000041'::uuid),
-    ('pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',     '00000000-0000-0000-0000-000000000042'::uuid),
-    ('pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',     '00000000-0000-0000-0000-000000000043'::uuid)
-ON CONFLICT DO NOTHING;
+-- The purl -> CVE mapping is a VALUES list inside the function, resolved
+-- by cve_id, rather than a table: a table would hold an FK on the
+-- vulnerabilities catalogue that blocks migrating down (001's DROP TABLE
+-- vulnerabilities), and ON CONFLICT DO NOTHING would keep stale mappings
+-- across re-loads. CREATE OR REPLACE makes every re-load authoritative.
+--
+-- SECURITY DEFINER: the upload runs as sbomhub_app; the function is owned
+-- by the seeding superuser-equivalent role and pins search_path. CI-ONLY,
+-- like the rest of this file: never load it into a real deployment.
+DROP TABLE IF EXISTS e2e_vuln_fixture;
 
 CREATE OR REPLACE FUNCTION e2e_link_fixture_vulns() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
     INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at, match_method)
-    SELECT NEW.id, f.vulnerability_id, NOW(), 'nvd_cpe'
-      FROM e2e_vuln_fixture f
+    SELECT NEW.id, v.id, NOW(), 'nvd_cpe'
+      FROM (VALUES
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', 'CVE-2021-44228'),
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', 'CVE-2021-45046'),
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',     'CVE-2021-23337'),
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',     'CVE-2020-8203')
+           ) AS f(purl, cve_id)
+      JOIN vulnerabilities v ON v.cve_id = f.cve_id
      WHERE f.purl = NEW.purl
     ON CONFLICT (component_id, vulnerability_id) DO NOTHING;
     RETURN NEW;

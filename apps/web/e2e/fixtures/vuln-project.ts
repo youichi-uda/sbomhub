@@ -78,7 +78,18 @@ export async function deleteProject(request: APIRequestContext, projectId: strin
     await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
 }
 
-/** A CycloneDX document; `extra` components are appended verbatim. */
+/**
+ * A CycloneDX document; `extra` components are appended verbatim.
+ *
+ * The fixture components carry synthetic names (`vuln-fixture-*`) as well
+ * as synthetic purls, because on an internet-connected runner the real
+ * NVD / JVN background scan also runs and matches by name/version when no
+ * CPE is usable — a synthetic name gives it nothing to match, so the CVE set
+ * stays exactly FIXTURE_CVES. Keep `extra` components synthetic too
+ * (`pkg:generic/sbomhub-e2e/...`, an unmatchable name): a real package
+ * name could pick up real CVEs and make uploadVulnerableSbom's exact check
+ * fail — loudly, which is the intended direction.
+ */
 export function vulnerableSbom(extra: Array<Record<string, unknown>> = []): Record<string, unknown> {
     return {
         bomFormat: 'CycloneDX',
