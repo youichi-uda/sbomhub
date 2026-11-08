@@ -282,9 +282,19 @@ function canLeave(node: ts.Node): boolean {
     // Loops are targets for both `break` and `continue`; a switch only for
     // `break` — a `continue` inside a switch targets the enclosing loop
     // (Codex R7 Medium).
+    // A jump preceded, in its own statement list, by an unconditional
+    // assertion is not SILENT: that path already asserted (Codex R8 Medium).
+    const assertedBefore = (jump: ts.Node): boolean => {
+        const list = jump.parent;
+        const stmts = ts.isBlock(list) || ts.isCaseClause(list) || ts.isDefaultClause(list) ? list.statements : undefined;
+        if (!stmts) return false;
+        const idx = stmts.indexOf(jump as ts.Statement);
+        return stmts.slice(0, idx).some((st) => ts.isExpressionStatement(st) && containsExpect(st));
+    };
     const visit = (n: ts.Node, breakTargets: number, continueTargets: number): void => {
         if (found) return;
         if (n !== node && isFunctionLike(n)) return;
+        if ((ts.isReturnStatement(n) || ts.isBreakStatement(n) || ts.isContinueStatement(n)) && assertedBefore(n)) return;
         if (ts.isReturnStatement(n)) {
             found = true;
             return;
@@ -1040,6 +1050,25 @@ test('t', body);`,
     if (!rows) throw new Error('bad setup');
     for (const n of [1, 2]) { if (n > 1) break; }
     await expect(rows.first()).toBeVisible();
+});`,
+    ],
+    [
+        // Codex R8 Medium: the case asserts before its `continue`.
+        'continue in a switch after an assertion',
+        `${HDR}test('t', async ({ page }) => {
+    const mode = process.env.MODE;
+    for (const row of [page.locator('tr')]) {
+        if (await row.getByText('empty').isVisible()) {
+            await expect(row).toContainText('empty');
+            return;
+        }
+        switch (mode) {
+            case 'ready':
+                await expect(row).toContainText('ready');
+                continue;
+        }
+        await expect(row).toContainText('fallback');
+    }
 });`,
     ],
 ];
