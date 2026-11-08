@@ -46,14 +46,28 @@ const threshold = () =>
 // and ran it after VALUE failures. zod 4's default gating matches that for
 // every issue here except one: z.number() now rejects ±Infinity as a type
 // failure, where zod 3 accepted the number and failed it in int() (a value
-// failure). So the gate is "no type failure other than an infinite number".
-// It also guarantees `enabled` is a boolean and `webhook_url` a string when
-// the refinement reads them.
-function v3RefinementGate(payload: { issues: readonly { code?: string; input?: unknown }[] }) {
+// failure). So the gate is "no type failure other than an infinite
+// THRESHOLD". Restricting the exception to the threshold paths matters: an
+// infinite `webhook_url` is a real type failure, and letting it through
+// would reach `webhook_url.trim()` (Codex R3). The gate therefore also
+// guarantees `enabled` is a boolean and `webhook_url` a string.
+const THRESHOLD_FIELDS = new Set([
+  "critical_threshold",
+  "high_threshold",
+  "license_violation_threshold",
+]);
+function v3RefinementGate(payload: {
+  issues: readonly { code?: string; input?: unknown; path?: readonly PropertyKey[] }[];
+}) {
   return payload.issues.every((issue) => {
     if (issue.code === "invalid_value") return false;
     if (issue.code !== "invalid_type") return true;
-    return typeof issue.input === "number" && Math.abs(issue.input) === Infinity;
+    return (
+      issue.path?.length === 1 &&
+      THRESHOLD_FIELDS.has(String(issue.path[0])) &&
+      typeof issue.input === "number" &&
+      Math.abs(issue.input) === Infinity
+    );
   });
 }
 

@@ -296,8 +296,9 @@ describe("diff-webhook settings form", () => {
     // The form shows both at once; the refinement must not be skipped
     // because a sibling field failed with a VALUE error. "1e999" /
     // "Infinity" coerce to ±Infinity, which zod 3 failed in int()
-    // (non-aborting), so the URL error still showed (Codex R2 Low); a
-    // number input accepts "1e999" as typed text. Distinct [path(, url
+    // (non-aborting), so the URL error still showed (Codex R2 Low). Only
+    // reachable through programmatic form state: Chrome sanitizes a typed
+    // "1e999" in <input type=number> to "" (observed), which coerces to 0. Distinct [path(, url
     // message)] pairs: the issue COUNT per threshold is not pinned
     // ("-Infinity" fails two checks under zod 3).
     const distinct = (value) => [
@@ -319,6 +320,15 @@ describe("diff-webhook settings form", () => {
         [["high_threshold"], ["webhook_url", "url_protocol"]],
         v,
       );
+    }
+  });
+  test("an infinite value in a NON-threshold field is a plain type failure (Codex R3 Low)", () => {
+    // Must not reach the refinement (zod 3 skipped it; reaching it threw on
+    // webhook_url.trim()).
+    for (const [field, v] of [["webhook_url", Infinity], ["enabled", Infinity], ["webhook_secret", -Infinity]]) {
+      const r = diffWebhookSchema.safeParse({ ...ok, enabled: true, webhook_url: "", [field]: v });
+      assert.equal(r.success, false, field);
+      assert.deepEqual([...new Set(r.error.issues.map((i) => i.path.join(".")))], [field], field);
     }
   });
   test("format enum", () => {
