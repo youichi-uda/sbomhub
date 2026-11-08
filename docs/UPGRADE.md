@@ -1462,3 +1462,60 @@ compose edit is needed. See [configuration.md](./configuration.md#client-ip-and-
 - **Next.js 16.4.5 / `@clerk/nextjs` 6.39.8** in the web image (unauthenticated
   RCE in the image-optimisation API and a Clerk middleware route-protection
   bypass were fixed upstream). Pull the new images.
+
+## 11. CVE metadata refresh actually runs now, and the catalogue leaves the scan transaction (M57)
+
+**Who must act:** nobody has to change configuration. Read §11.1 if you size
+PostgreSQL `max_connections` tightly, and §11.2 because severities you see may
+change after the first sync.
+
+### 11.1 One more small connection pool per API process
+
+The CVE catalogue insert a scan makes when it meets an unknown CVE
+(`vulnerabilities`) no longer runs inside that scan's tenant transaction. Inside
+it, the row was invisible to the daily CVE sync for the whole scan, was
+discarded when the scan rolled back, and — when PostgreSQL refused it — aborted
+the scan and discarded every finding the scan had already recorded. The
+findings themselves (component ↔ CVE links) still commit all-or-nothing with the
+scan, exactly as before.
+
+The insert uses a separate pool of at most **4** connections (same
+`DATABASE_URL`, same role), so a scan that holds a connection for its
+transaction never waits on the pool it is holding. Each API process can
+therefore open up to **29** PostgreSQL connections instead of 25.
+
+### 11.2 Correction to §9.4: the refresh did not run on real NVD data
+
+§9.4 says the first sync after migration 066 refreshes and stamps every legacy
+row. That was verified only against test records whose timestamps carried a
+`Z`. The NVD API sends them **without** an offset
+(`"lastModified": "2026-08-11T19:33:44.513"`), and the sync parsed them with a
+parser that required one. Every record it fetched was therefore treated as
+undateable: **no existing row was refreshed**, the log carried one
+`NVD record carries no believable lastModified; not written` warning per CVE
+per tick, and every row the sync inserted got `published_at` and
+`source_modified_at` NULL.
+
+From this release the sync uses the scanner's parser, which reads NVD's
+zoneless timestamps as UTC. The first sync after upgrading refreshes rows whose
+CVE NVD modified inside its window; severities can change on that tick
+(LOW → CRITICAL and vice versa) wherever NVD re-scored a CVE.
+
+### 11.3 Each sync re-reads the last ~25 hours before its watermark
+
+A scan can create a catalogue row from an NVD answer cached up to 24 hours
+earlier. If the daily sync had already passed a newer record for that CVE while
+the row did not exist yet, nothing offered it again. Each tick now starts its
+window `NVD cache TTL + 1h` (25h) before the stored watermark. Cost: roughly one
+more page of NVD's modification feed per tick; a record seen twice is refused
+the second time by the freshness guard, so the replay changes nothing it has
+already applied.
+
+### 11.4 Still not reached
+
+Rows whose CVE NVD has not modified since well before the watermark — rows from
+before migration 066 (including, because of §11.2, every row that existed when
+you upgraded to M55), and rows the JVN scanner created with JVN's metadata —
+keep their stored metadata until NVD next modifies the CVE. They are
+identifiable with `WHERE source_modified_at IS NULL`. Fetching them by id is a
+rate-limit budget decision and is not in this release.
