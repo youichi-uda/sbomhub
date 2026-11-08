@@ -70,6 +70,9 @@ export const queryKeys = {
     // filter overwrote the current filter's rows).
     craReports: (projectId: string, filter: object) =>
       [...byId(projectId), "cra-reports", compact(filter)] as const,
+    // Prefix of every filter's entry: a decision moves a report between
+    // filters, so mutations invalidate all of them (Codex R1).
+    craReportsAll: (projectId: string) => [...byId(projectId), "cra-reports"] as const,
     craSubmissions: (projectId: string, reportId: string) =>
       [...byId(projectId), "cra-submissions", reportId] as const,
   },

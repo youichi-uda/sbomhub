@@ -54,6 +54,11 @@ import {
   CRASubmissionInput,
 } from "@/lib/api";
 import { queryKeys } from "@/lib/query/keys";
+import {
+  withReportRestored,
+  withReportState,
+  withoutReport,
+} from "@/lib/query/cra-report-cache";
 import { LoadError } from "@/components/ui/load-error";
 import { AIDisabledBanner } from "@/components/triage/ai-disabled-banner";
 import {
@@ -221,21 +226,28 @@ export default function CRAReportsPage() {
     submissionsByReport[id] = submissionQueries[i]?.data ?? [];
   });
 
-  /** Refetch one filter's entry (the one an action started on). */
+  /**
+   * After an action: a decision / submission / re-analysis can move rows
+   * between filters, so every filter's entry is invalidated — the current
+   * one refetches now, the others when next shown (Codex R1: refetching only
+   * the entry the action started on left a newly selected filter stale).
+   */
   const reloadReports = useCallback(
-    (key: readonly unknown[]) =>
-      queryClient.refetchQueries({ queryKey: key, exact: true }),
-    [queryClient],
+    () =>
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.projects.craReportsAll(projectId),
+      }),
+    [queryClient, projectId],
   );
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await reloadReports(reportsKey);
+      await queryClient.refetchQueries({ queryKey: reportsKey, exact: true });
     } finally {
       setRefreshing(false);
     }
-  }, [reloadReports, reportsKey]);
+  }, [queryClient, reportsKey]);
 
   /**
    * Optimistic update: drop the report from the visible list
@@ -254,21 +266,21 @@ export default function CRAReportsPage() {
       // An in-flight fetch for this entry would overwrite the optimistic
       // removal with the pre-decision rows.
       await queryClient.cancelQueries({ queryKey: key, exact: true });
-      const previous = queryClient.getQueryData<ReportPage>(key);
-      queryClient.setQueryData<ReportPage>(key, (old) =>
-        old
-          ? {
-              data: old.data.filter((r) => r.id !== report.id),
-              totalCount: Math.max(0, old.totalCount - 1),
-            }
-          : old,
-      );
+      const index = queryClient
+        .getQueryData<ReportPage>(key)
+        ?.data.findIndex((r) => r.id === report.id) ?? 0;
+      queryClient.setQueryData<ReportPage>(key, (old) => withoutReport(old, report.id));
       try {
         await api.craReports.decide(projectId, report.id, input);
         // background refresh so e.g. server-side state mutations land
-        void reloadReports(key);
+        void reloadReports();
       } catch (err) {
-        queryClient.setQueryData<ReportPage>(key, previous);
+        // Put back only this report: a whole-page snapshot would undo other
+        // rows' actions that completed meanwhile (Codex R1).
+        queryClient.setQueryData<ReportPage>(key, (old) =>
+          withReportRestored(old, report, Math.max(0, index)),
+        );
+        void reloadReports();
         handleError(err, t(errorKey));
       } finally {
         setBusyReportId(null);
@@ -313,20 +325,19 @@ export default function CRAReportsPage() {
 
   const handleReanalyse = useCallback(
     async (report: CRAReport) => {
-      const key = reportsKey;
       setBusyReportId(report.id);
       try {
         await api.craReports.reanalyse(projectId, report.id);
         // Reanalyse creates a NEW cra_reports row; refresh so the
         // newcomer shows up and the source row's age stamps move down.
-        await reloadReports(key);
+        await reloadReports();
       } catch (err) {
         handleError(err, t("reanalyseFailed"));
       } finally {
         setBusyReportId(null);
       }
     },
-    [reportsKey, projectId, reloadReports, handleError, t],
+    [projectId, reloadReports, handleError, t],
   );
 
   /**
@@ -339,18 +350,17 @@ export default function CRAReportsPage() {
    */
   const handleSetAwareness = useCallback(
     async (report: CRAReport, awarenessTime: string | null) => {
-      const key = reportsKey;
       setBusyReportId(report.id);
       try {
         await api.craReports.awareness(projectId, report.id, awarenessTime);
-        await reloadReports(key);
+        await reloadReports();
       } catch (err) {
         handleError(err, t("setAwarenessFailed"));
       } finally {
         setBusyReportId(null);
       }
     },
-    [reportsKey, projectId, reloadReports, handleError, t],
+    [projectId, reloadReports, handleError, t],
   );
 
   /**
@@ -380,16 +390,8 @@ export default function CRAReportsPage() {
       if (values.notes) input.notes = values.notes;
 
       await queryClient.cancelQueries({ queryKey: key, exact: true });
-      const previous = queryClient.getQueryData<ReportPage>(key);
       queryClient.setQueryData<ReportPage>(key, (old) =>
-        old
-          ? {
-              ...old,
-              data: old.data.map((r) =>
-                r.id === report.id ? { ...r, state: "submitted" } : r,
-              ),
-            }
-          : old,
+        withReportState(old, report.id, "submitted"),
       );
       try {
         const created = await api.craSubmissions.record(
@@ -403,10 +405,14 @@ export default function CRAReportsPage() {
           ...(prev ?? []),
         ]);
         // Background reconcile so the authoritative state lands.
-        void reloadReports(key);
+        void reloadReports();
         void queryClient.invalidateQueries({ queryKey: subsKey, exact: true });
       } catch (err) {
-        queryClient.setQueryData<ReportPage>(key, previous);
+        // Revert only this report's state, then reconcile with the server.
+        queryClient.setQueryData<ReportPage>(key, (old) =>
+          withReportState(old, report.id, report.state),
+        );
+        void reloadReports();
         handleError(err, t("recordSubmissionFailed"));
       } finally {
         setBusyReportId(null);
