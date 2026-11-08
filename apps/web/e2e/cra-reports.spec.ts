@@ -75,6 +75,11 @@ async function runCRA(
     return body.report as CRAReport;
 }
 
+/** Resolves after the browser has painted the next frame. */
+async function nextFrame(page: import("@playwright/test").Page): Promise<void> {
+    await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+}
+
 function cardFor(page: import("@playwright/test").Page, report: Pick<CRAReport, "cve_id" | "report_type" | "lang">) {
     return page.locator(
         `[data-testid="cra-report-card"][data-cve-id="${report.cve_id}"]` +
@@ -249,7 +254,12 @@ test.describe("AI CRA Reports (M2-5)", () => {
             );
             await card.getByTestId("cra-approve").click();
             await expect(card).toHaveCount(0);
-            expect((await pendingRefetch).status()).toBe(200);
+            const refetched = await pendingRefetch;
+            expect(refetched.status()).toBe(200);
+            // The response event fires before the body is read and applied:
+            // wait for the body, then one frame for React to commit it.
+            await refetched.finished();
+            await nextFrame(page);
 
             await expect
                 .poll(async () => {
@@ -282,22 +292,31 @@ test.describe("AI CRA Reports (M2-5)", () => {
                 await page.goto(`/en/projects/${own.projectId}/cra-reports`);
                 // Hold the "pending" list response until after the "approved"
                 // one has been rendered, i.e. deliver them out of order.
+                const isPendingList = (url: URL) =>
+                    url.pathname === `/api/v1/projects/${own.projectId}/cra-reports` && url.searchParams.get("decision") === "pending";
                 let releasePending: () => void = () => {};
                 const pendingHeld = new Promise<void>((r) => (releasePending = r));
-                await page.route(
-                    (url) => url.pathname === `/api/v1/projects/${own.projectId}/cra-reports` && url.searchParams.get("decision") === "pending",
-                    async (route) => {
-                        await pendingHeld;
-                        await route.continue();
-                    },
-                );
+                let markEntered: () => void = () => {};
+                const pendingEntered = new Promise<void>((r) => (markEntered = r));
+                await page.route(isPendingList, async (route) => {
+                    markEntered();
+                    await pendingHeld;
+                    await route.continue();
+                });
                 await page.getByTestId("filter-decision").selectOption("pending");
+                // The pending request is really in flight (held) before the newer
+                // "approved" request is issued.
+                await pendingEntered;
                 await page.getByTestId("filter-decision").selectOption("approved");
                 const card = cardFor(page, report);
                 await expect(card).toBeVisible({ timeout: 10000 });
+
+                const stale = page.waitForResponse((r) => isPendingList(new URL(r.url())));
                 releasePending();
-                // The late pending answer must not replace the approved view.
-                await page.waitForTimeout(1000);
+                // Let the stale answer land completely and React commit it; the approved
+                // view must still be there.
+                await (await stale).finished();
+                await nextFrame(page);
                 await expect(card).toBeVisible();
             } finally {
                 await deleteProject(request, own.projectId);

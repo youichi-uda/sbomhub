@@ -266,6 +266,17 @@ function asserts(node: ts.Node | undefined): boolean {
     return found;
 }
 
+/** Could `node` leave the enclosing block early (shallow: not nested fns)? */
+function canLeave(node: ts.Node): boolean {
+    let found = false;
+    walkShallow(node, (n) => {
+        if (found) return true;
+        if (ts.isReturnStatement(n) || ts.isThrowStatement(n) || ts.isBreakStatement(n) || ts.isContinueStatement(n)) found = true;
+        return undefined;
+    });
+    return found;
+}
+
 function containsReturn(node: ts.Node | undefined): boolean {
     if (!node) return false;
     let found = false;
@@ -470,12 +481,19 @@ export function analyzeVacuous(fileName: string, text: string): VacuousSite[] {
                 const parent = node.parent;
                 if (!ts.isBlock(parent) && !ts.isSourceFile(parent)) return false;
                 const idx = parent.statements.indexOf(node as ts.Statement);
-                // Only an UNCONDITIONAL later statement counts: a top-level
-                // expression statement (`await expect(…)…;`, `await helper();`)
-                // — not one nested in another if/loop (Codex R4 Low).
-                return parent.statements
-                    .slice(idx + 1)
-                    .some((st) => ts.isExpressionStatement(st) && branchExpects(st));
+                // Walk the later statements in order. The exemption holds only
+                // if an UNCONDITIONAL assertion is reached — a top-level
+                // expression statement (`await expect(…)`, `await helper()`) or
+                // a `return <assertion>` — before anything that could leave
+                // without one: any statement containing a return/throw/break/
+                // continue (Codex R4 Low, R5 Medium). Nested assertions (in an
+                // if/loop) do not count.
+                for (const st of parent.statements.slice(idx + 1)) {
+                    if (ts.isExpressionStatement(st) && branchExpects(st)) return true;
+                    if (ts.isReturnStatement(st)) return st.expression !== undefined && branchExpects(st.expression);
+                    if (canLeave(st)) return false;
+                }
+                return false;
             };
             const terminates = (st: ts.Statement | undefined): boolean => {
                 if (!st) return false;
@@ -536,7 +554,11 @@ export function analyzeVacuous(fileName: string, text: string): VacuousSite[] {
         let named: [string, ts.Node] | null = null;
         if (ts.isFunctionDeclaration(n) && n.name) named = [n.name.text, n];
         else if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) {
-            named = [n.name.text, n.initializer && isFunctionLike(unwrap(n.initializer)) ? unwrap(n.initializer) : n];
+            // Only a `const` binding can be trusted to still hold its
+            // initialiser; a `let`/`var` may be reassigned (Codex R5 Medium).
+            const isConst =
+                ts.isVariableDeclarationList(n.parent) && (n.parent.flags & ts.NodeFlags.Const) !== 0;
+            named = [n.name.text, isConst && n.initializer && isFunctionLike(unwrap(n.initializer)) ? unwrap(n.initializer) : n];
         } else if (ts.isParameter(n) && ts.isIdentifier(n.name)) named = [n.name.text, n];
         if (named) {
             declarationCount.set(named[0], (declarationCount.get(named[0]) ?? 0) + 1);
@@ -745,6 +767,20 @@ test('smoke', smoke);`,
     }
 });`,
     ],
+    [
+        // Codex R5 Medium: an earlier bare return bypasses the later assertion.
+        'asserting early return, then a bypassing return before the assertion',
+        'V1',
+        `${HDR}test('t', async ({ page }) => {
+    const rows = page.locator('tr');
+    if (await page.getByText('empty').isVisible()) {
+        await expect(rows).toHaveCount(0);
+        return;
+    }
+    if (process.env.SHORT) return;
+    await expect(rows.first()).toBeVisible();
+});`,
+    ],
 ];
 
 export const VACUOUS_MUST_BE_CLEAN: ReadonlyArray<readonly [string, string]> = [
@@ -924,6 +960,25 @@ test.describe('b', () => {
     const body = async ({ page }: any) => { await page.goto('/x'); };
     test('b', body);
 });`,
+    ],
+    [
+        // Codex R5 Medium: the fall-through asserts in a return.
+        'asserting early return, fall-through returns an assertion',
+        `${HDR}test('t', async ({ page }) => {
+    const rows = page.locator('tr');
+    if (await page.getByText('empty').isVisible()) {
+        await expect(rows).toHaveCount(0);
+        return;
+    }
+    return expect(rows.first()).toBeVisible();
+});`,
+    ],
+    [
+        // Codex R5 Medium: a reassigned binding is not resolved.
+        'reassigned named test body',
+        `${HDR}let body = async ({ page }: any) => { await page.goto('/setup'); };
+body = async ({ page }: any) => { await expect(page.locator('main')).toBeVisible(); };
+test('t', body);`,
     ],
 ];
 

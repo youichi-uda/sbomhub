@@ -192,6 +192,13 @@ test.describe('Error Handling', () => {
             // made ~10,000 live NVD lookups for up to the 30 min scan deadline,
             // outliving this test and the project. One shared synthetic name
             // keeps it at a single unmatchable lookup (Codex R4 High).
+            // KNOWN LIMIT (Codex R5 High): the JVN half of that scan does not
+            // de-duplicate and still walks all 10,000 rows (0.5 s apart) until
+            // the 30 min scan deadline — as the pre-existing version of this
+            // test always did. The fix is environmental, not here: run the
+            // web-e2e-full stack with SBOMHUB_OFFLINE=true (verified: the full
+            // suite passes unchanged in offline mode, 2026-11-09).
+
             const components = Array.from({ length: 10000 }, (_, i) => ({
                 type: 'library',
                 name: 'sbomhub-e2e-bulk-load',
