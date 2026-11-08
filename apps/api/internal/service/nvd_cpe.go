@@ -273,6 +273,12 @@ func cpeCandidates(cpes []string, compVersion, purl string) []cpeCandidate {
 		if !ok {
 			continue
 		}
+		if n.Version == "-" {
+			// NA: the SBOM asserts a version-less thing. Substituting the
+			// component version would invent a CPE it did not assert
+			// (Codex M60 R6 Medium).
+			continue
+		}
 		v, update := compVersion, ""
 		if cpeConcrete(n.Version) {
 			v = n.Version
@@ -356,7 +362,6 @@ const (
 func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
 	undecidable := false
 	sawProduct := false
-	version := c.effectiveVersion()
 	for _, cfg := range cve.Configurations {
 		if cfg.Negate {
 			continue
@@ -374,7 +379,7 @@ func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
 				if !m.Vulnerable {
 					continue
 				}
-				switch v := criterionContains(crit, m, version); v {
+				switch v := criterionContains(crit, m, c); v {
 				case cpeMatched:
 					return cpeMatched
 				case cpeUndecidable:
@@ -389,8 +394,10 @@ func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
 	return cpeRejected
 }
 
-// criterionContains decides whether one vulnerable criterion covers version.
-func criterionContains(crit cpeName, m NVDCPEMatch, version string) cpeVerdict {
+// criterionContains decides whether one vulnerable criterion covers the
+// candidate.
+func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
+	version := c.effectiveVersion()
 	if crit.Version == "-" {
 		// NA: the criterion applies to a version-less thing; a versioned
 		// component is not it.
@@ -402,11 +409,24 @@ func criterionContains(crit cpeName, m NVDCPEMatch, version string) cpeVerdict {
 		// it names is version+update, and an SBOM writes that as one
 		// version string ("2.0-beta9"). `update` = "-" (NA) names the final
 		// release itself.
-		target := crit.Version
-		if cpeConcrete(crit.Update) {
+		//
+		// The criterion's update decides what is compared (Codex M60 R6
+		// High-1): ANY accepts every update of its version, so only the base
+		// versions are compared; NA names the final release, so a candidate
+		// with an update is a different release; a concrete update names
+		// one release.
+		target, mine := crit.Version, version
+		switch {
+		case crit.Update == "" || crit.Update == "*":
+			mine = c.version
+		case crit.Update == "-":
+			if c.update != "" {
+				return cpeRejected
+			}
+		default:
 			target += "-" + crit.Update
 		}
-		cmp, ok := compareVersions(version, target)
+		cmp, ok := compareVersions(mine, target)
 		if !ok {
 			return cpeUndecidable
 		}
@@ -488,7 +508,9 @@ var preReleaseRank = map[string]int{
 }
 
 // shorthandPreRelease are qualifiers that are pre-releases ONLY when a number
-// follows them; bare, they are OpenSSL-style patch letters.
+// follows them. Bare, "m" is an OpenSSL patch letter (1.1.1m), while a bare
+// "a"/"b" is an alpha/beta in PEP 440 ("1.0a" < "1.0") but a patch letter in
+// OpenSSL ("1.1.1a" > "1.1.1"), so it is UNKNOWN (Codex M60 R6 High-2).
 var shorthandPreRelease = map[string]bool{"a": true, "b": true, "m": true}
 
 type tokenKind int
@@ -507,10 +529,13 @@ func tokenKindAt(toks []versionToken, i int) tokenKind {
 	}
 	numberFollows := i+1 < len(toks) && toks[i+1].num
 	if shorthandPreRelease[t.value] {
-		if numberFollows {
+		switch {
+		case numberFollows:
 			return kindPre
+		case t.value == "m":
+			return kindPost
 		}
-		return kindPost
+		return kindUnknown
 	}
 	if _, ok := preReleaseRank[t.value]; ok {
 		return kindPre
@@ -842,6 +867,16 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 			s.cacheVulns(ctx, nvdNoCPECacheName(c), c.String(), nil)
 			return nvdLookup{requests: out.requests}, false, nil
 		}
+		// "Known product" ends the candidate walk with a final, cached
+		// "no CVE at this version", so the probe's answer must be ABOUT the
+		// product (Codex M60 R6 High-3): a mirror that ignored
+		// virtualMatchString and returned some unrelated record would
+		// otherwise make an unknown product known. Neither known nor
+		// unknown can be concluded then, so the lookup fails.
+		if !recordNamesProduct(page.entries(), c) {
+			return out, false, fmt.Errorf("nvd: product probe for %s answered with a record that does not name the product; "+
+				"cannot tell whether NVD knows it", c.productQuery())
+		}
 		s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), nil)
 		return out, true, nil
 	}
@@ -870,6 +905,24 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 		s.cacheVulns(ctx, nvdCPECacheName(c), c.String(), out.vulns)
 	}
 	return out, true, nil
+}
+
+// recordNamesProduct reports whether any configuration criterion of the
+// given records names the candidate's part:vendor:product.
+func recordNamesProduct(entries []NVDVulnEntry, c cpeCandidate) bool {
+	for _, e := range entries {
+		for _, cfg := range e.CVE.Configurations {
+			for _, n := range cfg.Nodes {
+				for _, m := range n.CpeMatch {
+					if crit, ok := parseCPE(m.Criteria); ok &&
+						crit.Part == c.part && crit.Vendor == c.vendor && crit.Product == c.product {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // cacheVulns writes one cache record (best effort, like the keyword path).

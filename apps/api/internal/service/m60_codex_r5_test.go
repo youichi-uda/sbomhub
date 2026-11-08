@@ -36,7 +36,7 @@ func TestM60R5_SeparatorsThatChangeTheOrder(t *testing.T) {
 	}
 	m := NVDCPEMatch{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", VersionEndExcluding: "1.0.0"}
 	crit, _ := parseCPE(m.Criteria)
-	if got := criterionContains(crit, m, "1.0.0-1"); got != cpeUndecidable {
+	if got := criterionContains(crit, m, cpeCandidate{part: "a", vendor: "v", product: "p", version: "1.0.0-1"}); got != cpeUndecidable {
 		t.Errorf("1.0.0-1 in (,1.0.0) = %v, want undecidable (kept, not cached)", got)
 	}
 }

@@ -37,7 +37,7 @@ func TestM60R2_CompareVersionsZeroPaddingBeforePreRelease(t *testing.T) {
 		}
 	}
 	// Ordering must be consistent (antisymmetric, transitive) over a mixed set.
-	vs := []string{"0.9", "1.0-alpha", "1.0.0-beta2", "1.0-rc1", "1.0.0-rc2", "1.0", "1.0.0", "1.0.0a", "1.0.1", "1.0.10", "1.1-m1", "1.1", "1.1.1k", "1.1.1m", "1.1.1za"}
+	vs := []string{"0.9", "1.0-alpha", "1.0.0-beta2", "1.0-rc1", "1.0.0-rc2", "1.0", "1.0.0", "1.0.0k", "1.0.1", "1.0.10", "1.1-m1", "1.1", "1.1.1k", "1.1.1m", "1.1.1za"}
 	for i := range vs {
 		for j := range vs {
 			c1, ok1 := compareVersions(vs[i], vs[j])
@@ -56,7 +56,7 @@ func TestM60R2_CompareVersionsZeroPaddingBeforePreRelease(t *testing.T) {
 	}
 	m := NVDCPEMatch{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", VersionEndExcluding: "1.0"}
 	crit, _ := parseCPE(m.Criteria)
-	if got := criterionContains(crit, m, "1.0.0-rc1"); got != cpeMatched {
+	if got := criterionContains(crit, m, cpeCandidate{part: "a", vendor: "v", product: "p", version: "1.0.0-rc1"}); got != cpeMatched {
 		t.Errorf("1.0.0-rc1 in (,1.0) = %v, want matched", got)
 	}
 }

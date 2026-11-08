@@ -20,7 +20,7 @@ func TestM60R3_ShorthandPreReleasesAndUnknownSuffixes(t *testing.T) {
 		{"1.0a1", "1.0b1", -1, true},
 		{"1.0b2", "1.0rc1", -1, true},
 		{"1.0rc1", "1.0", -1, true},
-		{"1.1.1a", "1.1.1", 1, true}, // OpenSSL: a bare letter is a patch release
+		{"1.1.1k", "1.1.1", 1, true}, // OpenSSL: a bare letter is a patch release (a/b: see R6)
 		{"1.1.1za", "1.1.1z", 1, true},
 		{"4.1.100.Final", "4.1.100", 0, true}, // Maven release marker
 		{"4.1.108.Final", "4.1.100", 1, true},
@@ -62,10 +62,10 @@ func TestM60R3_ShorthandPreReleasesAndUnknownSuffixes(t *testing.T) {
 
 	m := NVDCPEMatch{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", VersionEndExcluding: "1.0"}
 	crit, _ := parseCPE(m.Criteria)
-	if got := criterionContains(crit, m, "1.0a1"); got != cpeMatched {
+	if got := criterionContains(crit, m, cpeCandidate{part: "a", vendor: "v", product: "p", version: "1.0a1"}); got != cpeMatched {
 		t.Errorf("1.0a1 in (,1.0) = %v, want matched", got)
 	}
-	if got := criterionContains(crit, m, "1.0.post1"); got != cpeUndecidable {
+	if got := criterionContains(crit, m, cpeCandidate{part: "a", vendor: "v", product: "p", version: "1.0.post1"}); got != cpeUndecidable {
 		t.Errorf("1.0.post1 in (,1.0) = %v, want undecidable", got)
 	}
 }
