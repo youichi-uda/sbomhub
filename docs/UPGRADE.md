@@ -1497,7 +1497,12 @@ per tick, and every row the sync inserted got `published_at` and
 `source_modified_at` NULL.
 
 From this release the sync uses the scanner's parser, which reads NVD's
-zoneless timestamps as UTC. The first sync after upgrading refreshes rows whose
+zoneless timestamps as UTC. It also now prefers NVD's own ("Primary") CVSS
+assessment over a CNA's ("Secondary") one within each CVSS version, as the
+scanner has since M54; before, whichever assessment NVD happened to list first
+was taken, which could turn a Primary 9.8 CRITICAL into a Secondary 6.3 MEDIUM.
+(The two still differ on which CVSS *version* wins when a CVE has both v4.0 and
+v3.x: the sync prefers v4.0, the scanner v3.x.) The first sync after upgrading refreshes rows whose
 CVE NVD modified inside its window; severities can change on that tick
 (LOW → CRITICAL and vice versa) wherever NVD re-scored a CVE.
 
@@ -1506,10 +1511,18 @@ CVE NVD modified inside its window; severities can change on that tick
 A scan can create a catalogue row from an NVD answer cached up to 24 hours
 earlier. If the daily sync had already passed a newer record for that CVE while
 the row did not exist yet, nothing offered it again. Each tick now starts its
-window `NVD cache TTL + 1h` (25h) before the stored watermark. Cost: roughly one
-more page of NVD's modification feed per tick; a record seen twice is refused
-the second time by the freshness guard, so the replay changes nothing it has
-already applied.
+window `NVD cache TTL + 1h` (25h) before the stored watermark (less only when
+that would exceed NVD's maximum request span of ~110 days, in which case the
+window is cut at the limit). Cost, measured 2026-11-08: NVD modified 1,156 CVEs
+in the preceding 24h and 3,706 in the preceding 49h, so a daily tick goes from
+one 2000-record page to two (11.4 MB / 2.8 s for a full page). A record seen
+twice is refused the second time by the freshness guard, so the replay changes
+nothing it has already applied.
+
+One race remains, bounded to one sync interval: if NVD re-scores a CVE while a
+sync is still writing an older copy it fetched minutes earlier, and a scan
+creates the row from the newer copy in between, the sync's older copy is
+written; the next sync's window contains the newer record and repairs it.
 
 ### 11.4 Still not reached
 

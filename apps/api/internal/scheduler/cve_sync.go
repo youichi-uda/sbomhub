@@ -405,12 +405,21 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	windowStart := lastSync.Add(-cveSyncReplayOverlap)
 	if startTime.Sub(windowStart) > cveSyncMaxFetchSpan {
 		clamped := startTime.Add(-cveSyncMaxFetchSpan)
-		slog.Error("CVE sync: the gap since the last sync exceeds what NVD will answer in one request; "+
-			"clamping the window and SKIPPING the interval before it — modifications in that interval are not "+
-			"fetched and those CVEs keep their stored metadata until upstream touches them again",
-			"stored_watermark", windowStart.Format(time.RFC3339),
-			"skipped_until", clamped.Format(time.RFC3339),
-			"max_fetch_span", cveSyncMaxFetchSpan.String())
+		// Only an interval AFTER the stored watermark is a loss. When the
+		// clamp cuts into the replay overlap alone, everything it drops was
+		// already read by the previous tick, so reporting it at Error as
+		// skipped modifications would be a false alarm.
+		if clamped.After(lastSync) {
+			slog.Error("CVE sync: the gap since the last sync exceeds what NVD will answer in one request; "+
+				"clamping the window and SKIPPING the interval before it — modifications in that interval are not "+
+				"fetched and those CVEs keep their stored metadata until upstream touches them again",
+				"stored_watermark", lastSync.Format(time.RFC3339),
+				"skipped_until", clamped.Format(time.RFC3339),
+				"max_fetch_span", cveSyncMaxFetchSpan.String())
+		} else {
+			slog.Debug("CVE sync: clamped the replay overlap to the maximum fetch span; nothing after the stored watermark is skipped",
+				"stored_watermark", lastSync.Format(time.RFC3339), "window_start", clamped.Format(time.RFC3339))
+		}
 		windowStart = clamped
 	}
 
@@ -503,8 +512,13 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 		vulnIndex[cve.ID] = cveVulnEntry{id: vulnID, isNew: isNew}
 	}
 	// A failed catalogue write is silent staleness: the CVE keeps whatever
-	// metadata it already had, and this job only ever reads FORWARD from the
-	// watermark, so it is not offered again until upstream modifies the CVE.
+	// metadata it already had, and this job reads forward from the watermark,
+	// so it is not offered again until upstream modifies the CVE — except that
+	// since M57 the next tick re-reads cveSyncReplayOverlap before the
+	// watermark, so a record whose lastModified falls in that last stretch is
+	// offered exactly once more. That is a side effect of the overlap, not a
+	// retry policy: nothing tracks the failure, and a record older than the
+	// overlap gets no second chance.
 	//
 	// M55 tried to close that with a retry policy — hold the watermark, bound
 	// the hold, mark when retries began, pin an anchor when there was nothing
@@ -541,7 +555,8 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 			named = named[:catalogueFailureLogSample]
 		}
 		slog.Error("CVE sync: catalogue writes failed; those CVEs keep their previously stored metadata until "+
-			"upstream modifies them again — this run does NOT retry them",
+			"upstream modifies them again (the next tick's replay overlap re-offers only records modified in its "+
+			"last ~25h) — this run does NOT retry them",
 			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
 			"cves_fetched", len(cves), "failed_cve_ids", named, "failed_total", len(failedCVEs))
 	}
@@ -663,31 +678,11 @@ func (j *CVESyncJob) fetchModifiedCVEs(ctx context.Context, since time.Time) ([]
 						Lang  string `json:"lang"`
 						Value string `json:"value"`
 					} `json:"descriptions"`
-					Metrics struct {
-						CvssMetricV40 []struct {
-							CvssData struct {
-								BaseScore    float64 `json:"baseScore"`
-								BaseSeverity string  `json:"baseSeverity"`
-							} `json:"cvssData"`
-						} `json:"cvssMetricV40"`
-						CvssMetricV31 []struct {
-							CvssData struct {
-								BaseScore    float64 `json:"baseScore"`
-								BaseSeverity string  `json:"baseSeverity"`
-							} `json:"cvssData"`
-						} `json:"cvssMetricV31"`
-						CvssMetricV30 []struct {
-							CvssData struct {
-								BaseScore    float64 `json:"baseScore"`
-								BaseSeverity string  `json:"baseSeverity"`
-							} `json:"cvssData"`
-						} `json:"cvssMetricV30"`
-						CvssMetricV2 []struct {
-							CvssData struct {
-								BaseScore float64 `json:"baseScore"`
-							} `json:"cvssData"`
-						} `json:"cvssMetricV2"`
-					} `json:"metrics"`
+					// service.NVDMetrics carries each assessment's `type`
+					// (Primary / Secondary), which the anonymous struct here
+					// dropped (Codex M57 R1, Critical) — see
+					// extractCVSSFromMetrics.
+					Metrics        service.NVDMetrics `json:"metrics"`
 					Configurations []struct {
 						Nodes []struct {
 							CpeMatch []struct {
@@ -759,54 +754,36 @@ func (j *CVESyncJob) fetchModifiedCVEs(ctx context.Context, since time.Time) ([]
 // extractCVSSFromMetrics extracts CVSS score and severity from NVD
 // metrics. A nil score means the CVE has no CVSS metrics at all — see
 // CVEInfo.CVSSScore (M46 B-1 High-3); it is NOT the same as a score of 0.
-func extractCVSSFromMetrics(metrics struct {
-	CvssMetricV40 []struct {
-		CvssData struct {
-			BaseScore    float64 `json:"baseScore"`
-			BaseSeverity string  `json:"baseSeverity"`
-		} `json:"cvssData"`
-	} `json:"cvssMetricV40"`
-	CvssMetricV31 []struct {
-		CvssData struct {
-			BaseScore    float64 `json:"baseScore"`
-			BaseSeverity string  `json:"baseSeverity"`
-		} `json:"cvssData"`
-	} `json:"cvssMetricV31"`
-	CvssMetricV30 []struct {
-		CvssData struct {
-			BaseScore    float64 `json:"baseScore"`
-			BaseSeverity string  `json:"baseSeverity"`
-		} `json:"cvssData"`
-	} `json:"cvssMetricV30"`
-	CvssMetricV2 []struct {
-		CvssData struct {
-			BaseScore float64 `json:"baseScore"`
-		} `json:"cvssData"`
-	} `json:"cvssMetricV2"`
-}) (*float64, string) {
+//
+// Within one CVSS version it prefers NVD's own ("Primary") assessment over
+// CNA / third-party ("Secondary") ones, via the scanner's
+// service.PreferPrimaryCVSS (Codex M57 R1, Critical). NVD does not order the
+// list, and taking element zero — what this did until M57 — extracted a
+// Secondary 6.3/MEDIUM over a Primary 9.8/CRITICAL whenever the Secondary was
+// listed first. It mattered less while the metadata refresh was dead (see the
+// timestamp note in fetchModifiedCVEs); once the refresh writes, it would
+// DOWNGRADE a row the scanner had stored correctly and date it so that a
+// replay could not repair it.
+//
+// The VERSION order is this job's own and is deliberately unchanged: v4.0
+// first (M46 B-1 codex round 3), whereas the scanner ranks v3.x above v4.0.
+// Which version should win when a CVE carries both re-grades findings across
+// the catalogue and is recorded as an open product decision, not settled here.
+func extractCVSSFromMetrics(metrics service.NVDMetrics) (*float64, string) {
 	// CVSS v4.0 first: NVD has published cvssMetricV40 alongside v3.1
 	// since the 2.0 API, and it is the highest-fidelity score available
 	// (M46 B-1 codex round 3). Before this branch existed, a v4-only CVE
 	// fell through every case and was persisted as un-scored — a real,
 	// possibly critical score demoted to NULL and sorted to the tail of
 	// the NULLS LAST vulnerability list.
-	if len(metrics.CvssMetricV40) > 0 {
-		m := metrics.CvssMetricV40[0].CvssData
-		score := m.BaseScore
-		return &score, strings.ToUpper(m.BaseSeverity)
+	for _, list := range [][]service.CvssMetric{metrics.CvssMetricV40, metrics.CvssMetricV31, metrics.CvssMetricV30} {
+		if m, ok := service.PreferPrimaryCVSS(list); ok {
+			score := m.BaseScore
+			return &score, strings.ToUpper(m.BaseSeverity)
+		}
 	}
-	if len(metrics.CvssMetricV31) > 0 {
-		m := metrics.CvssMetricV31[0].CvssData
+	if m, ok := service.PreferPrimaryCVSS(metrics.CvssMetricV2); ok {
 		score := m.BaseScore
-		return &score, strings.ToUpper(m.BaseSeverity)
-	}
-	if len(metrics.CvssMetricV30) > 0 {
-		m := metrics.CvssMetricV30[0].CvssData
-		score := m.BaseScore
-		return &score, strings.ToUpper(m.BaseSeverity)
-	}
-	if len(metrics.CvssMetricV2) > 0 {
-		score := metrics.CvssMetricV2[0].CvssData.BaseScore
 		severity := "LOW"
 		if score >= 7.0 {
 			severity = "HIGH"

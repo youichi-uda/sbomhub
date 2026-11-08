@@ -1586,6 +1586,12 @@ func extractCvss(metrics NVDMetrics) (*float64, string) {
 	return nil, "UNKNOWN"
 }
 
+// PreferPrimaryCVSS is preferPrimary for scheduler.CVESyncJob, the other
+// reader of NVD's metrics (Codex M57 R1, Critical): it took element zero.
+func PreferPrimaryCVSS(metrics []CvssMetric) (CvssData, bool) {
+	return preferPrimary(metrics)
+}
+
 // preferPrimary picks the assessment to trust from one CVSS version's list.
 //
 // NVD attaches several assessments to a CVE — its own ("Primary") plus any

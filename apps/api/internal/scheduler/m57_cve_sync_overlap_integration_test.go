@@ -126,3 +126,67 @@ func TestM57CVESync_ScannerRowCreatedAfterTheSyncPassedIsStillRefreshed(t *testi
 			row.severity, cveID)
 	}
 }
+
+// TestM57CVESync_ABufferedOlderRecordIsRepairedByTheNextTick pins the bound on
+// the race Codex M57 R1 (High) raised, and is the reason it is recorded as an
+// accepted, bounded limitation rather than fixed with more guard machinery.
+//
+// The interleaving: tick k fetches its window, which holds X's record at M1
+// (LOW). While tick k is still writing, NVD re-scores X at M2 (CRITICAL) and a
+// scanner creates X live from M2 — committed immediately since M57, with
+// source_modified_at NULL as every scanner row is. Tick k then applies its
+// buffered M1: a stored NULL is writable once, so X reads LOW until the next
+// tick.
+//
+// What bounds it: M2 is later than tick k's fetch, so it is later than the
+// watermark tick k stores, so tick k+1's window contains it whatever the
+// replay overlap is — and M2 > M1 passes the guard. The exposure is at most
+// one sync interval, the same order as the staleness the scanner already
+// accepts from its own 24h NVD cache. Closing it would mean letting a NULL row
+// refuse an owner record on a second clock (our updated_at), i.e. new guard
+// state of exactly the kind M55 wave O removed; it would also only move the
+// one-tick window, not remove it (a scanner answering from cache then refuses
+// a NEWER owner record until the following tick).
+func TestM57CVESync_ABufferedOlderRecordIsRepairedByTheNextTick(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+	m55ProtectWatermark(t, migDB)
+
+	cveID := m55CVEID(t)
+	t.Cleanup(func() {
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE cve_id = $1`, cveID); err != nil {
+			t.Errorf("cleanup: delete %s: %v", cveID, err)
+		}
+	})
+
+	// The scanner's live M2 copy, committed while tick k is mid-flight.
+	score := 9.8
+	now := time.Now().UTC()
+	if err := repository.NewVulnerabilityRepository(appDB).Create(context.Background(), &model.Vulnerability{
+		ID: uuid.New(), CVEID: cveID, Description: "scanner's live M2 copy", Severity: "CRITICAL",
+		CVSSScore: &score, Source: "NVD", UpdatedAt: &now,
+	}); err != nil {
+		t.Fatalf("scanner Create: %v", err)
+	}
+
+	m1 := now.Add(-2 * time.Hour).Truncate(time.Millisecond)
+	m2 := now.Add(-time.Minute).Truncate(time.Millisecond)
+	const layout = "2006-01-02T15:04:05.000"
+
+	// Tick k applies its buffered M1.
+	m55Sync(t, appDB, m55Feed(cveID, "LOW", 2.0, "buffered M1", "2026-01-01T00:00:00.000", m1.Format(layout), m55CPEEmpty))
+	if got := m55Read(t, migDB, cveID).severity; got != "LOW" {
+		t.Fatalf("precondition: tick k left %q; the scenario needs the transient LOW to have happened", got)
+	}
+
+	// Tick k+1 is offered NVD's current record.
+	m55Sync(t, appDB, m55Feed(cveID, "CRITICAL", 9.8, "current M2", "2026-01-01T00:00:00.000", m2.Format(layout), m55CPEEmpty))
+	row := m55Read(t, migDB, cveID)
+	if row.severity != "CRITICAL" {
+		t.Errorf("severity after tick k+1 = %q, want CRITICAL: the transient downgrade must not outlive one tick", row.severity)
+	}
+	if !row.sourceModAt.Valid || !row.sourceModAt.Time.UTC().Equal(m2) {
+		t.Errorf("source_modified_at = %v, want M2 %v", row.sourceModAt.Time.UTC(), m2)
+	}
+}
