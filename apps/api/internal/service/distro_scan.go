@@ -78,8 +78,9 @@ const (
 	// (2: Releases / Packages, Codex M70 R2; 3: Ubuntu binaries, R4;
 	// 4: record modified, R8; 5: records validated as since R11, R12;
 	// 6: no future timestamps, R14; 7: every affected element validated,
-	// R15).
-	distroCachePayloadVersion = 7
+	// R15; 8: empty continuation pages refused (R16) and canonical identity
+	// strings (R18)).
+	distroCachePayloadVersion = 8
 )
 
 // distroLinkStore is the repository surface the step uses.

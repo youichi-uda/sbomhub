@@ -107,7 +107,10 @@ type parsedPurl struct {
 // every component is percent-decoded. ok is false for anything that does not
 // have that shape.
 func parsePurl(s string) (parsedPurl, bool) {
-	rest, ok := strings.CutPrefix(strings.TrimSpace(s), "pkg:")
+	if s != strings.TrimSpace(s) {
+		return parsedPurl{}, false // not trimmed away (Codex M70 R18 Medium-3)
+	}
+	rest, ok := strings.CutPrefix(s, "pkg:")
 	if !ok {
 		return parsedPurl{}, false
 	}
@@ -172,7 +175,9 @@ func (p parsedPurl) qualifier(k string) (v string, present bool, reason string) 
 	case 0:
 		return "", false, ""
 	case 1:
-		if strings.TrimSpace(vals[0]) == "" {
+		// A qualifier value is canonical text, like any identity (Codex M70
+		// R18 Medium-3): no whitespace, controls or non-ASCII.
+		if vals[0] == "" || !cleanVersionText(vals[0]) {
 			return "", true, "bad_qualifier"
 		}
 		return vals[0], true, ""
@@ -362,7 +367,7 @@ var purlNamespaceAlias = map[string]string{"redhat": "rhel"}
 // codenames are accepted too (Syft writes VERSION_ID, but other tools write
 // the codename).
 func releaseMajor(rel string) (int, bool) {
-	rel = strings.ToLower(strings.TrimSpace(rel))
+	rel = strings.ToLower(rel)
 	if n, ok := debianCodenames[rel]; ok {
 		return n, true
 	}
@@ -371,7 +376,6 @@ func releaseMajor(rel string) (int, bool) {
 
 // numericReleaseMajor reads "11", "11.7" or "9.4" as its major number.
 func numericReleaseMajor(rel string) (int, bool) {
-	rel = strings.TrimSpace(rel)
 	// Digits, optionally one numeric point release ("11", "11.7", "9.4").
 	// Anything else ("12.sid", "11.7.1", "9.garbage") is not a release
 	// this code can name an ecosystem for (Codex M70 R1 Medium).
@@ -530,7 +534,7 @@ func ubuntuProBuild(v string) bool {
 // "Ubuntu:23.10". Ubuntu's LTS releases are the April releases of even years
 // (14.04, 16.04, ..., 24.04). Anything not shaped YY.MM is no release.
 func ubuntuEcosystem(rel string) (string, bool) {
-	yy, mm, ok := strings.Cut(strings.TrimSpace(rel), ".")
+	yy, mm, ok := strings.Cut(rel, ".")
 	if !ok || len(yy) != 2 || len(mm) != 2 || !isDigits(yy) || !isDigits(mm) {
 		return "", false
 	}

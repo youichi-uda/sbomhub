@@ -237,8 +237,12 @@ func validatePackageRecords(raw []byte, q OSVPackage) error {
 // a type and at least one event; every event with exactly one field; no
 // empty listed version.
 func validateAffected(a OSVAffected) error {
-	if strings.TrimSpace(a.Package.Name) == "" || strings.TrimSpace(a.Package.Ecosystem) == "" {
-		return fmt.Errorf("package without a name or an ecosystem")
+	// Canonical strings (Codex M70 R18 High-2): a name or a version is
+	// printable ASCII without any whitespace; an ecosystem may have inner
+	// spaces ("Rocky Linux:9") but none at either end. Anything else would
+	// be dropped or normalised later instead of failing.
+	if !canonicalToken(a.Package.Name) || !canonicalEcosystem(a.Package.Ecosystem) {
+		return fmt.Errorf("package name %q / ecosystem %q not canonical", a.Package.Name, a.Package.Ecosystem)
 	}
 	for i, r := range a.Ranges {
 		if strings.TrimSpace(r.Type) == "" || len(r.Events) == 0 {
@@ -248,6 +252,9 @@ func validateAffected(a OSVAffected) error {
 			n := 0
 			for _, f := range []string{e.Introduced, e.Fixed, e.LastAffected, e.Limit} {
 				if f != "" {
+					if !canonicalToken(f) {
+						return fmt.Errorf("range %d event %d version %q not canonical", i, j, f)
+					}
 					n++
 				}
 			}
@@ -257,11 +264,37 @@ func validateAffected(a OSVAffected) error {
 		}
 	}
 	for i, v := range a.Versions {
-		if strings.TrimSpace(v) == "" {
-			return fmt.Errorf("versions[%d] is empty", i)
+		if !canonicalToken(v) {
+			return fmt.Errorf("versions[%d] %q not canonical", i, v)
 		}
 	}
 	return nil
+}
+
+// canonicalToken: non-empty printable ASCII without whitespace.
+func canonicalToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// canonicalEcosystem: non-empty printable ASCII, inner single spaces only.
+func canonicalEcosystem(s string) bool {
+	if s == "" || s[0] == ' ' || s[len(s)-1] == ' ' || strings.Contains(s, "  ") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // queryPackagePage fetches one page, reading at most min(budget, one page's
