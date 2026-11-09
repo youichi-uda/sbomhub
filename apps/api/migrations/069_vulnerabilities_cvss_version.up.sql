@@ -43,9 +43,12 @@
 --   record. Stop every pre-069 API process before (or while) this migration is
 --   applied — the docker compose upgrade does. If one kept running, run once
 --   after it has stopped:
---       UPDATE vulnerabilities SET cvss_version = NULL WHERE cvss_version IS NOT NULL;
---   which returns every scored row to the re-derivable state; the next CVE
---   sync / catalogue re-read re-derives each from NVD's record.
+--       UPDATE vulnerabilities SET cvss_version = NULL
+--       WHERE cvss_version IS NOT NULL AND source = 'NVD';
+--   which returns every NVD-sourced scored row to the re-derivable state; the
+--   next CVE sync / catalogue re-read re-derives each from NVD's record. It is
+--   limited to source = 'NVD' because every NVD refresh writes that source,
+--   and a JVN-only row (JVNDB id) can never be re-derived from NVD.
 --
 -- No backfill:
 --   The version of a legacy score was never captured, and inferring it from

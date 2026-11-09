@@ -366,6 +366,9 @@ func TestM67_CVSSVersionCheckConstraint(t *testing.T) {
 // and the one-statement recovery — clearing the marker returns every scored
 // row to the re-derivable state, and the next offer re-derives it from the
 // genuine record.
+// m67MixedBinaryRecovery is the statement migration 069's header documents.
+const m67MixedBinaryRecovery = `UPDATE vulnerabilities SET cvss_version = NULL WHERE cvss_version IS NOT NULL AND source = 'NVD'`
+
 func TestM67_MixedVersionWindowAndItsRecovery(t *testing.T) {
 	appURL, migURL := schedIntEnv(t)
 	appDB := schedOpenOrSkip(t, appURL)
@@ -401,9 +404,23 @@ func TestM67_MixedVersionWindowAndItsRecovery(t *testing.T) {
 		t.Fatalf("control: expected the documented stuck state (MEDIUM under a stale 3.1 marker), got %s", got)
 	}
 
-	// The documented recovery, run once after the last pre-069 process stopped.
-	if _, err := migDB.Exec(`UPDATE vulnerabilities SET cvss_version = NULL WHERE cvss_version IS NOT NULL AND cve_id = $1`, cveID); err != nil {
+	// A JVN-only row (JVNDB id, which NVD can never re-read) must survive the
+	// recovery with its version (Codex M67 R2, Low): an old binary cannot have
+	// corrupted it — every NVD refresh writes source = 'NVD'.
+	jvnID := "JVNDB-2091-" + fmt.Sprintf("%06d", uuid.New().ID()%1000000)
+	m67Cleanup(t, migDB, jvnID)
+	if _, err := migDB.Exec(`INSERT INTO vulnerabilities (id, cve_id, severity, cvss_score, cvss_version, source)
+		VALUES ($1, $2, 'HIGH', 7.5, '3.0', 'JVN')`, uuid.New(), jvnID); err != nil {
+		t.Fatalf("seed JVN row: %v", err)
+	}
+
+	// The documented recovery, verbatim, run once after the last pre-069
+	// process stopped.
+	if _, err := migDB.Exec(m67MixedBinaryRecovery); err != nil {
 		t.Fatalf("recovery: %v", err)
+	}
+	if got := m67Read(t, migDB, jvnID); !got.version.Valid || got.version.String != "3.0" {
+		t.Errorf("the recovery cleared a JVN row's version (%s); NVD cannot re-derive a JVNDB id, so it is lost", got)
 	}
 	m58Fresh(t, migDB)
 	if out, err := j.reconcileCatalogue(context.Background(), time.Now().UTC()); err != nil || !out.Finished {
