@@ -224,6 +224,10 @@
         "nullable": true,
         "type": "timestamp with time zone"
       },
+      "match_evidence": {
+        "nullable": true,
+        "type": "jsonb"
+      },
       "match_method": {
         "nullable": true,
         "type": "character varying(32)"
