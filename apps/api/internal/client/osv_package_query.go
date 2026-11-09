@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Package-level OSV query (M70): every OSV record for one (ecosystem, package),
@@ -227,6 +228,13 @@ func (c *OSVClient) queryPackagePage(ctx context.Context, q osvPackageQueryReque
 	for i, r := range page.Vulns {
 		if strings.TrimSpace(r.ID) == "" {
 			return osvPackageQueryResponse{}, n, fmt.Errorf("osv: package query record %d has no id", i)
+		}
+		// `withdrawn` is an RFC 3339 time; anything else is not a
+		// withdrawal the caller may act on (Codex M70 R10 High-1).
+		if r.Withdrawn != "" {
+			if _, err := time.Parse(time.RFC3339Nano, r.Withdrawn); err != nil {
+				return osvPackageQueryResponse{}, n, fmt.Errorf("osv: package query record %q has a malformed withdrawn", r.ID)
+			}
 		}
 	}
 	return page, n, nil

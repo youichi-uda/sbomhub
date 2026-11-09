@@ -57,11 +57,13 @@ type DistroCacheEntry struct {
 	Payload   json.RawMessage `json:"payload"`
 	// DataModified is the data's own revision (fixed-width UTC RFC 3339).
 	DataModified string `json:"data_modified"`
-	// Generation orders writes: the UnixNano time the fetch STARTED. Set
-	// never replaces an entry of a later generation, so a fetch that began
+	// Generation orders writes: a value from NextGeneration taken when the
+	// fetch STARTED (a Redis INCR, so it is monotonic across replicas, as a
+	// fixed-width decimal string, so Lua compares it without float loss).
+	// Set never replaces an entry of a later generation: a fetch that began
 	// earlier but finished later cannot leave its older answer cached
-	// (Codex M70 R8 High-4, R9 High-2).
-	Generation int64 `json:"generation"`
+	// (Codex M70 R8 High-4, R9 High-2, R10 Medium-4). "" is the oldest.
+	Generation string `json:"generation"`
 }
 
 // distroSetIfNotNewer writes ARGV[1] unless the stored entry carries a later
@@ -70,7 +72,7 @@ var distroSetIfNotNewer = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 if cur then
   local ok, obj = pcall(cjson.decode, cur)
-  if ok and type(obj) == 'table' and type(obj['generation']) == 'number' and obj['generation'] > tonumber(ARGV[2]) then
+  if ok and type(obj) == 'table' and type(obj['generation']) == 'string' and obj['generation'] > ARGV[2] then
     return 0
   end
 end
@@ -110,6 +112,24 @@ func (c *DistroCache) Get(ctx context.Context, source, ecosystem, name string) (
 		return nil, nil
 	}
 	return &e, nil
+}
+
+// distroGenerationKey is the shared sequence of fetch generations.
+const distroGenerationKey = DistroCachePrefix + "generation"
+
+// NextGeneration returns the next fetch generation (a Redis INCR), as a
+// fixed-width decimal string; "" when there is no cache or Redis fails.
+func (c *DistroCache) NextGeneration(ctx context.Context) string {
+	if c == nil || c.client == nil {
+		return ""
+	}
+	ctx, cancel := opContext(ctx)
+	defer cancel()
+	n, err := c.client.Incr(ctx, distroGenerationKey).Result()
+	if err != nil || n < 0 {
+		return ""
+	}
+	return fmt.Sprintf("%020d", n)
 }
 
 // Set stores an entry.

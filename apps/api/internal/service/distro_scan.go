@@ -498,7 +498,7 @@ func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(co
 	// The generation is taken BEFORE the request: a fetch that started later
 	// saw the source at least as new, so it wins in the cache (Codex M70 R9
 	// High-2).
-	generation := s.now().UnixNano()
+	generation := s.cache.NextGeneration(ctx)
 	// Each page is reduced as it arrives; only this package's entries are
 	// kept, but the revision counts every record returned.
 	pages, err = s.osv.QueryPackageEach(ctx, k.ecosystem, k.pkg,

@@ -1038,6 +1038,7 @@ func combineExact(rs []entryResult, ids []string, ev model.DistroEvidence, cmp v
 // releases' entries are never used (their backports are below the lineage).
 func laterReleaseVerdict(t distroTarget, recs []*distroRecord, ev model.DistroEvidence, cmp versionCmp) distroDecision {
 	var rs []entryResult
+	var used []distroEntry
 	var ids, ecos []string
 	for _, r := range recs {
 		for _, e := range r.Entries {
@@ -1058,6 +1059,7 @@ func laterReleaseVerdict(t distroTarget, recs []*distroRecord, ev model.DistroEv
 				return distroDecision{reason: "later_release_not_fixed_at_installed"}
 			}
 			rs = append(rs, res)
+			used = append(used, e)
 			ids = appendUnique(ids, r.ID)
 			ecos = appendUnique(ecos, e.Ecosystem)
 		}
@@ -1066,6 +1068,16 @@ func laterReleaseVerdict(t distroTarget, recs []*distroRecord, ev model.DistroEv
 		return distroDecision{reason: "release_not_listed"}
 	}
 	d := combineExact(rs, ids, ev, cmp)
+	if d.verdict == verdictFixed && d.evidence.Fixed != "" {
+		// The named version must be outside every deciding entry's affected
+		// set (Codex M70 R10 Medium-3, as in decide).
+		for _, e := range used {
+			if !outsideAffectedSet(d.evidence.Fixed, e, cmp) {
+				d.evidence.Fixed = ""
+				break
+			}
+		}
+	}
 	if d.verdict != verdictFixed {
 		return distroDecision{reason: "undecidable"}
 	}

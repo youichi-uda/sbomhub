@@ -422,6 +422,23 @@ func TestM70DistroFreshness_DBAndCache(t *testing.T) {
 		t.Errorf("older evidence replaced newer: %+v", r)
 	}
 	write(`{"source":"osv","fixed":"v4","data_modified":"2026-11-10T00:00:00.000000000Z"}`)
+	// Cross-method: an older "affected" cannot replace a newer "fixed"
+	// either (Codex M70 R10 Medium-2).
+	if err := scope.writeTx(ctx, e.sbom, func(txCtx context.Context) error {
+		_, err := e.compRepo.RelabelDistro(txCtx, e.openssl, e.v3449, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","fixed":"f","data_modified":"2026-11-10T00:00:00.000000000Z"}`))
+		if err != nil {
+			return err
+		}
+		_, err = e.compRepo.RelabelDistro(txCtx, e.openssl, e.v3449, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","fixed":"a","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r := m70Read(t, e.migDB, e.openssl, e.v3449); r.method != "distro_fixed" {
+		t.Errorf("an older affected replaced a newer fixed: %+v", r)
+	}
 	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.evidence.Fixed != "v4" {
 		t.Errorf("newer evidence not written: %+v", r)
 	}
@@ -440,14 +457,18 @@ func TestM70DistroFreshness_DBAndCache(t *testing.T) {
 	key := cache.DistroCacheKey("test-fresh", "Debian", "p")
 	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
 	now := time.Now()
-	set := func(gen int64, payload string) {
+	set := func(gen string, payload string) {
 		t.Helper()
 		if err := c.Set(context.Background(), "test-fresh", "Debian", "p", cache.DistroCacheEntry{FetchedAt: now, Generation: gen, Payload: []byte(payload)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	set(2, `"new"`)
-	set(1, `"old"`)
+	g1, g2 := c.NextGeneration(context.Background()), c.NextGeneration(context.Background())
+	if g1 == "" || g2 <= g1 {
+		t.Fatalf("generations %q %q", g1, g2)
+	}
+	set(g2, `"new"`)
+	set(g1, `"old"`)
 	got, err := c.Get(context.Background(), "test-fresh", "Debian", "p")
 	if err != nil || got == nil || string(got.Payload) != `"new"` {
 		t.Errorf("cache = %+v, %v; want the newer payload", got, err)
