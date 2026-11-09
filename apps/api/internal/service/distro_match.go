@@ -268,7 +268,10 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 			if !ok {
 				return distroTarget{}, "unknown_release"
 			}
-			if ubuntuProBuild(t.version) {
+			if ubuntuProBuild(t.version) || ubuntuProBuild(version) {
+				// Both the source version compared and the binary's own
+				// (an upstream qualifier may state a standard source
+				// version for an ESM binary, Codex M70 R7 High-2).
 				// An Ubuntu Pro / FIPS / ESM build belongs to another stream
 				// (Ubuntu:Pro:..., Ubuntu:Pro:FIPS:...) with the same binary
 				// names; the SBOM does not say which one. Comparing it with
@@ -350,7 +353,9 @@ func numericReleaseMajor(rel string) (int, bool) {
 	// Anything else ("12.sid", "11.7.1", "9.garbage") is not a release
 	// this code can name an ecosystem for (Codex M70 R1 Medium).
 	major, point, hasPoint := strings.Cut(rel, ".")
-	if !isDigits(major) || len(major) > 3 || (hasPoint && (!isDigits(point) || len(point) > 3)) {
+	canonical := func(s string) bool { return isDigits(s) && len(s) <= 3 && (s == "0" || s[0] != '0') }
+	if !canonical(major) || (hasPoint && !canonical(point)) {
+		// "011", "11.07": not canonical (Codex M70 R7 Medium-4).
 		return 0, false
 	}
 	n, err := strconv.Atoi(major)
@@ -364,6 +369,27 @@ var debianCodenames = map[string]int{
 	"buzz": 1, "rex": 1, "bo": 1, "hamm": 2, "slink": 2, "potato": 2, "woody": 3, "sarge": 3, "etch": 4,
 	"lenny": 5, "squeeze": 6, "wheezy": 7, "jessie": 8, "stretch": 9, "buster": 10, "bullseye": 11,
 	"bookworm": 12, "trixie": 13, "forky": 14, "duke": 15,
+}
+
+// cpeVersionsAgree reports whether every concrete version the component's
+// CPE names state equals the component's version. M60 matches NVD on a CPE's
+// own version when it states one (cpeCandidates), so a CPE that states
+// another version than the component made the link about THAT version; a
+// distro verdict on the component's version would then be about something
+// else (Codex M70 R7 High-1). CPEs that do not parse, or state ANY / NA, are
+// never matched on a version of their own.
+func cpeVersionsAgree(cpes []string, compVersion string) bool {
+	want := strings.ToLower(strings.TrimSpace(compVersion))
+	for _, raw := range cpes {
+		n, ok := parseCPE(raw)
+		if !ok || !cpeConcrete(n.Version) {
+			continue
+		}
+		if strings.TrimPrefix(n.Version, cpeLiteralMark) != want {
+			return false
+		}
+	}
+	return true
 }
 
 // ubuntuProBuild reports a version built for an Ubuntu Pro stream:
@@ -969,14 +995,12 @@ func evalEntry(installed string, e distroEntry, cmp versionCmp) entryResult {
 	// The affected set is the union of every range and the versions list
 	// (OSV schema). A member that cannot be evaluated does not hide an
 	// affected one, but forbids "fixed" (Codex M70 R1 High-4).
+	// OSV's versions list is exact string membership (schema "Evaluation";
+	// Codex M70 R7 Medium-3): "1.0" is not "1.0-0" even though dpkg orders
+	// them equal.
 	listed, undecidable := false, false
 	for _, v := range e.Versions {
-		c, err := cmp(installed, v)
-		if err != nil {
-			undecidable = true
-			continue
-		}
-		if c == 0 {
+		if v == installed {
 			listed = true
 		}
 	}
@@ -1050,7 +1074,7 @@ func evalEntry(installed string, e distroEntry, cmp versionCmp) entryResult {
 // below v).
 func outsideAffectedSet(v string, e distroEntry, cmp versionCmp) bool {
 	for _, x := range e.Versions {
-		if c, err := cmp(v, x); err != nil || c == 0 {
+		if x == v {
 			return false
 		}
 	}

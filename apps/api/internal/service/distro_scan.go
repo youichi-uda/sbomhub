@@ -194,6 +194,9 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 		}
 		rep.LinkedComponents++
 		t, reason := distroTargetFor(c.Purl, c.Version, os)
+		if reason == "" && !cpeVersionsAgree(c.CPEs, c.Version) {
+			reason = "cpe_version_conflict"
+		}
 		if reason != "" {
 			if reason != "not_distro" && reason != "no_purl" {
 				rep.Untargeted[reason]++

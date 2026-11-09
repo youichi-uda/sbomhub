@@ -98,7 +98,10 @@ func TestM70R1_UnevaluableAffectedMemberForbidsFixed(t *testing.T) {
 	}{
 		{"plus a GIT range", distroEntry{Ranges: []client.OSVRange{fixedRange, {Type: "GIT", Events: ev("i", "abc")}}}, entryUndecidable},
 		{"plus a SEMVER range", distroEntry{Ranges: []client.OSVRange{fixedRange, {Type: "SEMVER", Events: ev("i", "0")}}}, entryUndecidable},
-		{"plus an unparseable listed version", distroEntry{Ranges: []client.OSVRange{fixedRange}, Versions: []string{"not a version"}}, entryUndecidable},
+		// Superseded by Codex R7 Medium-3: the versions list is exact string
+		// membership, so a listed string that is not the installed version
+		// simply does not list it.
+		{"plus an unparseable listed version", distroEntry{Ranges: []client.OSVRange{fixedRange}, Versions: []string{"not a version"}}, entryFixed},
 		{"plus an evaluable, different listed version", distroEntry{Ranges: []client.OSVRange{fixedRange}, Versions: []string{"0.9-1"}}, entryFixed},
 		{"a GIT range does not hide an affected ECOSYSTEM range", distroEntry{Ranges: []client.OSVRange{{Type: "ECOSYSTEM", Events: ev("i", "0", "f", "3.0-1")}, {Type: "GIT", Events: ev("i", "abc")}}}, entryAffected},
 	} {
