@@ -132,8 +132,8 @@ type RPMEVR struct {
 
 // ParseRPMEVR parses "[epoch:]version-release". The release is what follows
 // the LAST '-' (as rpm's parseEVR splits it). A version or release that is
-// empty, contains a blank, a ':' or a non-ASCII byte, or (version only) a '-'
-// is an error; so is an EVR without a release, because comparing a full EVR
+// empty or has a character outside RPM's set (letters, digits, "._+~^") is an
+// error; so is an EVR without a release, because comparing a full EVR
 // against a release-less one has no single answer (rpm's dependency
 // comparison treats a missing release as matching any).
 func ParseRPMEVR(s string) (RPMEVR, error) {
@@ -166,7 +166,10 @@ func ParseRPMEVR(s string) (RPMEVR, error) {
 		}
 		for j := 0; j < len(part.v); j++ {
 			c := part.v[j]
-			if c >= 0x80 || c <= ' ' || c == ':' || c == 0x7f || (part.name == "version" && c == '-') {
+			// RPM's character set for VERSION / RELEASE (rpm-version(7)):
+			// letters, digits, '.', '_', '+', '~', '^'. Anything else would be
+			// a separator to rpmvercmp ("1>9" == "1.9"), Codex M70 R20 High-1.
+			if !isAlnum(c) && strings.IndexByte("._+~^", c) < 0 {
 				return RPMEVR{}, fmt.Errorf("%w: %q has %q in the %s", ErrInvalidVersion, s, c, part.name)
 			}
 		}
