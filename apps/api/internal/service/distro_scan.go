@@ -186,11 +186,7 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 	}
 	os := sbomOperatingSystem(comps)
 
-	type targeted struct {
-		comp   model.Component
-		target distroTarget
-	}
-	var work []targeted
+	var work []distroWork
 	keys := map[distroFetchKey]bool{}
 	for _, c := range comps {
 		if len(byComp[c.ID]) == 0 {
@@ -205,7 +201,7 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 			continue
 		}
 		rep.Targeted++
-		work = append(work, targeted{comp: c, target: t})
+		work = append(work, distroWork{comp: c, target: t})
 		keys[t.fetchKey()] = true
 	}
 	rep.Packages = len(keys)
@@ -214,108 +210,10 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 		return rep, nil
 	}
 
-	// Phase 2 — fetch, no transaction.
-	ordered := make([]distroFetchKey, 0, len(keys))
-	for k := range keys {
-		ordered = append(ordered, k)
-	}
-	sort.Slice(ordered, func(i, j int) bool {
-		if ordered[i].ecosystem != ordered[j].ecosystem {
-			return ordered[i].ecosystem < ordered[j].ecosystem
-		}
-		return ordered[i].pkg < ordered[j].pkg
-	})
-	type fetched struct {
-		data      distroData
-		fetchedAt time.Time
-	}
-	data := map[distroFetchKey]fetched{}
-	failed := map[distroFetchKey]bool{}
-	pace := s.pacer()
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	keyCh := make(chan distroFetchKey)
-	for i := 0; i < distroWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for k := range keyCh {
-				if ctx.Err() != nil {
-					mu.Lock()
-					rep.Unfetched++
-					mu.Unlock()
-					continue
-				}
-				recs, at, hit, pages, ferr := s.load(ctx, k, pace)
-				mu.Lock()
-				rep.Requests += pages
-				if hit {
-					rep.CacheHits++
-				}
-				switch {
-				case ferr != nil && scanInterruption(ctx) != nil:
-					rep.Unfetched++
-				case ferr != nil:
-					slog.Warn("distro: could not read the distro's fixed-version data; its links keep their labels",
-						"ecosystem", k.ecosystem, "package", k.pkg, "error", ferr)
-					rep.FetchFailures++
-					failed[k] = true
-				default:
-					data[k] = fetched{data: indexDistroRecords(recs), fetchedAt: at}
-				}
-				mu.Unlock()
-			}
-		}()
-	}
-	for _, k := range ordered {
-		keyCh <- k
-	}
-	close(keyCh)
-	wg.Wait()
-	rep.noteInterruption(ctx)
-
-	// Decide, per component, per link.
-	var groups [][]pendingLink
-	for _, w := range work {
-		if ctx.Err() != nil {
-			// Ended while deciding: what is decided is written, and the
-			// step reports the interruption (Codex M70 R4 Medium-5).
-			rep.noteInterruption(ctx)
-			break
-		}
-		k := w.target.fetchKey()
-		d, ok := data[k]
-		if !ok {
-			if failed[k] {
-				rep.LinksKeptForFailure += len(byComp[w.comp.ID])
-			}
-			continue
-		}
-		var g []pendingLink
-		for _, l := range byComp[w.comp.ID] {
-			dec := d.data.decide(w.target, l.CVEID)
-			if dec.verdict == verdictNone {
-				rep.NoVerdict[dec.reason]++
-				continue
-			}
-			dec.evidence.FetchedAt = d.fetchedAt.UTC()
-			raw, err := json.Marshal(dec.evidence)
-			if err != nil {
-				return rep, fmt.Errorf("distro: encode evidence: %w", err)
-			}
-			switch dec.verdict {
-			case verdictAffected:
-				rep.Affected++
-			case verdictUnfixed:
-				rep.Unfixed++
-			case verdictFixed:
-				rep.Fixed++
-			}
-			g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, method: dec.verdict.method(), evidence: raw})
-		}
-		if len(g) > 0 {
-			groups = append(groups, g)
-		}
+	// Phase 2 — fetch and decide, no transaction.
+	groups, err := s.fetchAndDecide(ctx, work, byComp, &rep)
+	if err != nil {
+		return rep, err
 	}
 
 	// Phase 3 — write.
@@ -335,6 +233,140 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 	rep.Relabelled = relabelled
 	s.logSummary(sbomID, rep)
 	return rep, rep.incompleteErr()
+}
+
+// distroWork is one targeted component.
+type distroWork struct {
+	comp   model.Component
+	target distroTarget
+}
+
+// fetchAndDecide loads each package's data (cache or OSV) and decides every
+// component of that package AT ONCE, keeping only the pending relabels: the
+// package's records are dropped before the next package is loaded by that
+// worker, so retained memory is the relabels, not the data (Codex M70 R5
+// High-2). The process-wide slot (distroQuerySlots) bounds the data held at
+// any moment across all scans.
+func (s *DistroService) fetchAndDecide(ctx context.Context, work []distroWork, byComp map[uuid.UUID][]repository.SbomLink,
+	rep *DistroScanReport) ([][]pendingLink, error) {
+	byKey := map[distroFetchKey][]distroWork{}
+	for _, w := range work {
+		k := w.target.fetchKey()
+		byKey[k] = append(byKey[k], w)
+	}
+	ordered := make([]distroFetchKey, 0, len(byKey))
+	for k := range byKey {
+		ordered = append(ordered, k)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].ecosystem != ordered[j].ecosystem {
+			return ordered[i].ecosystem < ordered[j].ecosystem
+		}
+		return ordered[i].pkg < ordered[j].pkg
+	})
+
+	var groups [][]pendingLink
+	var firstErr error
+	pace := s.pacer()
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	keyCh := make(chan distroFetchKey)
+	for i := 0; i < distroWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for k := range keyCh {
+				if ctx.Err() != nil {
+					mu.Lock()
+					rep.Unfetched++
+					mu.Unlock()
+					continue
+				}
+				recs, at, hit, pages, ferr := s.load(ctx, k, pace)
+				var g [][]pendingLink
+				var counts DistroScanReport
+				var derr error
+				if ferr == nil {
+					g, counts, derr = decideKey(ctx, indexDistroRecords(recs), at, byKey[k], byComp)
+				}
+				mu.Lock()
+				rep.Requests += pages
+				if hit {
+					rep.CacheHits++
+				}
+				switch {
+				case ferr != nil && scanInterruption(ctx) != nil:
+					rep.Unfetched++
+				case ferr != nil:
+					slog.Warn("distro: could not read the distro's fixed-version data; its links keep their labels",
+						"ecosystem", k.ecosystem, "package", k.pkg, "error", ferr)
+					rep.FetchFailures++
+					for _, w := range byKey[k] {
+						rep.LinksKeptForFailure += len(byComp[w.comp.ID])
+					}
+				default:
+					groups = append(groups, g...)
+					rep.Affected += counts.Affected
+					rep.Unfixed += counts.Unfixed
+					rep.Fixed += counts.Fixed
+					for r, n := range counts.NoVerdict {
+						rep.NoVerdict[r] += n
+					}
+					if derr != nil && firstErr == nil {
+						firstErr = derr
+					}
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, k := range ordered {
+		keyCh <- k
+	}
+	close(keyCh)
+	wg.Wait()
+	// Ended while fetching or deciding: what is decided is written, and the
+	// step reports the interruption (Codex M70 R4 Medium-5).
+	rep.noteInterruption(ctx)
+	return groups, firstErr
+}
+
+// decideKey decides every link of the components of one package.
+func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []distroWork,
+	byComp map[uuid.UUID][]repository.SbomLink) ([][]pendingLink, DistroScanReport, error) {
+	counts := DistroScanReport{NoVerdict: map[string]int{}}
+	var groups [][]pendingLink
+	for _, w := range work {
+		if ctx.Err() != nil {
+			break
+		}
+		var g []pendingLink
+		for _, l := range byComp[w.comp.ID] {
+			dec := d.decide(w.target, l.CVEID)
+			if dec.verdict == verdictNone {
+				counts.NoVerdict[dec.reason]++
+				continue
+			}
+			dec.evidence.FetchedAt = fetchedAt.UTC()
+			raw, err := json.Marshal(dec.evidence)
+			if err != nil {
+				return groups, counts, fmt.Errorf("distro: encode evidence: %w", err)
+			}
+			switch dec.verdict {
+			case verdictAffected:
+				counts.Affected++
+			case verdictUnfixed:
+				counts.Unfixed++
+			case verdictFixed:
+				counts.Fixed++
+			}
+			g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, method: dec.verdict.method(), evidence: raw})
+		}
+		if len(g) > 0 {
+			groups = append(groups, g)
+		}
+	}
+	return groups, counts, nil
 }
 
 // noteInterruption records that the scan's context has ended (deadline or

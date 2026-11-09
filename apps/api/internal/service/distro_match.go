@@ -268,6 +268,13 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 			if !ok {
 				return distroTarget{}, "unknown_release"
 			}
+			if ubuntuProBuild(t.version) {
+				// An Ubuntu Pro / FIPS / ESM build belongs to another stream
+				// (Ubuntu:Pro:..., Ubuntu:Pro:FIPS:...) with the same binary
+				// names; the SBOM does not say which one. Comparing it with
+				// the standard stream's fixes is wrong (Codex M70 R5 High-1).
+				return distroTarget{}, "ubuntu_pro_stream"
+			}
 			t.release, t.query = eco, eco
 		default:
 			return distroTarget{}, "unsupported_distro"
@@ -357,6 +364,13 @@ var debianCodenames = map[string]int{
 	"buzz": 1, "rex": 1, "bo": 1, "hamm": 2, "slink": 2, "potato": 2, "woody": 3, "sarge": 3, "etch": 4,
 	"lenny": 5, "squeeze": 6, "wheezy": 7, "jessie": 8, "stretch": 9, "buster": 10, "bullseye": 11,
 	"bookworm": 12, "trixie": 13, "forky": 14, "duke": 15,
+}
+
+// ubuntuProBuild reports a version built for an Ubuntu Pro stream:
+// "...ubuntu2.fips.7.1", "...+esm1", "...~esm1".
+func ubuntuProBuild(v string) bool {
+	v = strings.ToLower(v)
+	return strings.Contains(v, "fips") || strings.Contains(v, "esm")
 }
 
 // ubuntuEcosystem maps "22.04" to OSV's "Ubuntu:22.04:LTS" and "23.10" to
@@ -648,6 +662,7 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 	}
 
 	var exact []entryResult
+	var usable []distroEntry
 	var exactIDs []string
 	sawExact, excluded := false, false
 	for _, r := range recs {
@@ -682,6 +697,7 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 				continue
 			}
 			exact = append(exact, evalEntry(t.version, e, cmp))
+			usable = append(usable, e)
 			exactIDs = appendUnique(exactIDs, r.ID)
 		}
 	}
@@ -698,6 +714,20 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 			// An entry for the release was set aside: "fixed" would rest on
 			// part of the data.
 			return distroDecision{reason: "undecidable"}
+		}
+		if dec.verdict == verdictAffected && dec.evidence.Fixed != "" {
+			// The advertised upgrade target must itself be outside every
+			// entry that decided, and no entry may have been set aside
+			// (Codex M70 R5 Medium-3).
+			ok := !excluded
+			for _, e := range usable {
+				if evalEntry(dec.evidence.Fixed, e, cmp).state != entryFixed {
+					ok = false
+				}
+			}
+			if !ok {
+				dec.evidence.Fixed = ""
+			}
 		}
 		return dec
 	}
@@ -760,7 +790,7 @@ func combineExact(rs []entryResult, ids []string, ev model.DistroEvidence, cmp v
 		return distroDecision{verdict: verdictUnfixed, evidence: ev}
 	case affected:
 		ev.Status = model.DistroStatusAffected
-		if !fixUnknown {
+		if !fixUnknown && !undecidable {
 			ev.Fixed = fix
 		}
 		return distroDecision{verdict: verdictAffected, evidence: ev}
@@ -983,6 +1013,13 @@ func evalEntry(installed string, e distroEntry, cmp versionCmp) entryResult {
 				}
 			}
 		}
+		// The candidate fix must leave every member of the affected set
+		// (Codex M70 R5 Medium-3): another range it re-enters, a range this
+		// code cannot evaluate, or a listed version equal to it all make it
+		// unknown.
+		if !out.fixUnknown && (undecidable || !outsideAffectedSet(out.fix, e, cmp)) {
+			out.fixUnknown = true
+		}
 		if out.fixUnknown {
 			out.fix = ""
 		}
@@ -1006,6 +1043,26 @@ func evalEntry(installed string, e distroEntry, cmp versionCmp) entryResult {
 		}
 	}
 	return entryResult{state: entryFixed, fix: best}
+}
+
+// outsideAffectedSet: version v is in no ECOSYSTEM range of e and not in its
+// versions list (each range evaluated at v says "fixed", i.e. closed at or
+// below v).
+func outsideAffectedSet(v string, e distroEntry, cmp versionCmp) bool {
+	for _, x := range e.Versions {
+		if c, err := cmp(v, x); err != nil || c == 0 {
+			return false
+		}
+	}
+	for _, r := range e.Ranges {
+		if r.Type != "ECOSYSTEM" {
+			return false
+		}
+		if evalRange(v, r.Events, cmp).state != entryFixed {
+			return false
+		}
+	}
+	return true
 }
 
 // evalRange evaluates one ECOSYSTEM range.

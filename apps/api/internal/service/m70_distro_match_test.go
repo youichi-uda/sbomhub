@@ -278,7 +278,9 @@ func TestM70Decide(t *testing.T) {
 				rec("DSA-1", cve, entry("Debian:11", "i", "0", "f", "1.1.1k-1+deb11u1")),
 				rec("DSA-2", cve, entry("Debian:11", "i", "0", "la", "1.1.1j-1")),
 			},
-			verdict: verdictAffected, basis: "release", fixed: "1.1.1k-1+deb11u1", records: "DSA-1 DSA-2"},
+			// Affected for certain; with an entry not evaluable, no upgrade
+			// target is advertised (Codex M70 R5 Medium-3).
+			verdict: verdictAffected, basis: "release", fixed: "", records: "DSA-1 DSA-2"},
 		{name: "fixed with an entry that cannot be evaluated: no verdict", t: distroTarget{family: "debian", query: "Debian", release: "Debian:11", releaseMajor: 11, pkg: "openssl", version: "1.1.1n-0+deb11u5", scheme: schemeDpkg},
 			recs: []distroRecord{
 				rec("DSA-1", cve, entry("Debian:11", "i", "0", "f", "1.1.1k-1+deb11u1")),
