@@ -61,12 +61,12 @@ func TestM70GetVulnerabilities_ProjectsDistroLabelsAndEvidence(t *testing.T) {
 	}
 }
 
-// The SQL ordering mirrors model.MatchMethod.FindingRank; the best link is
-// picked by key (DISTINCT ON) and its evidence read from that same link,
-// never aggregated (Codex M70 R28 High-2).
+// The SQL ordering mirrors model.MatchMethod.FindingRank; both aggregates
+// share it, carry only the method and the component id, and the evidence is
+// read from that same link, never aggregated (Codex M70 R28 High-2).
 func TestM70BestMatchOrderMirrorsFindingRank(t *testing.T) {
-	if strings.Count(bestMatchMethodJoin, "ORDER BY bm.vulnerability_id, "+bestMatchOrder) != 1 ||
-		strings.Contains(bestMatchMethodJoin, "array_agg") ||
+	if strings.Count(bestMatchMethodJoin, "ORDER BY "+bestMatchOrder) != 2 ||
+		strings.Contains(bestMatchMethodJoin, "array_agg(bm.match_evidence") ||
 		!strings.Contains(bestMatchMethodJoin, "bev.component_id = pick.component_id AND bev.vulnerability_id = pick.vulnerability_id") {
 		t.Fatal("the best link is not picked by key and joined back")
 	}
