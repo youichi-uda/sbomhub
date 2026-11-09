@@ -212,6 +212,10 @@ func (r *ComponentRepository) RelabelDistro(ctx context.Context, componentID, vu
 		            AND cv.match_evidence->>'source_id' IS NOT DISTINCT FROM ($4::jsonb->>'source_id')
 		            AND COALESCE(cv.match_evidence->>'data_modified', '') < COALESCE($4::jsonb->>'data_modified', ''))
 		        OR (cv.match_method = $3
+		            -- a refresh of the label's OWN source only (Codex M70 R53
+		            -- Medium-1): another source's equal-rank evidence would
+		            -- take the label over and then block the owner's update
+		            AND cv.match_evidence->>'source_id' IS NOT DISTINCT FROM ($4::jsonb->>'source_id')
 		            AND (cv.match_evidence - 'fetched_at' - 'prior_method' - 'wm_source' - 'wm_rev' - 'wm_by_source' - 'withdrawn_by_source')
 		                IS DISTINCT FROM ($4::jsonb - 'fetched_at')))
 		   AND `+relabelDistroFreshness,

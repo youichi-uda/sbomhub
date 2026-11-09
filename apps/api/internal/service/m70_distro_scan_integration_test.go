@@ -940,7 +940,8 @@ func TestM70Watermark_PerSource(t *testing.T) {
 		}
 		return err
 	})
-	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_fixed" || r.evidence.Fixed != "b" {
+	// B's same-method evidence did not take A's label over (R53 Medium-1).
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_fixed" || r.evidence.Fixed != "a10" {
 		t.Errorf("%+v", r)
 	}
 	// Newer A data still goes through.
@@ -1328,5 +1329,43 @@ func TestM70DistroCache_LowerRevisionInvalidates(t *testing.T) {
 	}
 	if e, _ := c.Get(context.Background(), "test-inval", "Debian", "p"); e != nil {
 		t.Error("the pre-withdrawal payload is still served")
+	}
+}
+
+// Codex M70 R53 Medium-1: another source's same-method evidence does not
+// take the label over; the owner's newer data can still correct it.
+func TestM70RelabelDistro_SameMethodOtherSourceDoesNotTakeOver(t *testing.T) {
+	e := m70Seed(t, "m70takeover")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"A","fixed":"a","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"B","fixed":"b","data_modified":"2026-11-02T00:00:00.000000000Z"}`))
+		if changed {
+			t.Error("source B took over source A's label")
+		}
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"A","fixed":"a2","data_modified":"2026-11-03T00:00:00.000000000Z"}`))
+		if !changed {
+			t.Error("the owner's newer correction was refused")
+		}
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_fixed" || r.evidence.Fixed != "a2" {
+		t.Errorf("%+v", r)
 	}
 }
