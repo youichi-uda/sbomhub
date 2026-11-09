@@ -91,6 +91,71 @@ const (
 // High-3); field lengths are bounded at the source already.
 const maxEvidenceBytes = 16 << 10
 
+// noVerdictWatermark is the watermark a no-verdict settlement of l writes.
+// Normally the data's own. But OSV's package query omits WITHDRAWN records,
+// so when the record a stored distro label rests on was withdrawn, the
+// package revision can go DOWN, and the revision guard would then keep the
+// obsolete label forever (Codex M70 R24 High-1). So, when the data's
+// revision is below the link's watermark (same source) and a record of the
+// stored evidence is absent from the data, the record is looked up by id;
+// a withdrawal at or after the watermark is the newer revision the clear
+// rests on.
+func (d distroData) noVerdictWatermark(l repository.SbomLink, wm []byte, withdrawn func(id string) string) []byte {
+	if !model.MatchMethod(l.Method).IsDistro() || l.WMSource != d.sourceID || l.WMRev <= d.revision || withdrawn == nil {
+		return wm
+	}
+	present := map[string]bool{}
+	for _, rs := range d.byCVE {
+		for _, r := range rs {
+			present[r.ID] = true
+		}
+	}
+	best := ""
+	for _, id := range l.Records {
+		if present[id] {
+			continue
+		}
+		if rev := withdrawn(id); rev >= l.WMRev && rev > best {
+			best = rev
+		}
+	}
+	if best == "" {
+		return wm
+	}
+	b, _ := json.Marshal(struct {
+		Source       string `json:"source"`
+		SourceID     string `json:"source_id"`
+		DataModified string `json:"data_modified"`
+	}{model.DistroSourceOSV, d.sourceID, best})
+	return b
+}
+
+// withdrawalResolver returns, for a record id, the normalised revision of
+// its WITHDRAWAL ("" when it is not withdrawn or cannot be read), memoised
+// and paced like the package queries.
+func (s *DistroService) withdrawalResolver(ctx context.Context, pace func(context.Context) error) func(string) string {
+	memo := map[string]string{}
+	return func(id string) string {
+		if v, ok := memo[id]; ok {
+			return v
+		}
+		memo[id] = ""
+		if pace(ctx) != nil {
+			return ""
+		}
+		modified, withdrawn, err := s.osv.GetRecordState(ctx, id)
+		if err != nil || withdrawn == "" {
+			return ""
+		}
+		rev := normaliseModified(withdrawn)
+		if m := normaliseModified(modified); m > rev {
+			rev = m
+		}
+		memo[id] = rev
+		return rev
+	}
+}
+
 // watermark is the evidence a clear or a no-verdict check leaves on a link:
 // the source and revision of the data that was checked.
 func watermark(d distroData) []byte {
@@ -111,6 +176,7 @@ type distroLinkStore interface {
 
 // distroFetcher is the OSV surface the step uses.
 type distroFetcher interface {
+	GetRecordState(ctx context.Context, id string) (modified, withdrawn string, err error)
 	QueryPackageEach(ctx context.Context, ecosystem, name string, lim client.PackageQueryLimits,
 		before func(context.Context) error, onPage func([]client.OSVPackageRecord) error) (int, error)
 }
@@ -333,7 +399,7 @@ func (s *DistroService) fetchAndDecide(ctx context.Context, work []distroWork, b
 				hit, pages, ferr := s.loadSlotted(ctx, k, pace, func(l distroLoad) error {
 					d := l.data()
 					d.source, d.sourceID = s.source, s.sourceID
-					g, counts, derr = decideKey(ctx, d, l.fetchedAt, byKey[k], byComp)
+					g, counts, derr = decideKey(ctx, d, l.fetchedAt, byKey[k], byComp, s.withdrawalResolver(ctx, pace))
 					return nil
 				})
 				mu.Lock()
@@ -381,7 +447,7 @@ func (s *DistroService) fetchAndDecide(ctx context.Context, work []distroWork, b
 
 // decideKey decides every link of the components of one package.
 func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []distroWork,
-	byComp map[uuid.UUID][]repository.SbomLink) ([][]pendingLink, DistroScanReport, error) {
+	byComp map[uuid.UUID][]repository.SbomLink, withdrawn func(id string) string) ([][]pendingLink, DistroScanReport, error) {
 	counts := DistroScanReport{NoVerdict: map[string]int{}}
 	var groups [][]pendingLink
 	// One encoded watermark per package, one encoded evidence per (target,
@@ -400,7 +466,8 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 				counts.NoVerdict[dec.reason]++
 				// Settled on the row as it is when written (clear a distro
 				// label / leave the watermark): Codex M70 R22 High-1.
-				g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: wm})
+				g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true,
+					evidence: d.noVerdictWatermark(l, wm, withdrawn)})
 				if model.MatchMethod(l.Method).IsDistro() {
 					counts.Cleared++
 				}
@@ -424,6 +491,9 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 			}
 			if raw == nil {
 				counts.NoVerdict["evidence_too_large"]++
+				if model.MatchMethod(l.Method).IsDistro() {
+					counts.Cleared++ // Codex M70 R24 Low-4
+				}
 				g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: wm})
 				continue
 			}

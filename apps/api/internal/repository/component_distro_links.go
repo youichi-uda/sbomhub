@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -18,6 +19,11 @@ type SbomLink struct {
 	CVEID           string
 	// Method is the stored match_method, "" for NULL (a pre-M60 link).
 	Method string
+	// Records / WMSource / WMRev: what a stored distro label rests on — its
+	// evidence's OSV record ids and the link's watermark (M70).
+	Records  []string
+	WMSource string
+	WMRev    string
 }
 
 // ListSbomLinks reads every link of one SBOM's components. Run inside the
@@ -25,7 +31,10 @@ type SbomLink struct {
 // so outside a tenant transaction this returns nothing.
 func (r *ComponentRepository) ListSbomLinks(ctx context.Context, sbomID uuid.UUID) ([]SbomLink, error) {
 	rows, err := r.q(ctx).QueryContext(ctx, `
-		SELECT cv.component_id, cv.vulnerability_id, v.cve_id, COALESCE(cv.match_method, '')
+		SELECT cv.component_id, cv.vulnerability_id, v.cve_id, COALESCE(cv.match_method, ''),
+		       COALESCE(cv.match_evidence->'records', '[]'::jsonb)::text,
+		       COALESCE(cv.match_evidence->>'wm_source', cv.match_evidence->>'source_id', ''),
+		       COALESCE(cv.match_evidence->>'wm_rev', cv.match_evidence->>'data_modified', '')
 		FROM component_vulnerabilities cv
 		JOIN components c ON c.id = cv.component_id
 		JOIN vulnerabilities v ON v.id = cv.vulnerability_id
@@ -38,8 +47,12 @@ func (r *ComponentRepository) ListSbomLinks(ctx context.Context, sbomID uuid.UUI
 	var out []SbomLink
 	for rows.Next() {
 		var l SbomLink
-		if err := rows.Scan(&l.ComponentID, &l.VulnerabilityID, &l.CVEID, &l.Method); err != nil {
+		var records string
+		if err := rows.Scan(&l.ComponentID, &l.VulnerabilityID, &l.CVEID, &l.Method, &records, &l.WMSource, &l.WMRev); err != nil {
 			return nil, err
+		}
+		if json.Unmarshal([]byte(records), &l.Records) != nil {
+			l.Records = nil // not a list of ids: nothing to resolve
 		}
 		out = append(out, l)
 	}

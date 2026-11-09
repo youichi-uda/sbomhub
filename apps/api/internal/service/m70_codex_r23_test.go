@@ -57,11 +57,11 @@ func TestM70R23_OversizedEvidenceSettles(t *testing.T) {
 	tgt := distroTarget{family: "debian", query: "Debian", release: "Debian:11", releaseMajor: 11, pkg: "p", binary: "p", version: "1.0-1", scheme: schemeDpkg}
 	comp, vuln := uuid.New(), uuid.New()
 	groups, counts, err := decideKey(context.Background(), d, time.Time{}, []distroWork{{comp: model.Component{ID: comp}, target: tgt}},
-		map[uuid.UUID][]repository.SbomLink{comp: {{ComponentID: comp, VulnerabilityID: vuln, CVEID: "CVE-2021-0001", Method: "distro_fixed"}}})
+		map[uuid.UUID][]repository.SbomLink{comp: {{ComponentID: comp, VulnerabilityID: vuln, CVEID: "CVE-2021-0001", Method: "distro_fixed"}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 1 || len(groups[0]) != 1 || !groups[0][0].noVerdict || counts.NoVerdict["evidence_too_large"] != 1 {
+	if len(groups) != 1 || len(groups[0]) != 1 || !groups[0][0].noVerdict || counts.NoVerdict["evidence_too_large"] != 1 || counts.Cleared != 1 {
 		t.Errorf("groups=%+v counts=%+v, want one no-verdict settlement", groups, counts)
 	}
 	_ = ids

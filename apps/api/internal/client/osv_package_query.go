@@ -74,6 +74,57 @@ type osvPackageQueryResponse struct {
 	NextPageToken string             `json:"next_page_token"`
 }
 
+// GetRecordState reads ONE record by id (GET /vulns/{id}), which, unlike the
+// package query, also returns WITHDRAWN records (Codex M70 R24 High-1): its
+// modified and withdrawn times. A 404 is ErrOSVNotFound.
+func (c *OSVClient) GetRecordState(ctx context.Context, id string) (modified, withdrawn string, err error) {
+	if c.offline {
+		return "", "", ErrOSVOffline
+	}
+	if !canonicalOSVID(id) {
+		return "", "", fmt.Errorf("osv: %q is not an OSV id", id)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/vulns/"+neturl.PathEscape(id), nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("osv: get record: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", "", ErrOSVNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("osv: get record returned status %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxOSVResponseBytes+1))
+	if err != nil || len(raw) > maxOSVResponseBytes {
+		return "", "", fmt.Errorf("osv: read record: bad body")
+	}
+	var r struct {
+		ID        string `json:"id"`
+		Modified  string `json:"modified"`
+		Withdrawn string `json:"withdrawn"`
+	}
+	if err := json.Unmarshal(raw, &r); err != nil || r.ID != id {
+		return "", "", fmt.Errorf("osv: record %q: not the record asked for", id)
+	}
+	latest := time.Now().Add(maxOSVTimestampSkew)
+	for _, ts := range []string{r.Modified, r.Withdrawn} {
+		if ts == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil || t.After(latest) {
+			return "", "", fmt.Errorf("osv: record %q has a malformed or future time", id)
+		}
+	}
+	return r.Modified, r.Withdrawn, nil
+}
+
 // PackageQueryLimits bound one package query.
 type PackageQueryLimits struct {
 	// MaxPages is the most requests the walk may make.
@@ -273,8 +324,13 @@ func validateAffected(a OSVAffected) error {
 		// OSV's package-less entry for supplementary GIT ranges (Codex M70
 		// R23 Medium-4): valid only with GIT ranges, and ignored by the
 		// distro step (it matches the queried package only).
-		if len(a.Ranges) == 0 || len(a.Versions) > 0 {
+		if len(a.Ranges) == 0 {
 			return fmt.Errorf("package-less entry without GIT ranges")
+		}
+		for i, v := range a.Versions { // tag names (Codex M70 R24 Medium-2)
+			if !canonicalToken(v) {
+				return fmt.Errorf("package-less entry versions[%d] %q not canonical", i, v)
+			}
 		}
 		for i, r := range a.Ranges {
 			if r.Type != "GIT" || len(r.Events) == 0 {
@@ -327,12 +383,17 @@ func validateAffected(a OSVAffected) error {
 // with an upper-case, exact prefix.
 func checkCVELike(id string) error {
 	up := strings.ToUpper(id)
-	rest := up
-	for _, pfx := range []string{"DEBIAN-", "UBUNTU-"} {
-		rest = strings.TrimPrefix(rest, pfx)
-	}
-	if !strings.HasPrefix(rest, "CVE-") {
+	if !strings.Contains(up, "CVE-") {
 		return nil
+	}
+	// Exactly one of "CVE-…", "DEBIAN-CVE-…", "UBUNTU-CVE-…", upper-case and
+	// canonical; anything else naming a CVE ("DEBIAN-UBUNTU-CVE-…",
+	// "cve-…") is malformed (Codex M70 R19 High-2, R24 Medium-3).
+	rest := up
+	if r, ok := strings.CutPrefix(up, "DEBIAN-"); ok {
+		rest = r
+	} else if r, ok := strings.CutPrefix(up, "UBUNTU-"); ok {
+		rest = r
 	}
 	if id != up || !canonicalCVE(rest) {
 		return fmt.Errorf("non-canonical CVE identity %q", id)
