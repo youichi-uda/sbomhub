@@ -630,3 +630,49 @@ func TestM70LinkComponent_PriorMethodTenantBoundary(t *testing.T) {
 		t.Errorf("tenant A rewrote tenant B's prior_method to %q", prior)
 	}
 }
+
+// Codex M70 R16 High-2: the cache never replaces a higher data revision with
+// a lower one, whatever the generations; generation breaks ties only.
+func TestM70DistroCache_RevisionBeforeGeneration(t *testing.T) {
+	url := os.Getenv("REDIS_URL")
+	if url == "" {
+		t.Skip("REDIS_URL not set")
+	}
+	opt, err := redis.ParseURL(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { _ = rdb.Close() })
+	c := cache.NewDistroCache(rdb)
+	key := cache.DistroCacheKey("test-rev", "Debian", "p")
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
+	set := func(gen, dm, payload string) {
+		t.Helper()
+		if err := c.Set(context.Background(), "test-rev", "Debian", "p", cache.DistroCacheEntry{FetchedAt: time.Now(),
+			Generation: gen, DataModified: dm, Payload: []byte(payload)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func() string {
+		t.Helper()
+		e, err := c.Get(context.Background(), "test-rev", "Debian", "p")
+		if err != nil || e == nil {
+			t.Fatalf("get: %v %v", e, err)
+		}
+		return string(e.Payload)
+	}
+	set("00000000000000000001", "2026-11-09T00:00:00.000000000Z", `"R2"`)
+	set("00000000000000000002", "2026-11-08T00:00:00.000000000Z", `"R1-later-fetch"`) // later fetch, older data
+	if got := get(); got != `"R2"` {
+		t.Errorf("older revision replaced newer: %s", got)
+	}
+	set("00000000000000000003", "2026-11-09T00:00:00.000000000Z", `"R2-again"`) // same revision, later fetch
+	if got := get(); got != `"R2-again"` {
+		t.Errorf("equal revision, later generation not written: %s", got)
+	}
+	set("00000000000000000001", "2026-11-09T00:00:00.000000000Z", `"R2-old-gen"`)
+	if got := get(); got != `"R2-again"` {
+		t.Errorf("equal revision, earlier generation overwrote: %s", got)
+	}
+}

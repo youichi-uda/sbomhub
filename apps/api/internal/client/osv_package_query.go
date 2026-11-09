@@ -338,6 +338,12 @@ func (c *OSVClient) queryPackagePage(ctx context.Context, q osvPackageQueryReque
 	if err := json.Unmarshal(trimmed, &page); err != nil {
 		return page, n, fmt.Errorf("osv: decode package query response: %w", err)
 	}
+	if q.PageToken != "" && len(page.Vulns) == 0 && page.NextPageToken == "" {
+		// A continuation with no records and no further token: the walk was
+		// cut, not finished (Codex M70 R16 High-1). A token-only
+		// intermediate page (records later) is fine.
+		return page, n, fmt.Errorf("osv: package query continuation page is empty")
+	}
 	if err := validatePackageRecords(trimmed, q.Package); err != nil {
 		return osvPackageQueryResponse{}, n, err
 	}

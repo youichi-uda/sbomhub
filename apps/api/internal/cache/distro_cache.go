@@ -66,14 +66,22 @@ type DistroCacheEntry struct {
 	Generation string `json:"generation"`
 }
 
-// distroSetIfNotNewer writes ARGV[1] unless the stored entry carries a later
-// generation than ARGV[2].
+// distroSetIfNotNewer writes ARGV[1] (data revision ARGV[4], generation
+// ARGV[2]) unless the stored entry has a HIGHER data revision, or the same
+// revision and a later generation: a later fetch that saw older data (a
+// lagging replica) never replaces newer data; generation only breaks ties
+// (Codex M70 R16 High-2). Both are fixed-width strings ("" is the lowest).
 var distroSetIfNotNewer = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 if cur then
   local ok, obj = pcall(cjson.decode, cur)
-  if ok and type(obj) == 'table' and type(obj['generation']) == 'string' and obj['generation'] > ARGV[2] then
-    return 0
+  if ok and type(obj) == 'table' then
+    local dm = obj['data_modified']
+    local gen = obj['generation']
+    if type(dm) ~= 'string' then dm = '' end
+    if type(gen) ~= 'string' then gen = '' end
+    if dm > ARGV[4] then return 0 end
+    if dm == ARGV[4] and gen > ARGV[2] then return 0 end
   end
 end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
@@ -147,7 +155,7 @@ func (c *DistroCache) Set(ctx context.Context, source, ecosystem, name string, e
 	ctx, cancel := opContext(ctx)
 	defer cancel()
 	if err := distroSetIfNotNewer.Run(ctx, c.client, []string{DistroCacheKey(source, ecosystem, name)},
-		data, e.Generation, c.ttl.Milliseconds()).Err(); err != nil {
+		data, e.Generation, c.ttl.Milliseconds(), e.DataModified).Err(); err != nil {
 		return fmt.Errorf("redis set error: %w", err)
 	}
 	return nil
