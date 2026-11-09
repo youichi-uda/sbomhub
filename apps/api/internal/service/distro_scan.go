@@ -89,8 +89,9 @@ const (
 	// record id (R34); 17: Ubuntu stream qualifiers, arch-qualified rpm
 	// refused (R35); 18: OSV range schema (R37); 19: debian-N qualifier
 	// (R44); 20: second '#' in a subpath (R45); 21: repository_url (R48);
-	// 22: canonical rpm distro suffix (R49); 23: epoch-qualified rpm (R50)).
-	distroCachePayloadVersion = 23
+	// 22: canonical rpm distro suffix (R49); 23: epoch-qualified rpm (R50);
+	// 24: versioned rpm purl (R51)).
+	distroCachePayloadVersion = 24
 )
 
 // distroLinkStore is the repository surface the step uses.

@@ -38,3 +38,14 @@ func TestM70R50_RPMEpochQualifier(t *testing.T) {
 		t.Error("epoch-qualified rpm entry accepted")
 	}
 }
+
+// Codex M70 R51 High-1: a versioned rpm affected purl (which may carry an
+// epoch) is refused; Ubuntu's versioned deb purls stay accepted.
+func TestM70R51_VersionedRPMPurl(t *testing.T) {
+	if err := r32Query(t, "AlmaLinux:9", "pkg:rpm/almalinux/p@1%3A3.0.1-1?distro=almalinux-9"); err == nil {
+		t.Error("versioned rpm entry accepted")
+	}
+	if err := r32Query(t, "Ubuntu:22.04:LTS", "pkg:deb/ubuntu/p@3.0.2-0ubuntu1.10?arch=source&distro=jammy"); err != nil {
+		t.Errorf("Ubuntu versioned purl refused: %v", err)
+	}
+}

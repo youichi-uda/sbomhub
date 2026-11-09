@@ -228,9 +228,13 @@ func parseStrictPurl(purl string) (segs []string, quals map[string]string, err e
 		rest = rest[:i]
 	}
 	if i := strings.LastIndexByte(rest, '@'); i >= 0 && !strings.Contains(rest[i:], "/") {
-		if v, err := neturl.PathUnescape(rest[i+1:]); err != nil || v == "" {
+		v, err := neturl.PathUnescape(rest[i+1:])
+		if err != nil || v == "" {
 			return nil, nil, fmt.Errorf("empty or malformed version")
 		}
+		// Returned as the pseudo-qualifier "@" (never a qualifier key: keys
+		// are [a-z0-9._-]) for the agreement checks (Codex M70 R51 High-1).
+		quals["@"] = v
 		rest = rest[:i]
 	}
 	raw := strings.Split(rest, "/")
@@ -299,9 +303,13 @@ func purlQualifiersAgree(ecosystem, typ string, quals map[string]string) error {
 		}
 		// The epoch qualifier is not carried into the range comparison, so
 		// an entry stating one could be read under the wrong epoch (Codex
-		// M70 R50 High-1): refused until it is.
+		// M70 R50 High-1): refused until it is. Nor is a version (an OSV
+		// purl has none, and an rpm one may carry an epoch: R51 High-1).
 		if e, ok := quals["epoch"]; ok {
 			return fmt.Errorf("epoch=%s: epoch-qualified rpm entries are not supported", e)
+		}
+		if _, ok := quals["@"]; ok {
+			return fmt.Errorf("a versioned rpm entry purl")
 		}
 		return rpmDistroAgrees(ecosystem, quals)
 	}
