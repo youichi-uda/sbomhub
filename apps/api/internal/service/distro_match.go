@@ -301,8 +301,11 @@ func releaseMajor(rel string) (int, bool) {
 	if n, ok := debianCodenames[rel]; ok {
 		return n, true
 	}
-	major, _, _ := strings.Cut(rel, ".")
-	if !isDigits(major) || len(major) > 3 {
+	// Digits, optionally one numeric point release ("11", "11.7", "9.4").
+	// Anything else ("12.sid", "11.7.1", "9.garbage") is not a release
+	// this code can name an ecosystem for (Codex M70 R1 Medium).
+	major, point, hasPoint := strings.Cut(rel, ".")
+	if !isDigits(major) || len(major) > 3 || (hasPoint && (!isDigits(point) || len(point) > 3)) {
 		return 0, false
 	}
 	n, err := strconv.Atoi(major)
@@ -414,17 +417,62 @@ func isCVEID(s string) bool {
 // distroData indexes one package's reduced records by CVE.
 type distroData struct {
 	byCVE map[string][]*distroRecord
+	// cveRecordReleases are the release ecosystems named by at least one
+	// CVE-specific record (DEBIAN-CVE-* / UBUNTU-CVE-*) of the package:
+	// the releases the CVE-level data still covers. A Debian release absent
+	// from all of them has been dropped from the data (end of life).
+	cveRecordReleases map[string]bool
 }
 
 func indexDistroRecords(recs []distroRecord) distroData {
-	d := distroData{byCVE: map[string][]*distroRecord{}}
+	d := distroData{byCVE: map[string][]*distroRecord{}, cveRecordReleases: map[string]bool{}}
 	for i := range recs {
 		for _, c := range recs[i].CVEs {
 			d.byCVE[c] = append(d.byCVE[c], &recs[i])
 		}
+		if recs[i].isCVERecord() {
+			for _, e := range recs[i].Entries {
+				d.cveRecordReleases[e.Ecosystem] = true
+			}
+		}
 	}
 	return d
 }
+
+// isCVERecord: the record is generated per CVE (DEBIAN-CVE-*, UBUNTU-CVE-*,
+// or an id that is itself a CVE), so each of its entries is about that CVE.
+func (r *distroRecord) isCVERecord() bool {
+	id := strings.ToUpper(r.ID)
+	return isCVEID(id) || strings.HasPrefix(id, "DEBIAN-CVE-") || strings.HasPrefix(id, "UBUNTU-CVE-")
+}
+
+// speaksFor reports whether the record's entries can be read as a statement
+// about cve in EVERY release they name (Codex M70 R1 High-1). An advisory
+// (DSA / DLA / USN / ALSA) lists the CVEs it fixes and a fixed version per
+// release, but not which CVE applies to which release: USN-5402-1 lists
+// CVE-2022-1343 with 18.04 / 20.04 fixes, and UBUNTU-CVE-2022-1343 shows only
+// 22.04 is affected. So an advisory speaks for each of its CVEs only when it
+// names ONE CVE, or ONE release (an LTS advisory: every listed CVE was fixed
+// in that release).
+func (r *distroRecord) speaksFor() bool {
+	if r.isCVERecord() || len(r.CVEs) == 1 {
+		return true
+	}
+	eco := ""
+	for _, e := range r.Entries {
+		if eco != "" && e.Ecosystem != eco {
+			return false
+		}
+		eco = e.Ecosystem
+	}
+	return true
+}
+
+// debianLastEndOfLife is the newest Debian major release that is past its
+// LTS period (bullseye, 11: LTS ended 2026-08-31). laterReleaseVerdict
+// applies only at or below it. Raise it when a release leaves LTS (bookworm,
+// 12: June 2028); until then, the cost is only a missing label.
+const debianLastEndOfLife = 11
 
 // distroVerdict is what the data says about one (component, CVE).
 type distroVerdict int
@@ -482,18 +530,62 @@ type entryResult struct {
 }
 
 // decide applies the distro's data to one CVE of one component.
+//
+// Entries for the installed release decide, taken from the records that
+// speak for the CVE in that release (speaksFor): for Ubuntu only the
+// CVE-specific record when there is one; for Debian the CVE-specific record
+// when it names the release, else advisories. A multi-CVE, multi-release
+// advisory is used only to say "affected", and only when the CVE's own
+// record shows the installed version inside an affected range of a later
+// Debian release; it never says "fixed".
 func (d distroData) decide(t distroTarget, cveID string) distroDecision {
-	recs := d.byCVE[strings.ToUpper(strings.TrimSpace(cveID))]
+	cve := strings.ToUpper(strings.TrimSpace(cveID))
+	recs := d.byCVE[cve]
 	if len(recs) == 0 {
 		return distroDecision{reason: "no_record"}
 	}
 	cmp := t.comparator()
 
+	var cveRecs []*distroRecord
+	cveRecordNamesRelease := false
+	for _, r := range recs {
+		if r.isCVERecord() {
+			cveRecs = append(cveRecs, r)
+			for _, e := range r.Entries {
+				if e.Ecosystem == t.release {
+					cveRecordNamesRelease = true
+				}
+			}
+		}
+	}
+
 	var exact []entryResult
 	var exactIDs []string
+	sawExact, excluded := false, false
 	for _, r := range recs {
 		for _, e := range r.Entries {
 			if e.Ecosystem != t.release {
+				continue
+			}
+			sawExact = true
+			switch {
+			case r.isCVERecord():
+			case t.family == "ubuntu" && len(cveRecs) > 0:
+				// UBUNTU-CVE lists every affected release; the USNs add only
+				// ambiguity.
+				excluded = true
+				continue
+			case t.family == "debian" && cveRecordNamesRelease:
+				excluded = true
+				continue
+			case !r.speaksFor():
+				res := evalEntry(t.version, e, cmp)
+				if res.state != entryAffected || !d.lineageAffected(t, cveRecs, cmp) {
+					excluded = true
+					continue
+				}
+				exact = append(exact, res)
+				exactIDs = appendUnique(exactIDs, r.ID)
 				continue
 			}
 			exact = append(exact, evalEntry(t.version, e, cmp))
@@ -508,12 +600,44 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 		Installed: t.version,
 	}
 	if len(exact) > 0 {
-		return combineExact(exact, exactIDs, ev, cmp)
+		dec := combineExact(exact, exactIDs, ev, cmp)
+		if dec.verdict == verdictFixed && excluded {
+			// An entry for the release was set aside: "fixed" would rest on
+			// part of the data.
+			return distroDecision{reason: "undecidable"}
+		}
+		return dec
+	}
+	if sawExact {
+		return distroDecision{reason: "undecidable"}
 	}
 	if t.family == "debian" {
-		return laterReleaseVerdict(t, recs, ev, cmp)
+		if t.releaseMajor > debianLastEndOfLife || d.cveRecordReleases[t.release] {
+			// A supported release, or one the CVE-level data still covers:
+			// its absence from this CVE's record is "not affected" or "not
+			// tracked", never "fixed" (Codex M70 R1 High-2).
+			return distroDecision{reason: "release_not_listed"}
+		}
+		return laterReleaseVerdict(t, cveRecs, ev, cmp)
 	}
 	return distroDecision{reason: "release_not_listed"}
+}
+
+// lineageAffected: the CVE's own records place the installed version inside
+// an affected range of a Debian release later than the installed one.
+func (d distroData) lineageAffected(t distroTarget, cveRecs []*distroRecord, cmp versionCmp) bool {
+	if t.family != "debian" {
+		return false
+	}
+	for _, r := range cveRecs {
+		for _, e := range r.Entries {
+			if n, ok := debianEcosystemMajor(e.Ecosystem); ok && n > t.releaseMajor &&
+				evalEntry(t.version, e, cmp).state == entryAffected {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // combineExact combines the entries that name the installed release.
@@ -600,6 +724,10 @@ func combineExact(rs []entryResult, ids []string, ev model.DistroEvidence, cmp v
 // no backport of their own (DEBIAN-CVE-2021-3449: Debian:12/13/14 all
 // "fixed 1.1.1k-1", although bookworm ships 3.0.x).
 //
+// It is used only for a release at or below debianLastEndOfLife that no
+// CVE-specific record of the package names any more, and reads only the
+// CVE-specific records (DEBIAN-CVE-*), which follow the tracker.
+//
 // So the ONLY verdict drawn here is distro_fixed, and only when there is at
 // least one later Debian release entry and EVERY later release entry closes
 // its range at or below the installed version. Anything else — no later
@@ -612,8 +740,16 @@ func laterReleaseVerdict(t distroTarget, recs []*distroRecord, ev model.DistroEv
 	var ids, ecos []string
 	for _, r := range recs {
 		for _, e := range r.Entries {
+			if !strings.HasPrefix(e.Ecosystem, "Debian") {
+				continue
+			}
 			n, ok := debianEcosystemMajor(e.Ecosystem)
-			if !ok || n <= t.releaseMajor {
+			if !ok {
+				// "Debian:sid" or anything else this code cannot order:
+				// it may be a later release (Codex M70 R1 High-3).
+				return distroDecision{reason: "undecidable"}
+			}
+			if n <= t.releaseMajor {
 				continue
 			}
 			res := evalEntry(t.version, e, cmp)
@@ -716,18 +852,25 @@ type distroRangeEvent struct {
 // whatever the ranges say (the list is evidence of the affected side only;
 // its absence proves nothing).
 func evalEntry(installed string, e distroEntry, cmp versionCmp) entryResult {
-	listed := false
+	// The affected set is the union of every range and the versions list
+	// (OSV schema). A member that cannot be evaluated does not hide an
+	// affected one, but forbids "fixed" (Codex M70 R1 High-4).
+	listed, undecidable := false, false
 	for _, v := range e.Versions {
-		if c, err := cmp(installed, v); err == nil && c == 0 {
+		c, err := cmp(installed, v)
+		if err != nil {
+			undecidable = true
+			continue
+		}
+		if c == 0 {
 			listed = true
-			break
 		}
 	}
 	var affectedRanges []entryResult
 	var closings []string
-	undecidable := false
 	for _, r := range e.Ranges {
 		if r.Type != "ECOSYSTEM" {
+			undecidable = true
 			continue
 		}
 		switch res := evalRange(installed, r.Events, cmp); res.state {

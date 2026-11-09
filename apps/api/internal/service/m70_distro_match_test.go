@@ -247,12 +247,18 @@ func TestM70Decide(t *testing.T) {
 		{name: "release listed with no fix", t: deb11,
 			recs:    []distroRecord{rec("DEBIAN-CVE-2021-3711", cve, entry("Debian:11", "i", "0"))},
 			verdict: verdictUnfixed, basis: "release", records: "DEBIAN-CVE-2021-3711"},
-		{name: "unfixed beats a fixed entry for the same release", t: deb11,
+		{name: "the CVE's own record, when it names the release, wins over an advisory", t: deb11,
 			recs: []distroRecord{
 				rec("DSA-1", cve, entry("Debian:11", "i", "0", "f", "1.1.1k-1+deb11u1")),
 				rec("DEBIAN-CVE-2021-3711", cve, entry("Debian:11", "i", "0")),
 			},
-			verdict: verdictUnfixed, basis: "release", records: "DSA-1 DEBIAN-CVE-2021-3711"},
+			verdict: verdictUnfixed, basis: "release", records: "DEBIAN-CVE-2021-3711"},
+		{name: "unfixed beats a fixed entry for the same release", t: deb11,
+			recs: []distroRecord{
+				rec("DLA-1", cve, entry("Debian:11", "i", "0", "f", "1.1.1k-1+deb11u1")),
+				rec("DLA-2", cve, entry("Debian:11", "i", "0")),
+			},
+			verdict: verdictUnfixed, basis: "release", records: "DLA-1 DLA-2"},
 		{name: "affected beats an entry that cannot be evaluated", t: deb11,
 			recs: []distroRecord{
 				rec("DSA-1", cve, entry("Debian:11", "i", "0", "f", "1.1.1k-1+deb11u1")),
