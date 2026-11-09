@@ -519,12 +519,14 @@ func TestM70ClearDistro_RestoresPriorMethod(t *testing.T) {
 		`{"source_id":"A","data_modified":"2026-11-01T00:00:00.000000000Z"}`, // older data
 	} {
 		run(func(c context.Context) error {
-			changed, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286, []byte(g))
-			if changed {
-				t.Errorf("cleared with guard %s", g)
-			}
+			_, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286, []byte(g))
 			return err
 		})
+		// Another source's check is recorded in the watermark (R29 High-1),
+		// but neither clears the label.
+		if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_affected" {
+			t.Errorf("cleared with guard %s: %+v", g, r)
+		}
 	}
 	run(func(c context.Context) error {
 		_, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286, []byte(`{"source_id":"A","data_modified":"2026-11-06T00:00:00.000000000Z"}`))
@@ -807,11 +809,8 @@ func TestM70Settle_OtherSourceCannotClear(t *testing.T) {
 		return err
 	})
 	run(func(c context.Context) error {
-		changed, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286,
+		_, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286,
 			[]byte(`{"source":"osv","source_id":"B","data_modified":"2026-11-04T00:00:00.000000000Z"}`))
-		if changed {
-			t.Error("source B cleared a label resting on source A")
-		}
 		return err
 	})
 	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_affected" || r.evidence.Fixed != "r1" {
@@ -921,4 +920,95 @@ func TestM70Watermark_PerSource(t *testing.T) {
 		}
 		return err
 	})
+}
+
+// Codex M70 R29 High-1: a no-verdict from source B under a label of source
+// A records B's revision, so a delayed older B scan cannot relabel.
+func TestM70Settle_OtherSourceAdvancesItsWatermark(t *testing.T) {
+	e := m70Seed(t, "m70othwm")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"A","fixed":"a","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286,
+			[]byte(`{"source":"osv","source_id":"B","data_modified":"2026-11-20T00:00:00.000000000Z"}`))
+		if !changed {
+			t.Error("B's check was not recorded")
+		}
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_fixed" || r.evidence.Fixed != "a" {
+		t.Errorf("%+v, want A's label kept", r)
+	}
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"B","fixed":"b10","data_modified":"2026-11-10T00:00:00.000000000Z"}`))
+		if changed {
+			t.Error("older B data relabelled after B's newer no-verdict")
+		}
+		return err
+	})
+}
+
+// Codex M70 R29 High-2: a withdrawn clear leaves tombstones; a delayed scan
+// whose evidence cites the withdrawn record cannot bring the label back,
+// while evidence on other records still can.
+func TestM70ClearDistroWithdrawn_Tombstones(t *testing.T) {
+	e := m70Seed(t, "m70tomb")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const rev = "2026-11-05T00:00:00.000000000Z"
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"S","fixed":"r","records":["R"],"data_modified":"`+rev+`"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.ClearDistroWithdrawn(c, e.openssl, e.v0286, []byte(`{"source_id":"S","records":["R"],"wm_rev":"`+rev+`"}`))
+		if !changed {
+			t.Error("withdrawn clear refused")
+		}
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"S","fixed":"r","records":["R"],"data_modified":"`+rev+`"}`))
+		if changed {
+			t.Error("the withdrawn record's label came back")
+		}
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"S","fixed":"q","records":["Q"],"data_modified":"`+rev+`"}`))
+		if !changed {
+			t.Error("evidence on another record refused")
+		}
+		return err
+	})
+	// The tombstone survives the relabel.
+	var tomb string
+	if err := e.migDB.QueryRow(`SELECT COALESCE(match_evidence->'withdrawn_by_source'->>'S', '') FROM component_vulnerabilities
+		WHERE component_id = $1 AND vulnerability_id = $2`, e.openssl, e.v0286).Scan(&tomb); err != nil {
+		t.Fatal(err)
+	}
+	if tomb != `["R"]` {
+		t.Errorf("tombstones %q", tomb)
+	}
 }
