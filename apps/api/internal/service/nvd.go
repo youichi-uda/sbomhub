@@ -1087,6 +1087,18 @@ func cachedNVDVulns(entry *cache.VulnCacheEntry, name, version string) ([]model.
 			usable = false
 			break
 		}
+		// M67 (Codex R1, High): a scored entry with no CVSS version was
+		// written by a pre-M67 build, whose score did not go through
+		// cvss.Select. Every NVD score from M67 on carries its version, so
+		// this is exactly the legacy entry; re-fetch it rather than create a
+		// catalogue row no later scan would repair (Create is ON CONFLICT
+		// DO NOTHING).
+		if cv.CVSSScore != nil && cv.CVSSVersion == nil {
+			slog.Debug("discarding cached NVD record written before M67 (no CVSS version)",
+				"component", name, "version", version, "cve", cv.CVEID)
+			usable = false
+			break
+		}
 		// M46 B2: CachedVuln mirrors the model's pointer fields, so
 		// CVSSScore/PublishedAt carry through without sentinels.
 		vulns = append(vulns, model.Vulnerability{
@@ -1095,6 +1107,7 @@ func cachedNVDVulns(entry *cache.VulnCacheEntry, name, version string) ([]model.
 			Description: cv.Description,
 			Severity:    cv.Severity,
 			CVSSScore:   cv.CVSSScore,
+			CVSSVersion: cv.CVSSVersion,
 			PublishedAt: cv.PublishedAt,
 			Source:      "NVD",
 			UpdatedAt:   &cachedAt,
@@ -1153,6 +1166,7 @@ func (s *NVDService) keywordLookup(ctx context.Context, name, version string, pa
 				Description: v.Description,
 				Severity:    v.Severity,
 				CVSSScore:   v.CVSSScore,
+				CVSSVersion: v.CVSSVersion,
 				PublishedAt: v.PublishedAt,
 			}
 		}
@@ -1629,9 +1643,10 @@ func (s *NVDService) convertEntries(entries []NVDVulnEntry) ([]model.Vulnerabili
 			}
 		}
 
-		score, severity := extractCvss(entry.CVE.Metrics)
-		vuln.CVSSScore = score
-		vuln.Severity = severity
+		sel := SelectNVDCVSS(entry.CVE.Metrics)
+		vuln.CVSSScore = sel.Score
+		vuln.Severity = sel.Severity
+		vuln.CVSSVersion = sel.Version.Ptr()
 
 		vuln.PublishedAt = parseNVDTimestamp(entry.CVE.Published)
 		now := time.Now()
@@ -1691,74 +1706,6 @@ func parseNVDTimestamp(v string) *time.Time {
 	}
 	slog.Debug("unparseable NVD timestamp", "value", v)
 	return nil
-}
-
-// extractCvss returns the CVE's base score and severity. M46 B2: a CVE
-// without any CVSS metrics (NVD "Awaiting Analysis") yields a nil score —
-// NOT 0.0, which is a real "None" score — so un-scored CVEs are stored as
-// NULL and rendered as unscored instead of "safe".
-func extractCvss(metrics NVDMetrics) (*float64, string) {
-	if m, ok := preferPrimary(metrics.CvssMetricV31); ok {
-		return &m.BaseScore, strings.ToUpper(m.BaseSeverity)
-	}
-	if m, ok := preferPrimary(metrics.CvssMetricV30); ok {
-		return &m.BaseScore, strings.ToUpper(m.BaseSeverity)
-	}
-	// v4.0 sits BELOW v3.x on purpose (M54, Codex R5 High). Adding it fixes
-	// the defect — v4-only CVEs used to land as UNKNOWN — without changing the
-	// severity of any CVE that already has a v3 score. Whether v4 should
-	// OUTRANK v3 when a CVE carries both is a product decision (it would
-	// re-grade existing findings across the whole catalogue), not a bug fix,
-	// and is deliberately not taken here.
-	if m, ok := preferPrimary(metrics.CvssMetricV40); ok {
-		return &m.BaseScore, strings.ToUpper(m.BaseSeverity)
-	}
-	if m, ok := preferPrimary(metrics.CvssMetricV2); ok {
-		// v2 records carry no baseSeverity, so it is derived from the score.
-		return &m.BaseScore, scoreToCvss2Severity(m.BaseScore)
-	}
-	return nil, "UNKNOWN"
-}
-
-// PreferPrimaryCVSS is preferPrimary for scheduler.CVESyncJob, the other
-// reader of NVD's metrics (Codex M57 R1, Critical): it took element zero.
-func PreferPrimaryCVSS(metrics []CvssMetric) (CvssData, bool) {
-	return preferPrimary(metrics)
-}
-
-// preferPrimary picks the assessment to trust from one CVSS version's list.
-//
-// NVD attaches several assessments to a CVE — its own ("Primary") plus any
-// submitted by CNAs and third parties ("Secondary") — and the array order is
-// NOT significant. Taking element zero, which this code did until M54, meant
-// whichever organisation happened to be listed first decided the severity this
-// product reports. Codex R5 (Critical) found a live example where that demotes
-// an NVD Primary 9.8/CRITICAL to a Secondary 6.3/MEDIUM.
-//
-// Primary wins. With no Primary present, the first entry is used, which is the
-// previous behaviour and the only thing left to do — every remaining candidate
-// is a Secondary and none is privileged over another.
-func preferPrimary(metrics []CvssMetric) (CvssData, bool) {
-	if len(metrics) == 0 {
-		return CvssData{}, false
-	}
-	for _, m := range metrics {
-		if strings.EqualFold(m.Type, "Primary") {
-			return m.CvssData, true
-		}
-	}
-	return metrics[0].CvssData, true
-}
-
-func scoreToCvss2Severity(score float64) string {
-	switch {
-	case score >= 7.0:
-		return "HIGH"
-	case score >= 4.0:
-		return "MEDIUM"
-	default:
-		return "LOW"
-	}
 }
 
 // NVDUpstreamError is how SearchByCVEID reports that NVD did not give a usable

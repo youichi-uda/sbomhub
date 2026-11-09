@@ -958,19 +958,22 @@ func TestM54ExtractCvss_PrefersPrimaryOverSecondary(t *testing.T) {
 	}
 }
 
-// TestM54ExtractCvss_FallsBackToFirstWhenNoPrimary keeps the previous
-// behaviour for the ordinary case where NVD published no Primary assessment:
-// nothing privileges one Secondary over another, so the first is used.
-func TestM54ExtractCvss_FallsBackToFirstWhenNoPrimary(t *testing.T) {
+// TestM54ExtractCvss_NoPrimaryTakesTheMoreSevereSecondary: with no Primary
+// assessment nothing privileges one Secondary over another. Until M67 the
+// first listed was used, which made the result depend on NVD's (insignificant)
+// array order; since M67 the more severe one, then the higher score, wins
+// (internal/cvss). The winner is listed SECOND so first-wins would fail.
+func TestM54ExtractCvss_NoPrimaryTakesTheMoreSevereSecondary(t *testing.T) {
 	metrics := NVDMetrics{
 		CvssMetricV31: []CvssMetric{
-			{Type: "Secondary", CvssData: CvssData{BaseScore: 6.3, BaseSeverity: "MEDIUM"}},
 			{Type: "Secondary", CvssData: CvssData{BaseScore: 4.0, BaseSeverity: "MEDIUM"}},
+			{Type: "Secondary", CvssData: CvssData{BaseScore: 8.1, BaseSeverity: "HIGH"}},
+			{Type: "Secondary", CvssData: CvssData{BaseScore: 6.3, BaseSeverity: "MEDIUM"}},
 		},
 	}
 	score, severity := extractCvss(metrics)
-	if score == nil || *score != 6.3 || severity != "MEDIUM" {
-		t.Errorf("extractCvss = (%v, %q), want (6.3, \"MEDIUM\")", score, severity)
+	if score == nil || *score != 8.1 || severity != "HIGH" {
+		t.Errorf("extractCvss = (%v, %q), want (8.1, \"HIGH\")", score, severity)
 	}
 }
 
@@ -994,9 +997,9 @@ func TestM54ExtractCvss_V40OnlyIsNotUnknown(t *testing.T) {
 	}
 }
 
-// TestM54ExtractCvss_V31StillOutranksV40 pins the deliberately conservative
-// ordering: adding v4 must not re-grade any CVE that already has a v3 score.
-// Whether v4 should outrank v3 is a product decision, not part of this fix.
+// TestM54ExtractCvss_V31StillOutranksV40 pins v3.1 over v4.0. M54 chose it to
+// avoid re-grading CVEs that already had a v3 score; M67 made it the product
+// rule for every catalogue writer (internal/cvss).
 func TestM54ExtractCvss_V31StillOutranksV40(t *testing.T) {
 	metrics := NVDMetrics{
 		CvssMetricV31: []CvssMetric{

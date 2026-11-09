@@ -32,6 +32,8 @@ type m58Record struct {
 	severity string
 	score    float64
 	modified time.Time
+	// description defaults to "re-read".
+	description string
 }
 
 // m58NVD is a fake /cves/2.0 that honours lastModStartDate..lastModEndDate
@@ -83,10 +85,15 @@ func (f *m58NVD) server(t *testing.T) *httptest.Server {
 		}
 		items := make([]string, 0, len(page))
 		for _, rec := range page {
+			desc := rec.description
+			if desc == "" {
+				desc = "re-read"
+			}
+			descJSON, _ := json.Marshal(desc)
 			items = append(items, fmt.Sprintf(`{"cve": {"id": %q, "published": "2026-01-01T00:00:00.000",
-				"lastModified": %q, "descriptions": [{"lang": "en", "value": "re-read"}],
+				"lastModified": %q, "descriptions": [{"lang": "en", "value": %s}],
 				"metrics": {"cvssMetricV31": [{"type": "Primary", "cvssData": {"baseScore": %v, "baseSeverity": %q}}]},
-				"configurations": []}}`, rec.id, rec.modified.Format(m58Layout), rec.score, rec.severity))
+				"configurations": []}}`, rec.id, rec.modified.Format(m58Layout), descJSON, rec.score, rec.severity))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"resultsPerPage": %d, "startIndex": %d, "totalResults": %d, "vulnerabilities": [%s]}`,
@@ -331,9 +338,10 @@ func TestM58Reconcile_DueOnlyAtTheInterval(t *testing.T) {
 }
 
 // TestM58Reconcile_AWriteFailureIsNotReportedAsCompleted: a row whose refresh
-// the database refuses (severity longer than varchar(20) — an upstream
-// vocabulary change) must leave the pass marked as having failures, with the
-// CVE named, not "completed".
+// the database refuses (a description carrying NUL, which `text` cannot hold;
+// until M67 a severity longer than varchar(20), which internal/cvss now
+// normalises before it reaches the column) must leave the pass marked as
+// having failures, with the CVE named, not "completed".
 func TestM58Reconcile_AWriteFailureIsNotReportedAsCompleted(t *testing.T) {
 	appURL, migURL := schedIntEnv(t)
 	appDB := schedOpenOrSkip(t, appURL)
@@ -345,7 +353,7 @@ func TestM58Reconcile_AWriteFailureIsNotReportedAsCompleted(t *testing.T) {
 	m55SeedLegacy(t, migDB, good, "NVD")
 	mod := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	fake := &m58NVD{records: []m58Record{
-		{id: bad, severity: strings.Repeat("X", 30), score: 9.8, modified: mod},
+		{id: bad, severity: "CRITICAL", score: 9.8, modified: mod, description: "refused \x00"},
 		{id: good, severity: "CRITICAL", score: 9.8, modified: mod},
 	}}
 	j := m58Job(appDB, fake.server(t).URL)

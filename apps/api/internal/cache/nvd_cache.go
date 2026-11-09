@@ -64,10 +64,15 @@ type VulnCacheEntry struct {
 // (numeric 0 / zero-time JSON) still decode — they land as pointers to
 // the old sentinel values, exactly what the old code stored.
 type CachedVuln struct {
-	CVEID       string     `json:"cve_id"`
-	Description string     `json:"description"`
-	Severity    string     `json:"severity"`
-	CVSSScore   *float64   `json:"cvss_score,omitempty"`
+	CVEID       string   `json:"cve_id"`
+	Description string   `json:"description"`
+	Severity    string   `json:"severity"`
+	CVSSScore   *float64 `json:"cvss_score,omitempty"`
+	// CVSSVersion is the version CVSSScore was taken from (M67). Entries
+	// cached before M67 decode with it nil; they expire within NVDCacheTTL,
+	// and a row created from one is re-derived by the CVE sync, because the
+	// scanner never dates the rows it creates (source_modified_at NULL).
+	CVSSVersion *string    `json:"cvss_version,omitempty"`
 	PublishedAt *time.Time `json:"published_at,omitempty"`
 }
 

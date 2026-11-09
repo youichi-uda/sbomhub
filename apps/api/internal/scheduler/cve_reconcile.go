@@ -41,6 +41,16 @@ import (
 // and safe to interrupt and repeat. There is no per-row state and no
 // migration.
 //
+// It is also how rows stored under the pre-M67 CVSS rule converge (the sync
+// ranked v4.0 above v3.x until M67). The pass offers each record at the
+// lastModified the sync already stored, which `strictly newer wins` refuses,
+// so UpdateMetadata carries one exception: a row with a score and no
+// cvss_version (migration 069) is re-derived once at an equal timestamp.
+// A row NVD has not modified since the upgrade therefore converges on the
+// first pass after it — the next one due, i.e. at most
+// SBOMHUB_NVD_RECONCILE_INTERVAL (30 days by default) after the previous pass
+// finished, plus the pass's own duration.
+//
 // # Cost (measured 2026-11-08 against live NVD, one request each)
 //
 // A 2000-record page is 11.4 MB and took 2.8 s. A full pass is therefore about

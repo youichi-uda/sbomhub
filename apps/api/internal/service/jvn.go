@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/cvss"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/validation"
@@ -1021,41 +1021,26 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 	return page, nil
 }
 
-// jvnSeverityRank orders the severity labels this scanner stores, most severe
-// first. Anything unrecognised ranks lowest so it can never displace a rated
-// advisory.
-var jvnSeverityRank = map[string]int{
-	"CRITICAL": 5,
-	"HIGH":     4,
-	"MEDIUM":   3,
-	"LOW":      2,
-	"NONE":     1,
-}
-
 // jvnMoreSevere reports whether a should replace b as the record kept for a CVE
 // that two advisories both describe.
 //
-// The SEVERITY LABEL is compared first and the raw score only breaks ties
-// (Codex M55 R4, High). Comparing scores first is wrong across CVSS versions,
-// which JVN mixes: a v2 HIGH of 10.0 would otherwise displace a v3.1 CRITICAL
-// of 9.8, demoting the record a critical-only CI gate is looking for. A rated
-// advisory beats an unrated one, and a scored one beats an unscored one at
-// equal rating. Equality keeps the incumbent, so arrival order can only ever
-// raise the stored assessment, never lower it.
+// It is cvss.Outranks (M67): the CVSS VERSION each advisory's assessment was
+// taken from decides first (v3.1 > v3.0 > v4.0 > v2), the same rule every
+// catalogue writer applies; then the SEVERITY LABEL, with the raw score only
+// breaking ties (Codex M55 R4, High) — comparing scores first is wrong across
+// CVSS versions, which JVN mixes. A rated advisory beats an unrated one, and a
+// scored one beats an unscored one at equal rating. Equality keeps the
+// incumbent, so the result does not depend on arrival order.
 func jvnMoreSevere(a, b model.Vulnerability) bool {
-	ra := jvnSeverityRank[strings.ToUpper(strings.TrimSpace(a.Severity))]
-	rb := jvnSeverityRank[strings.ToUpper(strings.TrimSpace(b.Severity))]
-	if ra != rb {
-		return ra > rb
+	return cvss.Outranks(jvnSelection(a), jvnSelection(b))
+}
+
+func jvnSelection(v model.Vulnerability) cvss.Selection {
+	sel := cvss.Selection{Score: v.CVSSScore, Severity: strings.ToUpper(strings.TrimSpace(v.Severity))}
+	if v.CVSSVersion != nil {
+		sel.Version = cvss.ParseVersion(*v.CVSSVersion)
 	}
-	switch {
-	case a.CVSSScore != nil && b.CVSSScore != nil:
-		return *a.CVSSScore > *b.CVSSScore
-	case a.CVSSScore != nil:
-		return true
-	default:
-		return false
-	}
+	return sel
 }
 
 // jvnAdvisoryKey is the identity used to tell entries apart ACROSS pages.
@@ -1256,7 +1241,7 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 	// first score was malformed was stored as 0.0 — in both cases while the
 	// same item explicitly stated a critical assessment. Take the most
 	// severe entry instead, and skip entries whose score will not parse.
-	cvssScore, severity := jvnWorstCVSS(item.CVSS)
+	cvssScore, severity, cvssVersion := jvnWorstCVSS(item.CVSS)
 	if severity == "" {
 		severity = "UNKNOWN"
 	}
@@ -1267,6 +1252,7 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 		Description: item.Description,
 		Severity:    severity,
 		CVSSScore:   cvssScore,
+		CVSSVersion: cvssVersion,
 		PublishedAt: publishedAt,
 		Source:      "JVN",
 		UpdatedAt:   &now,
@@ -1291,68 +1277,40 @@ func jvnItemIdentity(item JVNItem) string {
 }
 
 // jvnWorstCVSS picks the assessment to store from an advisory's CVSS elements.
+// It is the JVN adapter onto cvss.Select (M67), the selection every catalogue
+// writer shares: v3.1 > v3.0 > v4.0 > v2 (an unrecognised version below them
+// all), then — JVN has no Primary / Secondary — the more severe entry, then
+// the higher score.
 //
-// ONE ranked pass over every entry, whatever its version. There is deliberately
-// no "prefer the modern scale" stage any more (Codex M55 R9, High). That stage
-// existed to stop a v2 HIGH of 10.0 outranking a v3.1 CRITICAL of 9.8 — but
-// since M55 R4 the comparison leads with the SEVERITY RATING and uses the score
-// only as a tiebreak, so CRITICAL already beats HIGH regardless of version and
-// the stage bought nothing. What it did do was create a preference an
-// unrecognised version could hijack: version="9.9" severity="Low" landed in the
-// preferred pass and suppressed a valid v2 HIGH beside it, storing LOW.
+// What M55 established survives inside cvss.Select: each entry's severity is
+// reconciled against its OWN version's band table (the harsher of the stated
+// label and the score's band, R5 / R7); an unusable score (unparseable, NaN,
+// outside 0..10) is dropped but the severity the entry states is kept (R5 /
+// R7); an entry yielding neither cannot suppress a usable one (R8); and an
+// unrecognised version cannot outrank a known one (R9).
 //
-// Each entry is reconciled against its OWN version's band table, so the
-// comparison is between ratings on a common scale rather than between raw
-// numbers from different ones. Entries whose score is unusable keep the
-// severity they state and contribute no number.
-func jvnWorstCVSS(entries []JVNCVSS) (*float64, string) {
-	{
-		var best *float64
-		var severity string
-		seen := false
-		for _, e := range entries {
-			var candidateScore *float64
-			candidate := mapCVSSSeverity(e.Severity())
-			score, err := strconv.ParseFloat(strings.TrimSpace(e.Score()), 64)
-			switch {
-			case err != nil || !jvnScoreIsSane(score):
-				// The SCORE is unusable; the stated SEVERITY is not
-				// (Codex M55 R7, High). Dropping the whole element meant
-				// an advisory whose only assessment read
-				// severity="Critical" score="n/a" was stored as UNKNOWN
-				// with no score at all, and a critical-only gate passed on
-				// an advisory that says Critical in words.
-				//
-				// NaN is the reason the score cannot simply be kept:
-				// ParseFloat accepts it and every later comparison against
-				// it is false, so one NaN would pin the result and keep a
-				// real Critical from ever winning (M55 R5).
-				slog.Warn("ignoring JVN CVSS score but keeping its stated severity",
-					"version", e.Version(), "score", e.Score(), "severity", e.Severity())
-			default:
-				// Reconcile FIRST, then rank on the reconciled severity
-				// with the score as the tiebreak (M55 R6): ranking on the
-				// raw score meant severity="Critical" score="8.0" lost to
-				// severity="High" score="8.5".
-				candidate = jvnReconcileSeverity(e.Version(), e.Severity(), score)
-				s := score
-				candidateScore = &s
-			}
-
-			if !seen || jvnMoreSevere(
-				model.Vulnerability{Severity: candidate, CVSSScore: candidateScore},
-				model.Vulnerability{Severity: severity, CVSSScore: best},
-			) {
-				seen = true
-				best = candidateScore
-				severity = candidate
-			}
+// What M67 changed: version now decides before severity. An advisory carrying
+// v3.0 MEDIUM beside v2 HIGH is stored MEDIUM (was HIGH) — the same rule NVD
+// records are stored under, so a CVE no longer changes rating depending on
+// which feed's row the catalogue happens to hold.
+func jvnWorstCVSS(entries []JVNCVSS) (*float64, string, *string) {
+	as := make([]cvss.Assessment, 0, len(entries))
+	for _, e := range entries {
+		a := cvss.Assessment{Version: cvss.ParseVersion(e.Version()), Severity: e.Severity()}
+		score, err := strconv.ParseFloat(strings.TrimSpace(e.Score()), 64)
+		if err != nil || !cvss.SaneScore(score) {
+			slog.Warn("ignoring JVN CVSS score but keeping its stated severity",
+				"version", e.Version(), "score", e.Score(), "severity", e.Severity())
+		} else {
+			a.Score = &score
 		}
-		if !seen {
-			return nil, ""
-		}
-		return best, severity
+		as = append(as, a)
 	}
+	sel := cvss.Select(as)
+	if sel.Severity == cvss.Unknown && sel.Score == nil {
+		return nil, "", nil
+	}
+	return sel.Score, sel.Severity, sel.Version.Ptr()
 }
 
 // jvnItemCVEIDs returns EVERY CVE this advisory is filed under, canonicalised
@@ -1413,76 +1371,6 @@ func jvnItemCVEIDs(item JVNItem) (ids []string, complete bool) {
 	return nil, complete
 }
 
-// jvnScoreIsSane rejects the values a CVSS base score cannot take. NaN and the
-// infinities parse happily and then poison every comparison they take part in;
-// a score outside 0..10 is not a CVSS base score at all.
-func jvnScoreIsSane(score float64) bool {
-	return !math.IsNaN(score) && !math.IsInf(score, 0) && score >= 0 && score <= 10
-}
-
-// jvnReconcileSeverity returns the MORE severe of the label an advisory states
-// and the band its own score falls in (Codex M55 R5, High).
-//
-// `severity="Low" score="9.8"` is internally impossible, and taking the label
-// stored it as LOW — letting a critical-only gate pass on an entry that says
-// 9.8. Taking the harsher reading is the safe direction when a response
-// contradicts itself.
-//
-// Each CVSS version is reconciled against ITS OWN band table (Codex M55 R7,
-// High). An earlier cut skipped v2 entirely to avoid inventing a CRITICAL the
-// v2 scale does not have — but that also let `version="2.0" severity="Low"
-// score="10.0"` through as LOW, when 10.0 is HIGH on the v2 scale. Using the v2
-// table gives the correction without inventing the missing band.
-func jvnReconcileSeverity(version, label string, score float64) string {
-	stated := mapCVSSSeverity(label)
-	banded := jvnScoreBand(version, score)
-	if jvnSeverityRank[banded] > jvnSeverityRank[stated] {
-		return banded
-	}
-	return stated
-}
-
-// jvnIsModernCVSS reports whether a version uses the five-band qualitative
-// scale (v3 and v4) rather than CVSS v2's three bands.
-//
-// The test is "not v2" rather than "is v3" (Codex M55 R8, High): keying on the
-// "3." prefix put CVSS v4 — and every future or unrecognised version — into the
-// v2 table, so a v4 score of 9.8 was banded HIGH instead of CRITICAL. An
-// unknown version is treated as modern so that the failure direction is the
-// harsher rating, not the milder one.
-func jvnIsModernCVSS(version string) bool {
-	return !strings.HasPrefix(strings.TrimSpace(version), "2.")
-}
-
-// jvnScoreBand is the qualitative rating a score implies, per CVSS version.
-// v3 and v4 define five bands; v2 defines three and has no CRITICAL.
-func jvnScoreBand(version string, score float64) string {
-	if jvnIsModernCVSS(version) {
-		switch {
-		case score >= 9.0:
-			return "CRITICAL"
-		case score >= 7.0:
-			return "HIGH"
-		case score >= 4.0:
-			return "MEDIUM"
-		case score > 0:
-			return "LOW"
-		default:
-			return "NONE"
-		}
-	}
-	switch {
-	case score >= 7.0:
-		return "HIGH"
-	case score >= 4.0:
-		return "MEDIUM"
-	case score > 0:
-		return "LOW"
-	default:
-		return "NONE"
-	}
-}
-
 // extractJVNCVEID finds the CVE this advisory is about, if it names one.
 //
 // The prefix test is case-INSENSITIVE (M54). It was `HasPrefix(ref.ID, "CVE-")`
@@ -1505,27 +1393,6 @@ func extractJVNCVEID(item JVNItem) string {
 		return item.Identifier
 	}
 	return ""
-}
-
-// mapCVSSSeverity normalises a CVSS qualitative rating. The label is TRIMMED
-// (Codex M55 R7, Medium): `severity="Critical "` otherwise fell through to
-// UNKNOWN, and with the score band supplying the answer instead, a stated
-// CRITICAL was silently read as HIGH.
-func mapCVSSSeverity(severity string) string {
-	switch strings.ToLower(strings.TrimSpace(severity)) {
-	case "critical", "c":
-		return "CRITICAL"
-	case "high", "h":
-		return "HIGH"
-	case "medium", "m":
-		return "MEDIUM"
-	case "low", "l":
-		return "LOW"
-	case "none", "n":
-		return "NONE"
-	default:
-		return "UNKNOWN"
-	}
 }
 
 // GetVulnerabilitiesByJVNID was REMOVED in M55.

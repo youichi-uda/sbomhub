@@ -533,9 +533,13 @@ func m55Watermark(t *testing.T, migDB *sql.DB) string {
 // guard still admits the NEXT record for that CVE. The failure costs one
 // refresh opportunity; it is not sticky.
 //
-// The failure used here is a severity longer than `severity varchar(20)` — a
-// real shape (an upstream vocabulary change) and, unlike a killed connection,
-// reproducible.
+// The failure used here is a description carrying a NUL character, which
+// PostgreSQL refuses in `text` ("invalid byte sequence for encoding UTF8:
+// 0x00") — upstream content the column cannot hold and, unlike a killed
+// connection, reproducible. (Until M67 this used a severity longer than
+// `severity varchar(20)`; since M67 the stored severity is normalised by
+// internal/cvss, so an unknown label is banded from the score instead of
+// reaching the column.)
 func TestM55CVEMetadata_AFailedWriteIsNotRetried(t *testing.T) {
 	appURL, migURL := schedIntEnv(t)
 	appDB := schedOpenOrSkip(t, appURL)
@@ -547,9 +551,10 @@ func TestM55CVEMetadata_AFailedWriteIsNotRetried(t *testing.T) {
 	cveID := m55CVEID(t)
 	m55SeedLegacy(t, migDB, cveID, "NVD")
 
-	oversized := "CRITICALCRITICALCRITICALCRITICA" // 31 chars: refused by the column
-	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
-		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
+	// JSON "\u0000" decodes to a NUL rune, which the text column refuses.
+	refused := strings.Replace(m55Feed(cveID, "CRITICAL", 9.8, "write will be refused NUL_HERE",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty), "NUL_HERE", `\u0000`, 1)
+	m55Sync(t, appDB, refused)
 
 	// The limitation: the window moves on regardless.
 	if got := m55Watermark(t, migDB); got == pinned.Format(time.RFC3339) {

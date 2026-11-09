@@ -663,7 +663,10 @@ type CVEInfo struct {
 	// harmless findings. The whole pipeline — extractor, struct, INSERT
 	// and UPDATE — now carries nil, matching what
 	// service/jvn.go::convertJVNItemToVulnerability already did for JVN.
-	CVSSScore   *float64
+	CVSSScore *float64
+	// CVSSVersion is the version CVSSScore was taken from (cvss.Select, M67);
+	// nil when unscored.
+	CVSSVersion *string
 	PublishedAt time.Time
 	ModifiedAt  time.Time
 	// Keywords extracted from CVE for matching
@@ -837,7 +840,7 @@ func (j *CVESyncJob) fetchModifiedPage(ctx context.Context, start, end time.Time
 		}
 
 		// Extract CVSS score and severity
-		cve.CVSSScore, cve.Severity = extractCVSSFromMetrics(v.CVE.Metrics)
+		cve.CVSSScore, cve.Severity, cve.CVSSVersion = extractCVSSFromMetrics(v.CVE.Metrics)
 
 		// Parse dates. NVD sends them WITHOUT an offset
 		// ("2026-08-11T19:33:44.513", measured live 2026-11-08), which
@@ -867,50 +870,22 @@ func (j *CVESyncJob) fetchModifiedPage(ctx context.Context, start, end time.Time
 	return page, total, nil
 }
 
-// extractCVSSFromMetrics extracts CVSS score and severity from NVD
-// metrics. A nil score means the CVE has no CVSS metrics at all — see
+// extractCVSSFromMetrics is the score / severity / version this job stores
+// for one NVD record. It is service.SelectNVDCVSS — the scanner's selection —
+// and nothing else (M67): v3.1 > v3.0 > v4.0 > v2, NVD's Primary over a
+// Secondary within a version (Codex M57 R1, Critical), see internal/cvss.
+//
+// Until M67 this job ranked v4.0 FIRST (M46 B-1 codex round 3) while the
+// scanner ranked v3.x first, so a CVE carrying both — on the recorded M60
+// fixtures, every v4.0 assessment sits beside a v3.1 one — was stored at the
+// v4.0 score by the sync and the v3.1 score by the scanner: CVE-2026-34479
+// flipped between MEDIUM 6.9 and HIGH 7.5 depending on which path wrote last.
+//
+// A nil score means the CVE has no usable CVSS metrics at all — see
 // CVEInfo.CVSSScore (M46 B-1 High-3); it is NOT the same as a score of 0.
-//
-// Within one CVSS version it prefers NVD's own ("Primary") assessment over
-// CNA / third-party ("Secondary") ones, via the scanner's
-// service.PreferPrimaryCVSS (Codex M57 R1, Critical). NVD does not order the
-// list, and taking element zero — what this did until M57 — extracted a
-// Secondary 6.3/MEDIUM over a Primary 9.8/CRITICAL whenever the Secondary was
-// listed first. It mattered less while the metadata refresh was dead (see the
-// timestamp note in fetchModifiedCVEs); once the refresh writes, it would
-// DOWNGRADE a row the scanner had stored correctly and date it so that a
-// replay could not repair it.
-//
-// The VERSION order is this job's own and is deliberately unchanged: v4.0
-// first (M46 B-1 codex round 3), whereas the scanner ranks v3.x above v4.0.
-// Which version should win when a CVE carries both re-grades findings across
-// the catalogue and is recorded as an open product decision, not settled here.
-func extractCVSSFromMetrics(metrics service.NVDMetrics) (*float64, string) {
-	// CVSS v4.0 first: NVD has published cvssMetricV40 alongside v3.1
-	// since the 2.0 API, and it is the highest-fidelity score available
-	// (M46 B-1 codex round 3). Before this branch existed, a v4-only CVE
-	// fell through every case and was persisted as un-scored — a real,
-	// possibly critical score demoted to NULL and sorted to the tail of
-	// the NULLS LAST vulnerability list.
-	for _, list := range [][]service.CvssMetric{metrics.CvssMetricV40, metrics.CvssMetricV31, metrics.CvssMetricV30} {
-		if m, ok := service.PreferPrimaryCVSS(list); ok {
-			score := m.BaseScore
-			return &score, strings.ToUpper(m.BaseSeverity)
-		}
-	}
-	if m, ok := service.PreferPrimaryCVSS(metrics.CvssMetricV2); ok {
-		score := m.BaseScore
-		severity := "LOW"
-		if score >= 7.0 {
-			severity = "HIGH"
-		} else if score >= 4.0 {
-			severity = "MEDIUM"
-		}
-		return &score, severity
-	}
-	// No metrics block at all: un-scored, NOT scored 0. The caller
-	// persists nil → SQL NULL.
-	return nil, "UNKNOWN"
+func extractCVSSFromMetrics(metrics service.NVDMetrics) (*float64, string, *string) {
+	sel := service.SelectNVDCVSS(metrics)
+	return sel.Score, sel.Severity, sel.Version.Ptr()
 }
 
 // extractKeywordsFromCPE extracts product names from CPE criteria for matching
@@ -1693,6 +1668,7 @@ func catalogueMetadata(cve CVEInfo, now time.Time) repository.VulnerabilityMetad
 		Description:      cve.Description,
 		Severity:         cve.Severity,
 		CVSSScore:        cve.CVSSScore,
+		CVSSVersion:      cve.CVSSVersion,
 		Source:           "NVD",
 		PublishedAt:      nilIfZeroTime(cve.PublishedAt),
 		SourceModifiedAt: usableSourceModifiedAt(cve.ModifiedAt, now),
@@ -1831,12 +1807,12 @@ func (j *CVESyncJob) upsertVulnerability(ctx context.Context, cve CVEInfo) (uuid
 	newID := uuid.New()
 	var insertedID uuid.UUID
 	err := j.db.QueryRowContext(ctx, `
-		INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, published_at, source_modified_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, 'NVD', $6, $7, NOW())
+		INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, cvss_version, source, published_at, source_modified_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $8, 'NVD', $6, $7, NOW())
 		ON CONFLICT (cve_id) DO NOTHING
 		RETURNING id
 	`, newID, cve.ID, cve.Description, cve.Severity, cve.CVSSScore,
-		nilIfZeroTime(cve.PublishedAt), sourceModifiedAt).Scan(&insertedID)
+		nilIfZeroTime(cve.PublishedAt), sourceModifiedAt, cve.CVSSVersion).Scan(&insertedID)
 	switch {
 	case err == nil:
 		return insertedID, true, nil
