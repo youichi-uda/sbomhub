@@ -200,10 +200,10 @@ type pendingLink struct {
 	// evidence is the match_evidence JSON written with a distro label (M70,
 	// the distro step); nil for every other writer.
 	evidence []byte
-	// clear (M70): take a stale distro label back to its earlier method;
-	// mark (M70): record a no-verdict check on a non-distro link. evidence
-	// then holds the data's watermark (source, revision).
-	clear, mark bool
+	// noVerdict (M70): data gave no verdict; settle the link as it is when
+	// written (clear a distro label, or leave the watermark). evidence then
+	// holds the data's watermark (source, revision).
+	noVerdict bool
 }
 
 // linkWriter is the one repository call the write phase makes per link.

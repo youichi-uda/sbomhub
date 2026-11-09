@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 )
@@ -262,7 +263,17 @@ func validatePackageRecords(raw []byte, q OSVPackage) error {
 // validateAffected: a package with a name and an ecosystem; every range with
 // a type and at least one event; every event with exactly one field; no
 // empty listed version.
+// MaxOSVFieldBytes bounds every identity / version string of an answer
+// (names, ecosystems, ids, versions, binaries): far above any real value,
+// and what keeps encoded evidence small (Codex M70 R22 High-3).
+const MaxOSVFieldBytes = 256
+
 func validateAffected(a OSVAffected) error {
+	if a.Package.Purl != "" {
+		if err := purlAgrees(a.Package); err != nil {
+			return err
+		}
+	}
 	// Canonical strings (Codex M70 R18 High-2): a name or a version is
 	// printable ASCII without any whitespace; an ecosystem may have inner
 	// spaces ("Rocky Linux:9") but none at either end. Anything else would
@@ -332,10 +343,47 @@ func canonicalCVE(s string) bool {
 	return true
 }
 
+// purlAgrees: an affected package's purl names the same package (name) and,
+// for the distro ecosystems this build reads, the same packaging type
+// (Codex M70 R22 High-2).
+func purlAgrees(p OSVPackage) error {
+	rest, ok := strings.CutPrefix(p.Purl, "pkg:")
+	if !ok {
+		return fmt.Errorf("package purl %q is not a purl", p.Purl)
+	}
+	if i := strings.IndexAny(rest, "?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	segs := strings.Split(rest, "/")
+	if len(segs) < 2 {
+		return fmt.Errorf("package purl %q has no name", p.Purl)
+	}
+	typ := strings.ToLower(segs[0])
+	last := segs[len(segs)-1]
+	if at := strings.IndexByte(last, '@'); at >= 0 {
+		last = last[:at]
+	}
+	name, err := neturl.PathUnescape(last)
+	if err != nil || name != p.Name {
+		return fmt.Errorf("package purl %q does not name %q", p.Purl, p.Name)
+	}
+	want := ""
+	switch {
+	case strings.HasPrefix(p.Ecosystem, "Debian"), strings.HasPrefix(p.Ecosystem, "Ubuntu"):
+		want = "deb"
+	case strings.HasPrefix(p.Ecosystem, "AlmaLinux"), strings.HasPrefix(p.Ecosystem, "Rocky Linux"):
+		want = "rpm"
+	}
+	if want != "" && typ != want {
+		return fmt.Errorf("package purl %q is not a %s package", p.Purl, want)
+	}
+	return nil
+}
+
 // canonicalOSVID: OSV's id character set, [A-Za-z0-9:_.-]+ (Codex M70 R21
 // High-3).
 func canonicalOSVID(s string) bool {
-	if s == "" {
+	if s == "" || len(s) > MaxOSVFieldBytes {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
@@ -350,7 +398,7 @@ func canonicalOSVID(s string) bool {
 
 // canonicalToken: non-empty printable ASCII without whitespace.
 func canonicalToken(s string) bool {
-	if s == "" {
+	if s == "" || len(s) > MaxOSVFieldBytes {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
@@ -363,7 +411,7 @@ func canonicalToken(s string) bool {
 
 // canonicalEcosystem: non-empty printable ASCII, inner single spaces only.
 func canonicalEcosystem(s string) bool {
-	if s == "" || s[0] == ' ' || s[len(s)-1] == ' ' || strings.Contains(s, "  ") {
+	if s == "" || len(s) > MaxOSVFieldBytes || s[0] == ' ' || s[len(s)-1] == ' ' || strings.Contains(s, "  ") {
 		return false
 	}
 	for i := 0; i < len(s); i++ {

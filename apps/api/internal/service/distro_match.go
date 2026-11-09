@@ -600,8 +600,8 @@ func entryBinaries(es map[string]interface{}) ([]string, bool) {
 			return nil, false
 		}
 		name, isStr := m["binary_name"].(string)
-		if !isStr || name == "" {
-			return nil, false
+		if !isStr || name == "" || len(name) > client.MaxOSVFieldBytes || !cleanVersionText(name) {
+			return nil, false // not a usable list: the entry vouches for no binary
 		}
 		out = append(out, name)
 	}

@@ -80,11 +80,16 @@ const (
 	// 6: no future timestamps, R14; 7: every affected element validated,
 	// R15; 8: empty continuation pages refused (R16) and canonical identity
 	// strings (R18); 9: canonical record identities, exact CVE matching (R19);
-	// 10: unique record ids, OSV id character set (R21)).
-	distroCachePayloadVersion = 10
+	// 10: unique record ids, OSV id character set (R21); 11: affected purl
+	// agreement and field length bounds (R22)).
+	distroCachePayloadVersion = 11
 )
 
 // distroLinkStore is the repository surface the step uses.
+// maxEvidenceBytes bounds one link's encoded evidence (Codex M70 R22
+// High-3); field lengths are bounded at the source already.
+const maxEvidenceBytes = 16 << 10
+
 // watermark is the evidence a clear or a no-verdict check leaves on a link:
 // the source and revision of the data that was checked.
 func watermark(d distroData) []byte {
@@ -97,8 +102,7 @@ func watermark(d distroData) []byte {
 }
 
 type distroLinkStore interface {
-	ClearDistro(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error)
-	MarkDistroChecked(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error)
+	SettleDistroNoVerdict(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error)
 	ListScanTargetsBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error)
 	ListSbomLinks(ctx context.Context, sbomID uuid.UUID) ([]repository.SbomLink, error)
 	RelabelDistro(ctx context.Context, componentID, vulnID uuid.UUID, method model.MatchMethod, evidence []byte) (bool, error)
@@ -255,10 +259,8 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 		var changed bool
 		var err error
 		switch {
-		case l.clear:
-			changed, err = s.store.ClearDistro(txCtx, l.componentID, l.vulnID, l.evidence)
-		case l.mark:
-			changed, err = s.store.MarkDistroChecked(txCtx, l.componentID, l.vulnID, l.evidence)
+		case l.noVerdict:
+			changed, err = s.store.SettleDistroNoVerdict(txCtx, l.componentID, l.vulnID, l.evidence)
 		default:
 			changed, err = s.store.RelabelDistro(txCtx, l.componentID, l.vulnID, l.method, l.evidence)
 		}
@@ -381,6 +383,11 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 	byComp map[uuid.UUID][]repository.SbomLink) ([][]pendingLink, DistroScanReport, error) {
 	counts := DistroScanReport{NoVerdict: map[string]int{}}
 	var groups [][]pendingLink
+	// One encoded watermark per package, one encoded evidence per (target,
+	// CVE): links of duplicate components share the bytes (Codex M70 R22
+	// High-3).
+	wm := watermark(d)
+	memo := map[string][]byte{}
 	for _, w := range work {
 		if ctx.Err() != nil {
 			break
@@ -390,27 +397,27 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 			dec := d.decide(w.target, l.CVEID)
 			if dec.verdict == verdictNone {
 				counts.NoVerdict[dec.reason]++
+				// Settled on the row as it is when written (clear a distro
+				// label / leave the watermark): Codex M70 R22 High-1.
+				g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: wm})
 				if model.MatchMethod(l.Method).IsDistro() {
-					// The complete, current data no longer supports the
-					// stored distro label: clear it back to the method it
-					// had before (Codex M70 R12 High-1). The write is
-					// guarded by source and revision like a relabel.
-					g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, clear: true,
-						evidence: watermark(d)})
 					counts.Cleared++
-				} else {
-					// Leave the watermark: an overlapping scan with OLDER
-					// data cannot label this link afterwards (Codex M70 R13
-					// High-1). Written only when it changes.
-					g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, mark: true,
-						evidence: watermark(d)})
 				}
 				continue
 			}
-			dec.evidence.FetchedAt = fetchedAt.UTC()
-			raw, err := json.Marshal(dec.evidence)
-			if err != nil {
-				return groups, counts, fmt.Errorf("distro: encode evidence: %w", err)
+			mk := w.target.release + "\x00" + w.target.pkg + "\x00" + w.target.version + "\x00" + w.target.binary + "\x00" + l.CVEID
+			raw, seen := memo[mk]
+			if !seen {
+				dec.evidence.FetchedAt = fetchedAt.UTC()
+				b, err := json.Marshal(dec.evidence)
+				if err != nil {
+					return groups, counts, fmt.Errorf("distro: encode evidence: %w", err)
+				}
+				if len(b) > maxEvidenceBytes {
+					counts.NoVerdict["evidence_too_large"]++
+					continue
+				}
+				raw, memo[mk] = b, b
 			}
 			switch dec.verdict {
 			case verdictAffected:
@@ -668,6 +675,9 @@ func validDistroRecords(recs []distroRecord) bool {
 			return false // ids are unique in an answer (Codex M70 R21 High-2)
 		}
 		seen[r.ID] = true
+		if len(r.ID) > client.MaxOSVFieldBytes || !boundedEntries(r.Entries) {
+			return false // the field bounds the client enforces (R22)
+		}
 		if strings.TrimSpace(r.ID) == "" || len(r.CVEs) == 0 || len(r.Entries) == 0 || r.Releases < 1 || r.Packages < 1 ||
 			r.Modified == "" || normaliseModified(r.Modified) != r.Modified || !notFuture(r.Modified) {
 			return false
@@ -675,6 +685,29 @@ func validDistroRecords(recs []distroRecord) bool {
 		for _, c := range r.CVEs {
 			if !isCVEID(c) {
 				return false
+			}
+		}
+	}
+	return true
+}
+
+// boundedEntries: every string of the entries within client.MaxOSVFieldBytes.
+func boundedEntries(es []distroEntry) bool {
+	ok := func(s string) bool { return len(s) <= client.MaxOSVFieldBytes }
+	for _, e := range es {
+		if !ok(e.Ecosystem) {
+			return false
+		}
+		for _, v := range append(append([]string(nil), e.Versions...), e.Binaries...) {
+			if !ok(v) {
+				return false
+			}
+		}
+		for _, r := range e.Ranges {
+			for _, ev := range r.Events {
+				if !ok(ev.Introduced) || !ok(ev.Fixed) || !ok(ev.LastAffected) || !ok(ev.Limit) {
+					return false
+				}
 			}
 		}
 	}

@@ -519,7 +519,7 @@ func TestM70ClearDistro_RestoresPriorMethod(t *testing.T) {
 		`{"source_id":"A","data_modified":"2026-11-01T00:00:00.000000000Z"}`, // older data
 	} {
 		run(func(c context.Context) error {
-			changed, err := e.compRepo.ClearDistro(c, e.openssl, e.v0286, []byte(g))
+			changed, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286, []byte(g))
 			if changed {
 				t.Errorf("cleared with guard %s", g)
 			}
@@ -527,7 +527,7 @@ func TestM70ClearDistro_RestoresPriorMethod(t *testing.T) {
 		})
 	}
 	run(func(c context.Context) error {
-		_, err := e.compRepo.ClearDistro(c, e.openssl, e.v0286, []byte(`{"source_id":"A","data_modified":"2026-11-06T00:00:00.000000000Z"}`))
+		_, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286, []byte(`{"source_id":"A","data_modified":"2026-11-06T00:00:00.000000000Z"}`))
 		return err
 	})
 	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "nvd_cpe_unverified" || r.evidence.Status != "" ||
@@ -550,7 +550,7 @@ func TestM70Watermark_AndPriorMethod(t *testing.T) {
 	// A no-verdict check with NEWER data leaves its watermark; a delayed
 	// scan with OLDER data cannot then label the link.
 	run(func(c context.Context) error {
-		_, err := e.compRepo.MarkDistroChecked(c, e.openssl, e.vNoRec, []byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-09T00:00:00.000000000Z"}`))
+		_, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.vNoRec, []byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-09T00:00:00.000000000Z"}`))
 		return err
 	})
 	run(func(c context.Context) error {
@@ -584,7 +584,7 @@ func TestM70Watermark_AndPriorMethod(t *testing.T) {
 	}
 	// A clear restores it and keeps the watermark: older data cannot relabel.
 	run(func(c context.Context) error {
-		_, err := e.compRepo.ClearDistro(c, e.openssl, e.v0286, []byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-07T00:00:00.000000000Z"}`))
+		_, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286, []byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-07T00:00:00.000000000Z"}`))
 		return err
 	})
 	run(func(c context.Context) error {
@@ -704,7 +704,7 @@ func TestM70Watermark_AdvancesWhenRankRefuses(t *testing.T) {
 		return err
 	})
 	run(func(c context.Context) error {
-		changed, err := e.compRepo.ClearDistro(c, e.openssl, e.v0286,
+		changed, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286,
 			[]byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-02T00:00:00.000000000Z"}`))
 		if changed {
 			t.Error("an older clear went through after newer data was processed")
@@ -748,5 +748,37 @@ func TestM70DistroLoad_LoserUsesTheWinner(t *testing.T) {
 	l, hit, _, err := s.loadFetch(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "openssl"}, s.pacer())
 	if err != nil || len(l.recs) != 1 || l.recs[0].ID != "DSA-WIN" || hit {
 		t.Errorf("loser did not use the winner: err=%v hit=%v %d records", err, hit, len(l.recs))
+	}
+}
+
+// Codex M70 R22 High-1: the no-verdict settlement decides on the row as it
+// is when written: a distro label written by an older scan in between is
+// cleared, a non-distro link gets the watermark.
+func TestM70SettleNoVerdict_IsStateAdaptive(t *testing.T) {
+	e := m70Seed(t, "m70settle")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// An older scan labels the link after a newer scan read it as non-distro.
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286,
+			[]byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-05T00:00:00.000000000Z"}`))
+		if !changed {
+			t.Error("the newer no-verdict did not settle the link")
+		}
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "nvd_cpe_unverified" || r.evidence.Status != "" {
+		t.Errorf("%+v, want the older distro label cleared", r)
 	}
 }

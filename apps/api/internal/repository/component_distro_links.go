@@ -151,53 +151,41 @@ func (r *ComponentRepository) RelabelDistro(ctx context.Context, componentID, vu
 	return false, err
 }
 
-// ClearDistro takes a distro label the current data no longer supports back
-// to the method the link had before the distro step (evidence prior_method;
-// NULL = unknown when there was none or it is not a known method), and leaves
-// the data's watermark (source, revision) as the evidence. Only with data of
-// the SAME source at least as new. It reports whether a row changed.
-func (r *ComponentRepository) ClearDistro(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error) {
+// SettleDistroNoVerdict records that data of this source and revision gave
+// NO verdict for the link, deciding on the row as it is NOW (one statement,
+// so a concurrent relabel cannot slip between a read and this write — Codex
+// M70 R22 High-1):
+//
+//   - under a distro label: the label the data no longer supports is
+//     cleared back to the method the link had before the distro step
+//     (evidence prior_method; NULL = unknown when there was none or it is not
+//     a known method) — only with data of the SAME source at least as new;
+//   - otherwise: the watermark is stored as its match_evidence (the API shows
+//     evidence only for distro labels), so a scan holding OLDER data cannot
+//     label the link afterwards — only when it changes and is not older.
+//
+// It reports whether a row changed.
+func (r *ComponentRepository) SettleDistroNoVerdict(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error) {
 	if len(watermark) == 0 {
-		return false, fmt.Errorf("clear: needs the data's watermark")
+		return false, fmt.Errorf("no-verdict: needs the data's watermark")
 	}
 	res, err := r.q(ctx).ExecContext(ctx, `
 		UPDATE component_vulnerabilities cv
-		   SET match_method = CASE WHEN cv.match_evidence->>'prior_method' IN (`+priorMethodVocabulary+`)
-		                           THEN cv.match_evidence->>'prior_method' END,
+		   SET match_method = CASE
+		           WHEN cv.match_method IN (`+distroLabels+`) THEN
+		               CASE WHEN cv.match_evidence->>'prior_method' IN (`+priorMethodVocabulary+`)
+		                    THEN cv.match_evidence->>'prior_method' END
+		           ELSE cv.match_method END,
 		       match_evidence = `+withWM(`$3::jsonb`, "$3")+`
 		 WHERE cv.component_id = $1
 		   AND cv.vulnerability_id = $2
 		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
-		   AND cv.match_method IN (`+distroLabels+`)
-		   AND `+storedWMSource+` IS NOT DISTINCT FROM ($3::jsonb->>'source_id')
-		   AND `+storedWMRev+` <= COALESCE($3::jsonb->>'data_modified', '')`,
-		componentID, vulnID, string(watermark))
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n == 1, err
-}
-
-// MarkDistroChecked records on a link WITHOUT a distro label that data of
-// this source and revision gave no verdict for it: the watermark is stored as
-// its match_evidence (the API shows evidence only for distro labels), so an
-// overlapping scan holding OLDER data cannot label it afterwards. It writes
-// only when the watermark changes and is not older. It reports whether a row
-// changed.
-func (r *ComponentRepository) MarkDistroChecked(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error) {
-	if len(watermark) == 0 {
-		return false, fmt.Errorf("mark: needs the data's watermark")
-	}
-	res, err := r.q(ctx).ExecContext(ctx, `
-		UPDATE component_vulnerabilities cv
-		   SET match_evidence = `+withWM(`$3::jsonb`, "$3")+`
-		 WHERE cv.component_id = $1
-		   AND cv.vulnerability_id = $2
-		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
-		   AND COALESCE(cv.match_method, '') NOT IN (`+distroLabels+`)
-		   AND cv.match_evidence IS DISTINCT FROM `+withWM(`$3::jsonb`, "$3")+`
-		   AND `+distroFreshness("$3"),
+		   AND ((cv.match_method IN (`+distroLabels+`)
+		         AND `+storedWMSource+` IS NOT DISTINCT FROM ($3::jsonb->>'source_id')
+		         AND `+storedWMRev+` <= COALESCE($3::jsonb->>'data_modified', ''))
+		     OR (COALESCE(cv.match_method, '') NOT IN (`+distroLabels+`)
+		         AND cv.match_evidence IS DISTINCT FROM `+withWM(`$3::jsonb`, "$3")+`
+		         AND `+distroFreshness("$3")+`))`,
 		componentID, vulnID, string(watermark))
 	if err != nil {
 		return false, err
