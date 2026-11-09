@@ -31,6 +31,11 @@ func TestM60CVESyncLinker_LabelsAPreM60Link(t *testing.T) {
 	mock.ExpectExec(`UPDATE component_vulnerabilities\s+SET match_method = 'cve_sync_keyword'\s+WHERE component_id = \$1\s+AND vulnerability_id = \$2\s+AND match_method IS NULL`).
 		WithArgs(compID, vulnID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// M70: the fallback of a distro-labelled link follows (Codex M70 R30
+	// Medium-2).
+	mock.ExpectExec(`UPDATE component_vulnerabilities cv\s+SET match_evidence = jsonb_set\(cv.match_evidence, '\{prior_method\}'`).
+		WithArgs(compID, vulnID, "cve_sync_keyword", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, nil, "", false)
 	linked, err := j.linkCVEToTenantComponents(context.Background(), db, CVEInfo{ID: "CVE-2024-0001", Keywords: []string{"libfoo"}}, vulnID)

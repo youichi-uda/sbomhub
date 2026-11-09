@@ -70,7 +70,7 @@ func TestM70R12_NoVerdictClearsAStaleDistroLabel(t *testing.T) {
 	work := []distroWork{{comp: model.Component{ID: comp}, target: tgt}}
 	links := map[uuid.UUID][]repository.SbomLink{comp: {
 		// no OSV record for this CVE; the link was relabelled by an earlier scan
-		{ComponentID: comp, VulnerabilityID: vuln, CVEID: "CVE-2009-0591", Method: "distro_fixed"},
+		{ComponentID: comp, VulnerabilityID: vuln, CVEID: "CVE-2009-0591", Method: "distro_fixed", LabelSource: s.sourceID},
 	}}
 	rep := DistroScanReport{NoVerdict: map[string]int{}}
 	groups, err := s.fetchAndDecide(context.Background(), work, links, &rep)

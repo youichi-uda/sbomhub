@@ -1368,6 +1368,9 @@ func (j *CVESyncJob) linkCVEToTenantComponents(
 					   AND vulnerability_id = $2
 					   AND match_method IS NULL
 				`, componentID, vulnID)
+				if err == nil { // M70: a distro-labelled link's fallback (Codex M70 R30 Medium-2)
+					err = repository.PromoteDistroPriorMethod(ctx, q, componentID, vulnID, "cve_sync_keyword")
+				}
 			}
 		}
 		if err != nil {

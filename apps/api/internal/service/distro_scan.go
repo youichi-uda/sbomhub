@@ -141,15 +141,20 @@ func (d distroData) withdrawnClear(l repository.SbomLink, lookup func(id string)
 
 // settleNoVerdict is the one settlement of a no-verdict link.
 func (d distroData) settleNoVerdict(l repository.SbomLink, wm []byte, lookup func(id string) recordState, counts *DistroScanReport) pendingLink {
-	if model.MatchMethod(l.Method).IsDistro() {
-		counts.Cleared++
-	}
 	p, failed := d.withdrawnClear(l, lookup)
 	if failed {
 		counts.LookupFailures++
 	}
 	if p != nil {
+		counts.Cleared++
 		return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, withdrawnClear: true, evidence: p}
+	}
+	// Counted as cleared only when the write will clear it as read: the
+	// label's own evidence is of this source and not newer, and the data is
+	// not older than this source's watermark (Codex M70 R30 Low-3; mirrors
+	// SettleDistroNoVerdict).
+	if model.MatchMethod(l.Method).IsDistro() && l.LabelSource == d.sourceID && l.LabelRev <= d.revision && l.RevFor(d.sourceID) <= d.revision {
+		counts.Cleared++
 	}
 	return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: wm}
 }
@@ -725,17 +730,48 @@ func (s *DistroService) loadFetch(ctx context.Context, k distroFetchKey, pace fu
 	generation := s.cache.NextGeneration(ctx)
 	// Each page is reduced as it arrives; only this package's entries are
 	// kept, but the revision counts every record returned.
-	pages, err = s.osv.QueryPackageEach(ctx, k.ecosystem, k.pkg,
-		client.PackageQueryLimits{MaxPages: distroMaxPages, MaxTotalBytes: distroMaxBytesPerPackage}, pace,
-		func(page []client.OSVPackageRecord) error {
-			l.recs = append(l.recs, reduceOSVRecords(page, k.pkg)...)
-			if r := rawRevision(page); r > l.revision {
-				l.revision = r
-			}
-			return nil
-		})
+	walk := func() (w distroLoad, fp map[string]string, n int, err error) {
+		fp = map[string]string{}
+		n, err = s.osv.QueryPackageEach(ctx, k.ecosystem, k.pkg,
+			client.PackageQueryLimits{MaxPages: distroMaxPages, MaxTotalBytes: distroMaxBytesPerPackage}, pace,
+			func(page []client.OSVPackageRecord) error {
+				w.recs = append(w.recs, reduceOSVRecords(page, k.pkg)...)
+				if r := rawRevision(page); r > w.revision {
+					w.revision = r
+				}
+				for _, r := range page {
+					fp[r.ID] = r.Modified + "|" + r.Withdrawn
+				}
+				return nil
+			})
+		return w, fp, n, err
+	}
+	l, fp, pages, err := walk()
 	if err != nil {
 		return distroLoad{}, false, pages, err
+	}
+	// OSV pages are separate queries resumed from a cursor, not one
+	// snapshot: a record can change between pages, and the pages then mix
+	// revisions (Codex M70 R30 High-1). A multi-page answer is accepted only
+	// when two consecutive complete walks agree on every record's id,
+	// modified and withdrawn.
+	for walks := 1; pages > 1; walks++ {
+		if walks >= distroConsistencyWalks {
+			return distroLoad{}, false, pages, fmt.Errorf("distro: %s %q changed while its %d pages were read, %d times", k.ecosystem, k.pkg, pages, walks-1)
+		}
+		next, nfp, npages, nerr := walk()
+		pages += npages
+		if nerr != nil {
+			return distroLoad{}, false, pages, nerr
+		}
+		same := len(nfp) == len(fp)
+		for id, v := range nfp {
+			same = same && fp[id] == v
+		}
+		l, fp = next, nfp
+		if same {
+			break
+		}
 	}
 	l.fetchedAt = s.now().UTC()
 	payload, merr := json.Marshal(distroCachePayload{Version: distroCachePayloadVersion, Records: l.recs})
@@ -758,6 +794,10 @@ func (s *DistroService) loadFetch(ctx context.Context, k distroFetchKey, pace fu
 	}
 	return l, false, pages, nil
 }
+
+// distroConsistencyWalks bounds the complete walks of one multi-page
+// package answer (two must agree).
+const distroConsistencyWalks = 3
 
 // loadSlotted loads one package and hands it to use, holding one
 // process-wide slot (distroQuerySlots) from before the cache read until use
