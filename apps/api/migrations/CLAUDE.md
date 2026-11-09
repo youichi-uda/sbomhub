@@ -186,7 +186,7 @@ inherits the server default of `0` — wait forever.
 
 **Every new migration that acquires a lock conflicting with live traffic
 must declare a budget before the first statement that needs one** (the
-convention is to put it first in the file, and 063 / 064 / 065 / 066 / 067 / 068 do):
+convention is to put it first in the file, and 063 / 064 / 065 / 066 / 067 / 068 / 069 do):
 
 ```sql
 SET LOCAL lock_timeout = '5s';
@@ -384,15 +384,15 @@ first statement's ACCESS EXCLUSIVE held across the validation scan. See
 
 ### The legacy baseline
 
-Of the 68 existing migrations, the lint's own scan (648 statements)
+Of the 69 existing migrations, the lint's own scan (651 statements)
 classifies them as:
 
   - **5** take no contending lock and need nothing — `001_init`
     (everything targets relations it creates itself), `024`, `025`, `049`
     (data-only `UPDATE`s) and `065` (SHARE UPDATE EXCLUSIVE only).
-  - **5** take a contending lock and declare a budget — `063`, `064`,
-    `066`, `067` and `068`.
-    (Six files contain a `SET LOCAL lock_timeout`: `065` declares one
+  - **6** take a contending lock and declare a budget — `063`, `064`,
+    `066`, `067`, `068` and `069`.
+    (Seven files contain a `SET LOCAL lock_timeout`: `065` declares one
     for a statement the lint does not require it for. These counts are
     about locks, not budget lines.)
   - **58** predate the convention and are grandfathered.

@@ -2600,6 +2600,10 @@
         "nullable": true,
         "type": "numeric(3,1)"
       },
+      "cvss_version": {
+        "nullable": true,
+        "type": "character varying(3)"
+      },
       "description": {
         "nullable": true,
         "type": "text"

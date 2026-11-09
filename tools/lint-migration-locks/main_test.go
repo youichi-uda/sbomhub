@@ -1272,9 +1272,9 @@ func TestBaseline_MatchesRealMigrationsDirectory(t *testing.T) {
 	if sum.total() != len(scans) {
 		t.Errorf("summary buckets sum to %d, want %d", sum.total(), len(scans))
 	}
-	if len(scans) != 68 || sum.statements != 648 || sum.clean != 5 || sum.budgeted != 5 || sum.waived != 58 || sum.missing != 0 {
+	if len(scans) != 69 || sum.statements != 651 || sum.clean != 5 || sum.budgeted != 6 || sum.waived != 58 || sum.missing != 0 {
 		t.Errorf("documented totals drifted: %d migration(s) / %d statement(s), %+v "+
-			"(docs say 68 / 648, 5 clean / 5 budgeted / 58 waived); "+
+			"(docs say 69 / 651, 5 clean / 6 budgeted / 58 waived); "+
 			"update the package doc, the workflow header and migrations/CLAUDE.md together with this assertion",
 			len(scans), sum.statements, sum)
 	}
