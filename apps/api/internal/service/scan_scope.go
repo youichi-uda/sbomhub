@@ -207,6 +207,8 @@ type pendingLink struct {
 	// withdrawnClear (M70): the label's evidence records were all withdrawn;
 	// evidence then holds {source_id, records, wm_rev} (ClearDistroWithdrawn).
 	withdrawnClear bool
+	// wasDistro (M70): the link was read under a distro label.
+	wasDistro bool
 }
 
 // linkWriter is the one repository call the write phase makes per link.
@@ -226,6 +228,15 @@ type linkWriter func(ctx context.Context, l pendingLink) error
 // concurrent scan of the same SBOM cannot be attributed to this one. It is 0
 // unless the transaction committed.
 func (s ScanScope) writeLinks(ctx context.Context, sbomID uuid.UUID, groups [][]pendingLink, write linkWriter) (refused, newVulns int, err error) {
+	return s.writeLinksReporting(ctx, sbomID, groups, write, nil)
+}
+
+// writeLinksReporting is writeLinks that calls groupDone after each group
+// with whether its savepoint was released (true) or rolled back; a caller
+// counting what was written publishes a group's counts only then, and only
+// when the whole call returns no error (the transaction committed).
+func (s ScanScope) writeLinksReporting(ctx context.Context, sbomID uuid.UUID, groups [][]pendingLink, write linkWriter,
+	groupDone func(released bool)) (refused, newVulns int, err error) {
 	total := 0
 	for _, g := range groups {
 		total += len(g)
@@ -264,10 +275,16 @@ func (s ScanScope) writeLinks(ctx context.Context, sbomID uuid.UUID, groups [][]
 				if _, err := tx.ExecContext(txCtx, `ROLLBACK TO SAVEPOINT scan_item`); err != nil {
 					return fmt.Errorf("rollback to savepoint: %w", err)
 				}
+				if groupDone != nil {
+					groupDone(false)
+				}
 				continue
 			}
 			if _, err := tx.ExecContext(txCtx, `RELEASE SAVEPOINT scan_item`); err != nil {
 				return fmt.Errorf("release savepoint: %w", err)
+			}
+			if groupDone != nil {
+				groupDone(true)
 			}
 		}
 		if err := tx.QueryRowContext(txCtx, sbomVulnCountSQL, sbomID).Scan(&after); err != nil {

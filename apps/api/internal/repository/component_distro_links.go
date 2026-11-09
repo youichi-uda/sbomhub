@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -137,9 +138,10 @@ const carriedWM = `(CASE WHEN ` + storedWMSource + ` IS NULL THEN '{}'::jsonb
 		        ELSE jsonb_build_object(` + storedWMSource + `, ` + storedWMRev + `) END
 		    || COALESCE(cv.match_evidence->'wm_by_source', '{}'::jsonb))`
 
-// carriedTombstones: withdrawn_by_source {source_id: [record id]}, the
-// records a withdrawn clear found withdrawn (Codex M70 R29 High-2), carried
-// across every write.
+// carriedTombstones: withdrawn_by_source {source_id: {record id: revision}},
+// the records a withdrawn clear found withdrawn or edited out of the package
+// and the revision of that change (Codex M70 R29 High-2, R32 Medium-2),
+// carried across every write.
 const carriedTombstones = `COALESCE(cv.match_evidence->'withdrawn_by_source', '{}'::jsonb)`
 
 // withWM appends the watermark of the JSON parameter p (and the carried
@@ -151,12 +153,16 @@ func withWM(e, p string) string {
 }
 
 // notTombstoned: the evidence p cites no record its source was found to
-// have withdrawn on this link (Codex M70 R29 High-2): a scan that read the
-// record before its withdrawal cannot bring the label back.
+// have withdrawn (or edited out) at a revision the data p rests on is not
+// newer than (Codex M70 R29 High-2): a scan that read the record before the
+// change cannot bring the label back, while data from after it (the record
+// restored) can.
 func notTombstoned(p string) string {
-	return `NOT COALESCE((cv.match_evidence->'withdrawn_by_source'->(` + p + `::jsonb->>'source_id'))
-		        ?| ARRAY(SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(` + p + `::jsonb->'records') = 'array'
-		                                                      THEN ` + p + `::jsonb->'records' ELSE '[]'::jsonb END)), false)`
+	return `NOT EXISTS (
+		    SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(` + p + `::jsonb->'records') = 'array'
+		                                                 THEN ` + p + `::jsonb->'records' ELSE '[]'::jsonb END) rec(id)
+		     WHERE cv.match_evidence->'withdrawn_by_source'->(` + p + `::jsonb->>'source_id')->>rec.id
+		           >= COALESCE(` + p + `::jsonb->>'data_modified', ''))`
 }
 
 // relabelDistroFreshness is the guard RelabelDistro applies.
@@ -245,8 +251,17 @@ func (r *ComponentRepository) RelabelDistro(ctx context.Context, componentID, vu
 //
 // It reports whether a row changed.
 func (r *ComponentRepository) SettleDistroNoVerdict(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error) {
+	changed, _, err := r.SettleDistroNoVerdictOutcome(ctx, componentID, vulnID, watermark)
+	return changed, err
+}
+
+// SettleDistroNoVerdictOutcome is SettleDistroNoVerdict that also reports
+// whether the row, when changed, still carries a distro label: a link read
+// under a distro label that no longer does was cleared (Codex M70 R32
+// Low-4: the report counts what was written).
+func (r *ComponentRepository) SettleDistroNoVerdictOutcome(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (changed, stillDistro bool, err error) {
 	if len(watermark) == 0 {
-		return false, fmt.Errorf("no-verdict: needs the data's watermark")
+		return false, false, fmt.Errorf("no-verdict: needs the data's watermark")
 	}
 	// clear: a distro label resting on THIS source's evidence, not newer.
 	clear := `(cv.match_method IN (` + distroLabels + `)
@@ -256,7 +271,7 @@ func (r *ComponentRepository) SettleDistroNoVerdict(ctx context.Context, compone
 	// the check is recorded in its watermark (Codex M70 R29 High-1).
 	keep := `(cv.match_method IN (` + distroLabels + `) AND NOT ` + clear + `)`
 	newEvidence := `CASE WHEN ` + keep + ` THEN ` + withWM(`cv.match_evidence`, "$3") + ` ELSE ` + withWM(`$3::jsonb`, "$3") + ` END`
-	res, err := r.q(ctx).ExecContext(ctx, `
+	err = r.q(ctx).QueryRowContext(ctx, `
 		UPDATE component_vulnerabilities cv
 		   SET match_method = CASE
 		           WHEN `+clear+` THEN
@@ -268,13 +283,16 @@ func (r *ComponentRepository) SettleDistroNoVerdict(ctx context.Context, compone
 		   AND cv.vulnerability_id = $2
 		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
 		   AND `+distroFreshness("$3")+`
-		   AND (`+clear+` OR cv.match_evidence IS DISTINCT FROM `+newEvidence+`)`,
-		componentID, vulnID, string(watermark))
-	if err != nil {
-		return false, err
+		   AND (`+clear+` OR cv.match_evidence IS DISTINCT FROM `+newEvidence+`)
+		RETURNING COALESCE(cv.match_method IN (`+distroLabels+`), false)`,
+		componentID, vulnID, string(watermark)).Scan(&stillDistro)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
 	}
-	n, err := res.RowsAffected()
-	return n == 1, err
+	if err != nil {
+		return false, false, err
+	}
+	return true, stillDistro, nil
 }
 
 // withdrawnWMRev: the source's watermark after a withdrawn clear — the
@@ -290,9 +308,10 @@ const withdrawnWMRev = `GREATEST(COALESCE($3::jsonb->>'wm_rev', ''), COALESCE($3
 // as it is, and applies only when the row still rests on exactly that
 // evidence — the same source, the same record list and the same watermark
 // it was read with (one statement, so nothing slips in between). p is
-// {"source_id", "records", "wm_rev", "data_modified"}; the source's
-// watermark becomes the newer of wm_rev and data_modified, and the records
-// are kept as tombstones. It reports whether a row changed.
+// {"source_id", "records", "tombstones" {id: revision}, "wm_rev",
+// "data_modified"}; the source's watermark becomes the newer of wm_rev and
+// data_modified, and the tombstones are kept. It reports whether a row
+// changed (= the label was cleared).
 func (r *ComponentRepository) ClearDistroWithdrawn(ctx context.Context, componentID, vulnID uuid.UUID, p []byte) (bool, error) {
 	if len(p) == 0 {
 		return false, fmt.Errorf("withdrawn clear: needs the evidence it rests on")
@@ -304,12 +323,15 @@ func (r *ComponentRepository) ClearDistroWithdrawn(ctx context.Context, componen
 		       match_evidence = jsonb_build_object('wm_source', ($3::jsonb->>'source_id'), 'wm_rev', `+withdrawnWMRev+`,
 		           'wm_by_source', `+carriedWM+` || jsonb_build_object($3::jsonb->>'source_id', `+withdrawnWMRev+`),
 		           'withdrawn_by_source', `+carriedTombstones+` || jsonb_build_object($3::jsonb->>'source_id',
-		               COALESCE(cv.match_evidence->'withdrawn_by_source'->($3::jsonb->>'source_id'), '[]'::jsonb) || ($3::jsonb->'records')))
+		               (CASE WHEN jsonb_typeof(cv.match_evidence->'withdrawn_by_source'->($3::jsonb->>'source_id')) = 'object'
+		                     THEN cv.match_evidence->'withdrawn_by_source'->($3::jsonb->>'source_id') ELSE '{}'::jsonb END)
+		               || ($3::jsonb->'tombstones')))
 		 WHERE cv.component_id = $1
 		   AND cv.vulnerability_id = $2
 		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
 		   AND cv.match_method IN (`+distroLabels+`)
 		   AND jsonb_typeof($3::jsonb->'records') = 'array'
+		   AND jsonb_typeof($3::jsonb->'tombstones') = 'object'
 		   AND ($3::jsonb->>'source_id') IS NOT NULL
 		   AND jsonb_array_length($3::jsonb->'records') > 0
 		   AND cv.match_evidence->>'source_id' IS NOT DISTINCT FROM ($3::jsonb->>'source_id')

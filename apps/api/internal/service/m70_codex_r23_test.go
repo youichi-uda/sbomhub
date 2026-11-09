@@ -61,7 +61,7 @@ func TestM70R23_OversizedEvidenceSettles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 1 || len(groups[0]) != 1 || !groups[0][0].noVerdict || counts.NoVerdict["evidence_too_large"] != 1 || counts.Cleared != 1 {
+	if len(groups) != 1 || len(groups[0]) != 1 || !groups[0][0].noVerdict || counts.NoVerdict["evidence_too_large"] != 1 || !groups[0][0].wasDistro {
 		t.Errorf("groups=%+v counts=%+v, want one no-verdict settlement", groups, counts)
 	}
 	_ = ids

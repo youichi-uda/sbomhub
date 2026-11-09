@@ -68,7 +68,7 @@ func TestM70R27_WithdrawnClearKeepsWatermark(t *testing.T) {
 		WMRev    string   `json:"wm_rev"`
 	}
 	_ = json.Unmarshal(pl.evidence, &p)
-	if p.WMRev != "10" || p.SourceID != "S" || len(p.Records) != 1 || p.Records[0] != "A" || counts.Cleared != 1 {
+	if p.WMRev != "10" || p.SourceID != "S" || len(p.Records) != 1 || p.Records[0] != "A" || !pl.wasDistro {
 		t.Errorf("clear %s counts %+v", pl.evidence, counts)
 	}
 	// Evidence of another source, or a record withdrawn before the label's

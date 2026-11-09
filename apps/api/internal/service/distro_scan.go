@@ -37,6 +37,7 @@ package service
 //     failure — the links keep the M60 labels, exactly as before M70.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -83,8 +84,9 @@ const (
 	// 10: unique record ids, OSV id character set (R21); 11: affected purl
 	// agreement and field length bounds (R22); 12: purl namespace,
 	// package-less GIT entries (R23); 13: strict affected purl, Ubuntu
-	// binaries validated (R27); 14: purl distro / arch qualifiers (R31)).
-	distroCachePayloadVersion = 14
+	// binaries validated (R27); 14: purl distro / arch qualifiers (R31);
+	// 15: rpm distro qualifier, strict subpath (R32)).
+	distroCachePayloadVersion = 15
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -92,11 +94,13 @@ const (
 // High-3); field lengths are bounded at the source already.
 const maxEvidenceBytes = 16 << 10
 
-// recordState is what a lookup by id said about one record.
+// recordState is what a lookup by id said about one record, for the
+// queried package.
 type recordState struct {
-	withdrawn bool
-	rev       string // the withdrawal's normalised revision
-	failed    bool   // the lookup failed: unknown
+	withdrawn bool   // withdrawn (gone from every query)
+	editedOut bool   // active, but no longer naming the package (Codex M70 R32 Medium-2)
+	rev       string // the withdrawal's / the edit's normalised revision
+	failed    bool   // the lookup failed, or contradicts the package query: unknown
 }
 
 // withdrawnClear decides whether a no-verdict link's distro label rests
@@ -126,21 +130,28 @@ func (d distroData) withdrawnClear(l repository.SbomLink, lookup func(id string)
 			return nil, false // still in the data: not a withdrawal
 		}
 	}
+	tombs := map[string]string{}
 	for _, id := range l.Records {
 		st := lookup(id)
 		switch {
 		case st.failed:
 			return nil, true
-		case !st.withdrawn, st.rev < l.LabelRev:
+		case st.editedOut && st.rev < l.LabelRev:
+			// unchanged since the label, yet no longer naming the package:
+			// contradictory data
+			return nil, true
+		case !st.withdrawn && !st.editedOut, st.rev < l.LabelRev:
 			return nil, false
 		}
+		tombs[id] = st.rev
 	}
 	b, _ := json.Marshal(struct {
-		SourceID     string   `json:"source_id"`
-		Records      []string `json:"records"`
-		WMRev        string   `json:"wm_rev"`
-		DataModified string   `json:"data_modified"`
-	}{d.sourceID, l.Records, wmRev, d.revision})
+		SourceID     string            `json:"source_id"`
+		Records      []string          `json:"records"`
+		Tombstones   map[string]string `json:"tombstones"`
+		WMRev        string            `json:"wm_rev"`
+		DataModified string            `json:"data_modified"`
+	}{d.sourceID, l.Records, tombs, wmRev, d.revision})
 	return b, false
 }
 
@@ -154,45 +165,57 @@ func (d distroData) settleNoVerdict(l repository.SbomLink, wm []byte, lookup fun
 		counts.LookupFailures++
 		return pendingLink{}, false
 	}
+	// Clears are counted from what the write did, not predicted (Codex M70
+	// R30 Low-3, R32 Low-4).
+	was := model.MatchMethod(l.Method).IsDistro()
 	if p != nil {
-		counts.Cleared++
-		return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, withdrawnClear: true, evidence: p}, true
+		return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, withdrawnClear: true, evidence: p, wasDistro: was}, true
 	}
-	// Counted as cleared only when the write will clear it as read: the
-	// label's own evidence is of this source and not newer, and the data is
-	// not older than this source's watermark (Codex M70 R30 Low-3; mirrors
-	// SettleDistroNoVerdict).
-	if model.MatchMethod(l.Method).IsDistro() && l.LabelSource == d.sourceID && l.LabelRev <= d.revision && l.RevFor(d.sourceID) <= d.revision {
-		counts.Cleared++
-	}
-	return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: wm}, true
+	return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: wm, wasDistro: was}, true
 }
 
-// withdrawalResolver looks a record up by id, memoised and paced like the
-// package queries.
-func (s *DistroService) withdrawalResolver(ctx context.Context, pace func(context.Context) error) func(string) recordState {
-	memo := map[string]recordState{}
-	return func(id string) recordState {
+// withdrawalResolver looks records up by id, memoised and paced like the
+// package queries; the returned function judges a record for the queried
+// package (family, pkg).
+func (s *DistroService) withdrawalResolver(ctx context.Context, pace func(context.Context) error) func(family, pkg string) func(string) recordState {
+	type got struct {
+		st  client.OSVRecordState
+		err error
+	}
+	memo := map[string]got{}
+	fetch := func(id string) got {
 		if v, ok := memo[id]; ok {
 			return v
 		}
-		st := recordState{failed: true}
-		if pace(ctx) == nil {
-			modified, withdrawn, err := s.osv.GetRecordState(ctx, id)
-			switch {
-			case err != nil:
-			case withdrawn == "":
-				st = recordState{}
-			default:
-				rev := normaliseModified(withdrawn)
-				if m := normaliseModified(modified); m > rev {
+		g := got{err: fmt.Errorf("not looked up")}
+		if err := pace(ctx); err == nil {
+			st, err := s.osv.GetRecordState(ctx, id)
+			g = got{st: st, err: err}
+		}
+		memo[id] = g
+		return g
+	}
+	return func(family, pkg string) func(string) recordState {
+		return func(id string) recordState {
+			g := fetch(id)
+			if g.err != nil {
+				return recordState{failed: true}
+			}
+			if g.st.Withdrawn != "" {
+				rev := normaliseModified(g.st.Withdrawn)
+				if m := normaliseModified(g.st.Modified); m > rev {
 					rev = m
 				}
-				st = recordState{withdrawn: rev != "", rev: rev, failed: rev == ""}
+				return recordState{withdrawn: rev != "", rev: rev, failed: rev == ""}
 			}
+			if g.st.Names(family, pkg) {
+				// active and still naming the package, yet absent from its
+				// query: the query is incomplete
+				return recordState{failed: true}
+			}
+			rev := normaliseModified(g.st.Modified)
+			return recordState{editedOut: rev != "", rev: rev, failed: rev == ""}
 		}
-		memo[id] = st
-		return st
 	}
 }
 
@@ -208,7 +231,7 @@ func watermark(d distroData) []byte {
 }
 
 type distroLinkStore interface {
-	SettleDistroNoVerdict(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error)
+	SettleDistroNoVerdictOutcome(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (changed, stillDistro bool, err error)
 	ClearDistroWithdrawn(ctx context.Context, componentID, vulnID uuid.UUID, p []byte) (bool, error)
 	ListScanTargetsBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error)
 	ListSbomLinks(ctx context.Context, sbomID uuid.UUID) ([]repository.SbomLink, error)
@@ -217,7 +240,7 @@ type distroLinkStore interface {
 
 // distroFetcher is the OSV surface the step uses.
 type distroFetcher interface {
-	GetRecordState(ctx context.Context, id string) (modified, withdrawn string, err error)
+	GetRecordState(ctx context.Context, id string) (client.OSVRecordState, error)
 	QueryPackageEach(ctx context.Context, ecosystem, name string, lim client.PackageQueryLimits,
 		before func(context.Context) error, onPage func([]client.OSVPackageRecord) error) (int, error)
 }
@@ -364,32 +387,80 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 		return rep, err
 	}
 
-	// Phase 3 — write.
-	relabelled := 0
-	refused, _, werr := scope.writeLinks(ctx, sbomID, groups, func(txCtx context.Context, l pendingLink) error {
-		var changed bool
+	// Phase 3 — write, in one fixed row order (component, then
+	// vulnerability) whatever order the fetches completed in (Codex M70 R32
+	// Medium-3: concurrent writers lock rows in a consistent order).
+	sortPendingGroups(groups)
+	var tally writeTally
+	refused, _, werr := scope.writeLinksReporting(ctx, sbomID, groups, func(txCtx context.Context, l pendingLink) error {
+		var changed, stillDistro bool
 		var err error
 		switch {
 		case l.withdrawnClear:
 			changed, err = s.store.ClearDistroWithdrawn(txCtx, l.componentID, l.vulnID, l.evidence)
 		case l.noVerdict:
-			changed, err = s.store.SettleDistroNoVerdict(txCtx, l.componentID, l.vulnID, l.evidence)
+			changed, stillDistro, err = s.store.SettleDistroNoVerdictOutcome(txCtx, l.componentID, l.vulnID, l.evidence)
 		default:
 			changed, err = s.store.RelabelDistro(txCtx, l.componentID, l.vulnID, l.method, l.evidence)
+			stillDistro = true
 		}
-		if changed {
-			relabelled++
+		if err == nil {
+			tally.note(l, changed, stillDistro)
 		}
 		return err
-	})
+	}, tally.groupDone)
 	if werr != nil {
 		slog.Warn("distro: write phase failed; no relabel of this step was committed", "sbom_id", sbomID, "error", werr)
-		relabelled = 0
+		tally = writeTally{}
 	}
 	rep.RefusedWrites = refused
-	rep.Relabelled = relabelled
+	rep.Relabelled = tally.relabelled
+	rep.Cleared = tally.cleared
 	s.logSummary(sbomID, rep)
 	return rep, rep.incompleteErr()
+}
+
+// writeTally counts what the write phase did, per savepoint group: a
+// group's counts are published only when its savepoint is released (and
+// discarded by the caller if the transaction then fails).
+type writeTally struct {
+	relabelled, cleared int // published
+	curR, curC          int // the current group's
+}
+
+// note records one successful write: changed rows count as relabelled;
+// a settlement of a link read under a distro label that no longer carries
+// one cleared it.
+func (t *writeTally) note(l pendingLink, changed, stillDistro bool) {
+	if !changed {
+		return
+	}
+	t.curR++
+	if (l.noVerdict || l.withdrawnClear) && l.wasDistro && !stillDistro {
+		t.curC++
+	}
+}
+
+func (t *writeTally) groupDone(released bool) {
+	if released {
+		t.relabelled += t.curR
+		t.cleared += t.curC
+	}
+	t.curR, t.curC = 0, 0
+}
+
+// sortPendingGroups orders the groups by component id and each group's
+// links by vulnerability id.
+func sortPendingGroups(groups [][]pendingLink) {
+	for _, g := range groups {
+		sort.Slice(g, func(i, j int) bool { return bytes.Compare(g[i].vulnID[:], g[j].vulnID[:]) < 0 })
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		if len(groups[i]) == 0 || len(groups[j]) == 0 {
+			return len(groups[i]) > len(groups[j])
+		}
+		return bytes.Compare(groups[i][0].componentID[:], groups[j][0].componentID[:]) < 0
+	})
 }
 
 // distroWork is one targeted component.
@@ -466,7 +537,6 @@ func (s *DistroService) fetchAndDecide(ctx context.Context, work []distroWork, b
 				default:
 					groups = append(groups, g...)
 					rep.Affected += counts.Affected
-					rep.Cleared += counts.Cleared
 					rep.LookupFailures += counts.LookupFailures
 					rep.Unfixed += counts.Unfixed
 					rep.Fixed += counts.Fixed
@@ -494,7 +564,7 @@ func (s *DistroService) fetchAndDecide(ctx context.Context, work []distroWork, b
 
 // decideKey decides every link of the components of one package.
 func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []distroWork,
-	byComp map[uuid.UUID][]repository.SbomLink, lookup func(id string) recordState) ([][]pendingLink, DistroScanReport, error) {
+	byComp map[uuid.UUID][]repository.SbomLink, lookupFor func(family, pkg string) func(string) recordState) ([][]pendingLink, DistroScanReport, error) {
 	counts := DistroScanReport{NoVerdict: map[string]int{}}
 	var groups [][]pendingLink
 	// One encoded watermark per package, one encoded evidence per (target,
@@ -507,6 +577,10 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 			break
 		}
 		var g []pendingLink
+		var lookup func(string) recordState
+		if lookupFor != nil {
+			lookup = lookupFor(w.target.query, w.target.pkg)
+		}
 		for _, l := range byComp[w.comp.ID] {
 			if ctx.Err() != nil { // Codex M70 R26 Medium-2
 				break

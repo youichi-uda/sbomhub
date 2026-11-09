@@ -77,43 +77,47 @@ type osvPackageQueryResponse struct {
 // GetRecordState reads ONE record by id (GET /vulns/{id}), which, unlike the
 // package query, also returns WITHDRAWN records (Codex M70 R24 High-1): its
 // modified and withdrawn times. A 404 is ErrOSVNotFound.
-func (c *OSVClient) GetRecordState(ctx context.Context, id string) (modified, withdrawn string, err error) {
+func (c *OSVClient) GetRecordState(ctx context.Context, id string) (OSVRecordState, error) {
+	var none OSVRecordState
 	if c.offline {
-		return "", "", ErrOSVOffline
+		return none, ErrOSVOffline
 	}
 	if !canonicalOSVID(id) {
-		return "", "", fmt.Errorf("osv: %q is not an OSV id", id)
+		return none, fmt.Errorf("osv: %q is not an OSV id", id)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/vulns/"+neturl.PathEscape(id), nil)
 	if err != nil {
-		return "", "", err
+		return none, err
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("osv: get record: %w", err)
+		return none, fmt.Errorf("osv: get record: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return "", "", ErrOSVNotFound
+		return none, ErrOSVNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("osv: get record returned status %d", resp.StatusCode)
+		return none, fmt.Errorf("osv: get record returned status %d", resp.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxOSVResponseBytes+1))
 	if err != nil || len(raw) > maxOSVResponseBytes {
-		return "", "", fmt.Errorf("osv: read record: bad body")
+		return none, fmt.Errorf("osv: read record: bad body")
 	}
 	var r struct {
 		ID        string `json:"id"`
 		Modified  string `json:"modified"`
 		Withdrawn string `json:"withdrawn"`
+		Affected  []struct {
+			Package *OSVPackage `json:"package"`
+		} `json:"affected"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil || r.ID != id {
-		return "", "", fmt.Errorf("osv: record %q: not the record asked for", id)
+		return none, fmt.Errorf("osv: record %q: not the record asked for", id)
 	}
 	if r.Modified == "" { // required by the schema (Codex M70 R31 Medium-3)
-		return "", "", fmt.Errorf("osv: record %q has no modified time", id)
+		return none, fmt.Errorf("osv: record %q has no modified time", id)
 	}
 	latest := time.Now().Add(maxOSVTimestampSkew)
 	for _, ts := range []string{r.Modified, r.Withdrawn} {
@@ -122,10 +126,39 @@ func (c *OSVClient) GetRecordState(ctx context.Context, id string) (modified, wi
 		}
 		t, err := time.Parse(time.RFC3339Nano, ts)
 		if err != nil || t.After(latest) {
-			return "", "", fmt.Errorf("osv: record %q has a malformed or future time", id)
+			return none, fmt.Errorf("osv: record %q has a malformed or future time", id)
 		}
 	}
-	return r.Modified, r.Withdrawn, nil
+	st := OSVRecordState{Modified: r.Modified, Withdrawn: r.Withdrawn}
+	for i, a := range r.Affected {
+		if a.Package == nil {
+			continue // a package-less (GIT) entry
+		}
+		if !canonicalToken(a.Package.Name) || !canonicalEcosystem(a.Package.Ecosystem) {
+			return none, fmt.Errorf("osv: record %q affected[%d]: package not canonical", id, i)
+		}
+		st.Packages = append(st.Packages, OSVPackage{Name: a.Package.Name, Ecosystem: a.Package.Ecosystem})
+	}
+	return st, nil
+}
+
+// OSVRecordState is what a lookup by id tells about one record: its times
+// and the packages it names now (Codex M70 R32 Medium-2: a record edited to
+// no longer name a package leaves the package's query without withdrawal).
+type OSVRecordState struct {
+	Modified, Withdrawn string
+	Packages            []OSVPackage
+}
+
+// Names reports whether the record names package name in ecosystem family
+// (the queried "Debian" covers "Debian:11"...).
+func (s OSVRecordState) Names(family, name string) bool {
+	for _, p := range s.Packages {
+		if p.Name == name && (p.Ecosystem == family || strings.HasPrefix(p.Ecosystem, family+":")) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseStrictPurl parses a package URL fully (Codex M70 R27 High-1):
@@ -142,8 +175,10 @@ func parseStrictPurl(purl string) (segs []string, quals map[string]string, err e
 	}
 	quals = map[string]string{}
 	if i := strings.IndexByte(rest, '#'); i >= 0 {
-		for _, seg := range strings.Split(strings.Trim(rest[i+1:], "/"), "/") {
-			if v, err := neturl.PathUnescape(seg); err != nil || v == "" || v == "." || v == ".." {
+		// Not trimmed (Codex M70 R32 Low-5): a leading / trailing / doubled
+		// slash is an empty segment.
+		for _, seg := range strings.Split(rest[i+1:], "/") {
+			if v, err := neturl.PathUnescape(seg); err != nil || v == "" || v == "." || v == ".." || strings.Contains(v, "/") {
 				return nil, nil, fmt.Errorf("bad subpath")
 			}
 		}
@@ -211,6 +246,9 @@ var (
 // codename is one "/" part of Ubuntu Pro streams such as "esm-apps/xenial"
 // or "trusty/esm").
 func purlQualifiersAgree(ecosystem, typ string, quals map[string]string) error {
+	if typ == "rpm" {
+		return rpmDistroAgrees(ecosystem, quals)
+	}
 	if typ != "deb" {
 		return nil
 	}
@@ -266,6 +304,41 @@ func purlQualifiersAgree(ecosystem, typ string, quals map[string]string) error {
 		return fmt.Errorf("distro=%s does not name %s (%s)", distro, ecosystem, want)
 	}
 	return nil
+}
+
+// rpmDistroAgrees: on an AlmaLinux / Rocky Linux entry, a purl distro
+// qualifier ("almalinux-9", "rocky-linux-9.3", "el9") names the entry's
+// major release (Codex M70 R32 High-1). A qualifier without a release
+// number, or naming another family, is refused.
+func rpmDistroAgrees(ecosystem string, quals map[string]string) error {
+	distro, ok := quals["distro"]
+	if !ok {
+		return nil
+	}
+	family, release, _ := strings.Cut(ecosystem, ":")
+	var prefixes []string
+	switch family {
+	case "AlmaLinux":
+		prefixes = []string{"almalinux-", "alma-", "el"}
+	case "Rocky Linux":
+		prefixes = []string{"rocky-linux-", "rocky-", "el"}
+	default:
+		return nil
+	}
+	major, _, _ := strings.Cut(release, ".")
+	d := strings.ToLower(distro)
+	for _, p := range prefixes {
+		rest, ok := strings.CutPrefix(d, p)
+		if !ok {
+			continue
+		}
+		got, _, _ := strings.Cut(rest, ".")
+		if got != "" && got == major {
+			return nil
+		}
+		return fmt.Errorf("distro=%s does not name %s", distro, ecosystem)
+	}
+	return fmt.Errorf("distro=%s is not a %s release", distro, family)
 }
 
 // validateUbuntuBinaries checks Ubuntu's ecosystem_specific.binaries, when

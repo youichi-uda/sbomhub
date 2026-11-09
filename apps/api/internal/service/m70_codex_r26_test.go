@@ -37,7 +37,8 @@ func TestM70R26_OversizedEvidenceResolvesWithdrawal(t *testing.T) {
 		}
 		return recordState{failed: true}
 	}
-	groups, counts, err := decideKey(context.Background(), d, time.Time{}, []distroWork{{comp: model.Component{ID: comp}, target: tgt}}, links, lookup)
+	groups, counts, err := decideKey(context.Background(), d, time.Time{}, []distroWork{{comp: model.Component{ID: comp}, target: tgt}}, links,
+		func(string, string) func(string) recordState { return lookup })
 	if err != nil {
 		t.Fatal(err)
 	}

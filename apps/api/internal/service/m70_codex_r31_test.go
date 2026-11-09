@@ -92,7 +92,7 @@ func TestM70R31_WithdrawnClearAtEqualRevision(t *testing.T) {
 func TestM70R31_RecordLookupNeedsModified(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"id":"A"}`) }))
 	defer srv.Close()
-	if _, _, err := client.NewOSVClient().WithBaseURL(srv.URL).GetRecordState(context.Background(), "A"); err == nil {
+	if _, err := client.NewOSVClient().WithBaseURL(srv.URL).GetRecordState(context.Background(), "A"); err == nil {
 		t.Error("record without modified accepted")
 	}
 }

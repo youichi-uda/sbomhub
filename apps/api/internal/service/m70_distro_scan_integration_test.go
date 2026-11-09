@@ -23,6 +23,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/sbomhub/sbomhub/internal/cache"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
@@ -837,10 +838,10 @@ func TestM70ClearDistroWithdrawn(t *testing.T) {
 		return err
 	})
 	for _, p := range []string{
-		`{"source_id":"S","records":["B"],"wm_rev":"` + rev + `"}`,                    // other records
-		`{"source_id":"T","records":["A"],"wm_rev":"` + rev + `"}`,                    // other source
-		`{"source_id":"S","records":["A"],"wm_rev":"2026-11-04T00:00:00.000000000Z"}`, // watermark moved
-		`{"source_id":"S","records":[],"wm_rev":"` + rev + `"}`,
+		`{"source_id":"S","records":["B"],"tombstones":{"B":"` + rev + `"},"wm_rev":"` + rev + `"}`,                    // other records
+		`{"source_id":"T","records":["A"],"tombstones":{"A":"` + rev + `"},"wm_rev":"` + rev + `"}`,                    // other source
+		`{"source_id":"S","records":["A"],"tombstones":{"A":"` + rev + `"},"wm_rev":"2026-11-04T00:00:00.000000000Z"}`, // watermark moved
+		`{"source_id":"S","records":[],"tombstones":{},"wm_rev":"` + rev + `"}`,
 	} {
 		run(func(c context.Context) error {
 			changed, err := e.compRepo.ClearDistroWithdrawn(c, e.openssl, e.v0286, []byte(p))
@@ -851,7 +852,7 @@ func TestM70ClearDistroWithdrawn(t *testing.T) {
 		})
 	}
 	run(func(c context.Context) error {
-		changed, err := e.compRepo.ClearDistroWithdrawn(c, e.openssl, e.v0286, []byte(`{"source_id":"S","records":["A"],"wm_rev":"`+rev+`"}`))
+		changed, err := e.compRepo.ClearDistroWithdrawn(c, e.openssl, e.v0286, []byte(`{"source_id":"S","records":["A"],"tombstones":{"A":"`+rev+`"},"wm_rev":"`+rev+`"}`))
 		if !changed {
 			t.Error("exact withdrawn clear refused")
 		}
@@ -980,7 +981,7 @@ func TestM70ClearDistroWithdrawn_Tombstones(t *testing.T) {
 		return err
 	})
 	run(func(c context.Context) error {
-		changed, err := e.compRepo.ClearDistroWithdrawn(c, e.openssl, e.v0286, []byte(`{"source_id":"S","records":["R"],"wm_rev":"`+rev+`"}`))
+		changed, err := e.compRepo.ClearDistroWithdrawn(c, e.openssl, e.v0286, []byte(`{"source_id":"S","records":["R"],"tombstones":{"R":"`+rev+`"},"wm_rev":"`+rev+`"}`))
 		if !changed {
 			t.Error("withdrawn clear refused")
 		}
@@ -1008,7 +1009,51 @@ func TestM70ClearDistroWithdrawn_Tombstones(t *testing.T) {
 		WHERE component_id = $1 AND vulnerability_id = $2`, e.openssl, e.v0286).Scan(&tomb); err != nil {
 		t.Fatal(err)
 	}
-	if tomb != `["R"]` {
+	if tomb != `{"R": "`+rev+`"}` {
 		t.Errorf("tombstones %q", tomb)
+	}
+	// Data from after the change (the record restored) is not blocked.
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"S","fixed":"r2","records":["R"],"data_modified":"2026-11-09T00:00:00.000000000Z"}`))
+		if !changed {
+			t.Error("newer evidence on the restored record refused")
+		}
+		return err
+	})
+}
+
+// Codex M70 R32 Medium-3: the prior-method promotion never waits for a row
+// another transaction holds.
+func TestM70PromotePriorMethod_SkipsLockedRows(t *testing.T) {
+	e := m70Seed(t, "m70skiplock")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	if err := scope.writeTx(ctx, e.sbom, func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := e.migDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.Exec(`SELECT 1 FROM component_vulnerabilities WHERE component_id = $1 AND vulnerability_id = $2 FOR UPDATE`, e.openssl, e.v0286); err != nil {
+		t.Fatal(err)
+	}
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	if err := scope.writeTx(wctx, e.sbom, func(c context.Context) error {
+		tx, _ := database.TxFromContext(c)
+		return repository.PromoteDistroPriorMethod(c, tx, e.openssl, e.v0286, model.MatchNVDCPE)
+	}); err != nil {
+		t.Fatalf("promotion: %v", err)
+	}
+	if d := time.Since(started); d > 2*time.Second {
+		t.Errorf("promotion waited %v for a locked row", d)
 	}
 }

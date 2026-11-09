@@ -77,7 +77,7 @@ func TestM70R12_NoVerdictClearsAStaleDistroLabel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 1 || len(groups[0]) != 1 || !groups[0][0].noVerdict || rep.Cleared != 1 {
+	if len(groups) != 1 || len(groups[0]) != 1 || !groups[0][0].noVerdict || !groups[0][0].wasDistro {
 		t.Errorf("groups=%+v rep=%+v, want one clear", groups, rep)
 	}
 }

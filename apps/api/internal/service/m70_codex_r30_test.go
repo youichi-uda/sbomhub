@@ -67,25 +67,32 @@ func TestM70R30_MultiPageConsistency(t *testing.T) {
 	}
 }
 
-// Codex M70 R30 Low-3: a no-verdict under a label the write keeps (another
-// source, or newer evidence) is not counted as cleared.
+// Codex M70 R30 Low-3 / R32 Low-4: clears and relabels are counted from
+// what was written, per savepoint group, and only for released groups.
 func TestM70R30_ClearedCountsOnlyRealClears(t *testing.T) {
-	d := distroData{byCVE: map[string][]*distroRecord{}, ids: map[string]bool{}, sourceID: "B", revision: "20"}
-	for _, l := range []repository.SbomLink{
-		{Method: "distro_fixed", LabelSource: "A", LabelRev: "10"},
-		{Method: "distro_fixed", LabelSource: "B", LabelRev: "30"},
-		{Method: "distro_fixed", LabelSource: "B", LabelRev: "10", WMBySource: map[string]string{"B": "25"}},
-	} {
-		l.ComponentID, l.VulnerabilityID = uuid.New(), uuid.New()
-		var c DistroScanReport
-		d.settleNoVerdict(l, json.RawMessage(`{}`), nil, &c)
-		if c.Cleared != 0 {
-			t.Errorf("%+v counted as cleared", l)
-		}
+	var tl writeTally
+	settle := pendingLink{noVerdict: true, wasDistro: true}
+	tl.note(settle, true, true)                        // watermark merged, label kept
+	tl.note(settle, true, false)                       // label cleared
+	tl.note(pendingLink{noVerdict: true}, true, false) // a non-distro link's watermark
+	tl.note(pendingLink{method: "distro_fixed"}, true, true)
+	tl.note(settle, false, false) // nothing changed
+	tl.groupDone(true)
+	tl.note(settle, true, false)
+	tl.groupDone(false) // rolled back
+	if tl.relabelled != 4 || tl.cleared != 1 {
+		t.Errorf("relabelled=%d cleared=%d, want 4 / 1", tl.relabelled, tl.cleared)
 	}
-	var c DistroScanReport
-	d.settleNoVerdict(repository.SbomLink{Method: "distro_fixed", LabelSource: "B", LabelRev: "10"}, nil, nil, &c)
-	if c.Cleared != 1 {
-		t.Error("a real clear not counted")
+}
+
+// Codex M70 R32 Medium-3: the write order is fixed.
+func TestM70R32_PendingGroupsSorted(t *testing.T) {
+	a, b := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.MustParse("00000000-0000-0000-0000-000000000002")
+	groups := [][]pendingLink{{{componentID: b, vulnID: b}, {componentID: b, vulnID: a}}, {{componentID: a, vulnID: b}}}
+	sortPendingGroups(groups)
+	if groups[0][0].componentID != a || groups[1][0].vulnID != a || groups[1][1].vulnID != b {
+		t.Errorf("not sorted: %+v", groups)
 	}
+	_ = repository.SbomLink{}
+	_ = json.RawMessage(nil)
 }
