@@ -289,6 +289,13 @@ func ReleaseCodename(family, release string) (string, bool) {
 // codename is one "/" part of Ubuntu Pro streams such as "esm-apps/xenial"
 // or "trusty/esm").
 func purlQualifiersAgree(ecosystem, typ string, quals map[string]string) error {
+	// An OSV affected purl has no version; a version (which may carry an
+	// epoch) is not carried into the comparison, so it is refused —
+	// except Ubuntu's, whose USN data really carries one (Codex M70 R51 /
+	// R52 High-1).
+	if _, ok := quals["@"]; ok && (typ == "deb" || typ == "rpm") && !strings.HasPrefix(ecosystem, "Ubuntu") {
+		return fmt.Errorf("a versioned affected purl")
+	}
 	if _, ok := quals["repository_url"]; ok && (typ == "deb" || typ == "rpm") {
 		// Another repository's build is not the ecosystem's statement
 		// (Codex M70 R48 High-1).

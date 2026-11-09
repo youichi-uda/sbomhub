@@ -49,3 +49,10 @@ func TestM70R51_VersionedRPMPurl(t *testing.T) {
 		t.Errorf("Ubuntu versioned purl refused: %v", err)
 	}
 }
+
+// Codex M70 R52 High-1: a versioned Debian affected purl is refused.
+func TestM70R52_VersionedDebianPurl(t *testing.T) {
+	if err := r32Query(t, "Debian:12", "pkg:deb/debian/p@1%3A2.0-1?arch=source&distro=bookworm"); err == nil {
+		t.Error("versioned Debian entry accepted")
+	}
+}
