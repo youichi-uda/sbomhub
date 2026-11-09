@@ -396,11 +396,13 @@ func rpmDistroAgrees(ecosystem string, quals map[string]string) error {
 		if !ok {
 			continue
 		}
-		got, _, _ := strings.Cut(rest, ".")
-		if got != "" && got == major {
-			return nil
+		// The whole suffix is a canonical release, "N" or "N.M" (Codex M70
+		// R49 Medium-2), whose major is the ecosystem's.
+		got, minor, hasMinor := strings.Cut(rest, ".")
+		if !canonicalNumber(got) || (hasMinor && !canonicalNumber(minor)) || got != major {
+			return fmt.Errorf("distro=%s does not name %s", distro, ecosystem)
 		}
-		return fmt.Errorf("distro=%s does not name %s", distro, ecosystem)
+		return nil
 	}
 	return fmt.Errorf("distro=%s is not a %s release", distro, family)
 }
@@ -431,6 +433,19 @@ func validateRangeSchema(r OSVRange) error {
 		return fmt.Errorf("both fixed and last_affected events")
 	}
 	return nil
+}
+
+// canonicalNumber: decimal digits, no leading zero (except "0").
+func canonicalNumber(s string) bool {
+	if s == "" || (len(s) > 1 && s[0] == '0') {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // validateUbuntuBinaries checks Ubuntu's ecosystem_specific.binaries, when

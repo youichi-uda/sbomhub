@@ -86,7 +86,13 @@ if cur then
     local gen = obj['generation']
     if type(dm) ~= 'string' then dm = '' end
     if type(gen) ~= 'string' then gen = '' end
-    if dm > ARGV[4] then return 0 end
+    if dm > ARGV[4] then
+      -- A completed observation with a LOWER revision (a withdrawal) makes
+      -- the kept payload doubtful whatever the fetch order: it is dropped,
+      -- so the next read fetches again (Codex M70 R49 High-1).
+      redis.call('DEL', KEYS[1])
+      return 0
+    end
     if dm == ARGV[4] and gen > ARGV[2] then return 0 end
   end
 end

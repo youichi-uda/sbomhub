@@ -671,11 +671,11 @@ func TestM70DistroCache_RevisionBeforeGeneration(t *testing.T) {
 	}
 	set("00000000000000000001", "2026-11-09T00:00:00.000000000Z", `"R2"`)
 	set("00000000000000000002", "2026-11-08T00:00:00.000000000Z", `"R1-later-fetch"`) // later fetch, older data
-	// The payload kept is still the higher revision, but a later fetch
-	// completed with other data: it is no longer served (Codex M70 R43
-	// High-1), so the package is read again.
+	// A completed lower-revision observation drops the kept payload (Codex
+	// M70 R43 High-1, R49 High-1): it is never replaced by the lower one,
+	// and the package is read again.
 	raw, _ := rdb.Get(context.Background(), key).Result()
-	if !strings.Contains(raw, `"R2"`) {
+	if strings.Contains(raw, `"R1-later-fetch"`) {
 		t.Errorf("older revision replaced newer: %s", raw)
 	}
 	if e, err := c.Get(context.Background(), "test-rev", "Debian", "p"); err != nil || e != nil {
@@ -756,14 +756,32 @@ func TestM70DistroLoad_LoserUsesTheWinner(t *testing.T) {
 	winner := distroCachePayload{Version: distroCachePayloadVersion, Records: []distroRecord{{ID: "DSA-WIN", CVEs: []string{"CVE-2021-0001"},
 		Releases: 1, Packages: 1, Modified: normaliseModified("2026-11-08T00:00:00Z"), Entries: []distroEntry{entry("Debian:11", "i", "0", "f", "9.9-1")}}}, IDs: []string{"DSA-WIN"}}
 	raw, _ := json.Marshal(winner)
+	// The fetched data's own revision: the winner has the SAME revision and
+	// a later generation (a fetch that started later), so it is kept and
+	// the loser uses it. (A winner of a HIGHER revision is dropped by the
+	// lower observation instead, R49 High-1: see below.)
+	first, _, _, err := s.loadFetch(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "openssl"}, s.pacer())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := dc.Set(context.Background(), s.sourceID, "Debian", "openssl", cache.DistroCacheEntry{FetchedAt: time.Now(),
-		Payload: raw, DataModified: "2026-11-08T12:00:00.000000000Z", Generation: "99999999999999999999"}); err != nil {
+		Payload: raw, DataModified: first.revision, Generation: "99999999999999999999"}); err != nil {
 		t.Fatal(err)
 	}
 	// Bypass the read of the cache for this load so it fetches and loses.
 	l, hit, _, err := s.loadFetch(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "openssl"}, s.pacer())
 	if err != nil || len(l.recs) != 1 || l.recs[0].ID != "DSA-WIN" || hit {
 		t.Errorf("loser did not use the winner: err=%v hit=%v %d records", err, hit, len(l.recs))
+	}
+	// A winner of a higher revision: this lower observation drops it and
+	// uses its own complete answer.
+	if _, err := dc.Set(context.Background(), s.sourceID, "Debian", "openssl", cache.DistroCacheEntry{FetchedAt: time.Now(),
+		Payload: raw, DataModified: "2099-01-01T00:00:00.000000000Z", Generation: "99999999999999999999"}); err != nil {
+		t.Fatal(err)
+	}
+	l, _, _, err = s.loadFetch(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "openssl"}, s.pacer())
+	if err != nil || len(l.recs) == 1 {
+		t.Errorf("higher-revision winner used: err=%v %d records", err, len(l.recs))
 	}
 }
 
@@ -1276,5 +1294,39 @@ func TestM70DistroCache_MissingFenceIsAMiss(t *testing.T) {
 	_ = rdb.Del(context.Background(), key+":lg").Err()
 	if e, err := c.Get(context.Background(), "test-fence", "Debian", "p"); e != nil || err != nil {
 		t.Errorf("entry without fence served: %+v %v", e, err)
+	}
+}
+
+// Codex M70 R49 High-1: a completed lower-revision observation drops the
+// kept payload whatever the fetch order.
+func TestM70DistroCache_LowerRevisionInvalidates(t *testing.T) {
+	url := os.Getenv("REDIS_URL")
+	if url == "" {
+		t.Skip("REDIS_URL not set")
+	}
+	opt, err := redis.ParseURL(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { _ = rdb.Close() })
+	c := cache.NewDistroCache(rdb)
+	key := cache.DistroCacheKey("test-inval", "Debian", "p")
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key, key+":lg").Err() })
+	_ = rdb.Del(context.Background(), key, key+":lg").Err()
+	set := func(gen, dm string) bool {
+		won, err := c.Set(context.Background(), "test-inval", "Debian", "p", cache.DistroCacheEntry{FetchedAt: time.Now(),
+			Generation: gen, DataModified: dm, Payload: []byte(`"x"`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return won
+	}
+	set("00000000000000000002", "2026-11-09T00:00:00.000000000Z") // B: started later, pre-withdrawal
+	if set("00000000000000000001", "") {                          // A: started earlier, saw the withdrawal
+		t.Error("lower revision won")
+	}
+	if e, _ := c.Get(context.Background(), "test-inval", "Debian", "p"); e != nil {
+		t.Error("the pre-withdrawal payload is still served")
 	}
 }

@@ -17,3 +17,17 @@ func TestM70R48_RepositoryScoped(t *testing.T) {
 		t.Error("repository-scoped affected entry accepted")
 	}
 }
+
+// Codex M70 R49 Medium-2: the rpm distro suffix is a canonical release.
+func TestM70R49_RPMDistroSuffix(t *testing.T) {
+	for _, d := range []string{"el9.garbage", "almalinux-9.", "almalinux-09", "el9.1.2"} {
+		if err := r32Query(t, "AlmaLinux:9", "pkg:rpm/almalinux/p?distro="+d); err == nil {
+			t.Errorf("distro=%s accepted", d)
+		}
+	}
+	for _, d := range []string{"el9", "almalinux-9.4"} {
+		if err := r32Query(t, "AlmaLinux:9", "pkg:rpm/almalinux/p?distro="+d); err != nil {
+			t.Errorf("distro=%s refused: %v", d, err)
+		}
+	}
+}
