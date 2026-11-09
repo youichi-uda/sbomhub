@@ -88,8 +88,8 @@ const (
 	// 15: rpm distro qualifier, strict subpath (R32); 16: every returned
 	// record id (R34); 17: Ubuntu stream qualifiers, arch-qualified rpm
 	// refused (R35); 18: OSV range schema (R37); 19: debian-N qualifier
-	// (R44); 20: second '#' in a subpath (R45)).
-	distroCachePayloadVersion = 20
+	// (R44); 20: second '#' in a subpath (R45); 21: repository_url (R48)).
+	distroCachePayloadVersion = 21
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -752,7 +752,7 @@ func (s *DistroService) logSummary(sbomID uuid.UUID, r DistroScanReport) {
 		"lookup_failures", r.LookupFailures, "locked_skipped", r.LockedSkipped,
 		"deadline_exceeded", r.DeadlineExceeded, "cancelled", r.Cancelled,
 	}
-	if r.FetchFailures > 0 || r.Unfetched > 0 || r.RefusedWrites > 0 {
+	if r.incompleteErr() != nil { // every incomplete reason (Codex M70 R48 Low-2)
 		slog.Warn("distro: step completed with incomplete coverage", args...)
 		return
 	}

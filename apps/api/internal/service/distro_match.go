@@ -235,6 +235,12 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 	default:
 		return distroTarget{}, "not_distro"
 	}
+	// A package from a named repository (repository_url) is that
+	// repository's build, not the distribution's: the distribution's fixed
+	// versions say nothing about it (Codex M70 R48 High-1).
+	if _, has, _ := p.qualifier("repository_url"); has {
+		return distroTarget{}, "repository_scoped"
+	}
 	distroQ, hasDistro, why := p.qualifier("distro")
 	if why != "" {
 		return distroTarget{}, why

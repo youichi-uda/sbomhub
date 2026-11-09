@@ -285,6 +285,11 @@ func ReleaseCodename(family, release string) (string, bool) {
 // codename is one "/" part of Ubuntu Pro streams such as "esm-apps/xenial"
 // or "trusty/esm").
 func purlQualifiersAgree(ecosystem, typ string, quals map[string]string) error {
+	if _, ok := quals["repository_url"]; ok && (typ == "deb" || typ == "rpm") {
+		// Another repository's build is not the ecosystem's statement
+		// (Codex M70 R48 High-1).
+		return fmt.Errorf("a repository-scoped entry (repository_url)")
+	}
 	if typ == "rpm" {
 		// The component's architecture is not compared, and noarch / src
 		// are not wildcards over binary architectures (Codex M70 R33 High-2,
