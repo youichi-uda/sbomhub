@@ -97,7 +97,8 @@ func TestM70R3_CacheReadTakesASlot(t *testing.T) {
 	s := &DistroService{gap: 0, now: time.Now}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, _, _, _, err := s.load(ctx, distroFetchKey{ecosystem: "Debian", pkg: "openssl"}, s.pacer())
+	_, _, err := s.loadSlotted(ctx, distroFetchKey{ecosystem: "Debian", pkg: "openssl"}, s.pacer(),
+		func([]distroRecord, time.Time) error { return nil })
 	if err == nil {
 		t.Error("load proceeded without a slot")
 	}

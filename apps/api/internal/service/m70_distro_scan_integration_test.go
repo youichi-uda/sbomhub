@@ -396,7 +396,7 @@ func TestM70DistroLoad_CacheHitTakesASlot(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if _, _, hit, _, err := s.load(ctx, k, s.pacer()); err == nil || hit {
+	if hit, _, err := s.loadSlotted(ctx, k, s.pacer(), func([]distroRecord, time.Time) error { return nil }); err == nil || hit {
 		t.Errorf("a cache hit proceeded without a slot: hit=%v err=%v", hit, err)
 	}
 }

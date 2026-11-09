@@ -199,6 +199,28 @@ func (c *OSVClient) queryPackagePage(ctx context.Context, q osvPackageQueryReque
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return page, n, fmt.Errorf("osv: package query response is not a JSON object")
 	}
+	// The answer is `{}` (no records), or carries a `vulns` ARRAY and/or a
+	// non-empty next_page_token. Any other object (`{"error":...}`,
+	// `{"vulns":null}`) is not an answer (Codex M70 R6 Medium-3).
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &env); err != nil {
+		return page, n, fmt.Errorf("osv: decode package query response: %w", err)
+	}
+	if len(env) > 0 {
+		vulnsRaw, hasVulns := env["vulns"]
+		if hasVulns && !bytes.HasPrefix(bytes.TrimSpace(vulnsRaw), []byte("[")) {
+			return page, n, fmt.Errorf("osv: package query response has a non-array vulns")
+		}
+		var tok string
+		if raw, ok := env["next_page_token"]; ok {
+			if err := json.Unmarshal(raw, &tok); err != nil {
+				return page, n, fmt.Errorf("osv: package query response has a bad next_page_token")
+			}
+		}
+		if !hasVulns && tok == "" {
+			return page, n, fmt.Errorf("osv: package query response carries neither vulns nor a page token")
+		}
+	}
 	if err := json.Unmarshal(trimmed, &page); err != nil {
 		return page, n, fmt.Errorf("osv: decode package query response: %w", err)
 	}

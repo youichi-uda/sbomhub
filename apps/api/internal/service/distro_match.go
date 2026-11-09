@@ -1160,7 +1160,11 @@ func evalRange(installed string, raw []client.OSVEvent, cmp versionCmp) entryRes
 				return entryResult{state: entryAffected, fix: ev.version}
 			}
 		}
-		return entryResult{state: entryAffected, noFix: true}
+		// Open-ended ("introduced 0", no fix): OSV writes that both for
+		// "vulnerable, no fix yet" and for undecided statuses (Debian
+		// "undetermined", Ubuntu "needs-triage"), so it says nothing for
+		// certain (Codex M70 R6 High-2). No verdict, and the NVD label stays.
+		return entryResult{}
 	}
 	if !everIntroduced || closing == "" {
 		// Below the first introduced, or closed by something other than a
