@@ -108,7 +108,7 @@ func isRPMSeparator(r rune) bool {
 	if r >= 0x80 {
 		return true // rpm's risalnum is ASCII-only
 	}
-	c := byte(r)
+	c := byte(r) //nolint:gosec // r < 0x80 was checked above: no truncation
 	return !isAlnum(c) && c != '~' && c != '^'
 }
 
