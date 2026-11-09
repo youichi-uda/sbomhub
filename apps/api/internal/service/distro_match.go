@@ -156,15 +156,28 @@ func parsePurl(s string) (parsedPurl, bool) {
 
 // qualifier returns a single-valued qualifier. A qualifier given twice is
 // ambiguous and reads as absent-but-conflicting (ok=false).
-func (p parsedPurl) qualifier(k string) (string, bool) {
-	vs := p.qualifiers[k]
-	switch len(vs) {
-	case 0:
-		return "", true
-	case 1:
-		return vs[0], true
+//
+// Keys are case-insensitive (the package-url spec lower-cases them), so
+// "Distro" is "distro" and a duplicate after folding is ambiguous; a
+// qualifier given with an empty value is an error, never an absence (Codex
+// M70 R15 High-4). reason is "" when the value is usable.
+func (p parsedPurl) qualifier(k string) (v string, present bool, reason string) {
+	var vals []string
+	for key, vs := range p.qualifiers {
+		if strings.EqualFold(key, k) {
+			vals = append(vals, vs...)
+		}
 	}
-	return "", false
+	switch len(vals) {
+	case 0:
+		return "", false, ""
+	case 1:
+		if strings.TrimSpace(vals[0]) == "" {
+			return "", true, "bad_qualifier"
+		}
+		return vals[0], true, ""
+	}
+	return "", true, "ambiguous_qualifier"
 }
 
 // distroTargetFor identifies the distro release, the package and the version
@@ -185,12 +198,12 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 	default:
 		return distroTarget{}, "not_distro"
 	}
-	distroQ, ok := p.qualifier("distro")
-	if !ok {
-		return distroTarget{}, "ambiguous_qualifier"
+	distroQ, hasDistro, why := p.qualifier("distro")
+	if why != "" {
+		return distroTarget{}, why
 	}
 	id, rel := "", ""
-	if distroQ != "" {
+	if hasDistro {
 		i := strings.LastIndexByte(distroQ, '-')
 		if i <= 0 {
 			return distroTarget{}, "unknown_release"
@@ -237,11 +250,11 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 		// binaries to check against; for Ubuntu every entry is checked
 		// against its own binaries list, see decide.)
 		t.pkg, t.binary, t.version = p.name, p.name, version
-		up, ok := p.qualifier("upstream")
-		if !ok {
-			return distroTarget{}, "ambiguous_qualifier"
+		up, hasUp, why := p.qualifier("upstream")
+		if why != "" {
+			return distroTarget{}, why
 		}
-		if up != "" {
+		if hasUp {
 			// Syft: "upstream=glibc" (same version as the binary) or
 			// "upstream=linux-signed-amd64@5.10.46+4" (source name@version).
 			name, ver, hasVer := strings.Cut(up, "@")
@@ -290,11 +303,11 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 	case "rpm":
 		t.scheme = schemeRPM
 		t.pkg, t.binary = p.name, p.name
-		epoch, ok := p.qualifier("epoch")
-		if !ok {
-			return distroTarget{}, "ambiguous_qualifier"
+		epoch, hasEpoch, why := p.qualifier("epoch")
+		if why != "" {
+			return distroTarget{}, why
 		}
-		if epoch != "" {
+		if hasEpoch {
 			if strings.Contains(version, ":") {
 				// Both the version and the qualifier state an epoch.
 				ev, _, _ := strings.Cut(version, ":")
@@ -387,27 +400,23 @@ func noncanonicalFor(t distroTarget, eco string) bool {
 	if eco != t.release && strings.EqualFold(eco, t.release) {
 		return true
 	}
-	lower := strings.ToLower(eco)
+	// Every entry of an answer to a query for this family must be canonical
+	// FOR THIS FAMILY: a query names one distro, so anything else — a
+	// misspelling that does not even start with the family name ("Debain:11",
+	// "Alma Linux:9") or a foreign ecosystem — is malformed data that could
+	// be the installed release's statement (Codex M70 R15 High-3).
 	switch t.family {
 	case "debian":
-		if strings.HasPrefix(lower, "debian") {
-			_, ok := debianEcosystemMajor(eco)
-			return !ok
-		}
+		_, ok := debianEcosystemMajor(eco)
+		return !ok
 	case "ubuntu":
-		if strings.HasPrefix(lower, "ubuntu") {
-			return !canonicalUbuntuEcosystem(eco)
-		}
+		return !canonicalUbuntuEcosystem(eco)
 	case "almalinux":
-		if strings.HasPrefix(lower, "almalinux") {
-			return !canonicalNumbered(eco, "AlmaLinux:")
-		}
+		return !canonicalNumbered(eco, "AlmaLinux:")
 	case "rocky":
-		if strings.HasPrefix(lower, "rocky") {
-			return !canonicalNumbered(eco, "Rocky Linux:")
-		}
+		return !canonicalNumbered(eco, "Rocky Linux:")
 	}
-	return false
+	return true
 }
 
 // canonicalUbuntuEcosystem: "Ubuntu:YY.MM" for an interim release,

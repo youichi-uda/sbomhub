@@ -211,6 +211,14 @@ func validatePackageRecords(raw []byte, q OSVPackage) error {
 		if err := json.Unmarshal(*r.Affected, &affected); err != nil {
 			return fmt.Errorf("osv: package query record %q: %w", r.ID, err)
 		}
+		// Every element must be complete: a truncated one dropped later
+		// could have been another range for the same package (Codex M70
+		// R15 High-1).
+		for j, a := range affected {
+			if err := validateAffected(a); err != nil {
+				return fmt.Errorf("osv: package query record %q affected[%d]: %w", r.ID, j, err)
+			}
+		}
 		named := false
 		for _, a := range affected {
 			if a.Package.Name == q.Name && (a.Package.Ecosystem == q.Ecosystem || strings.HasPrefix(a.Package.Ecosystem, q.Ecosystem+":")) {
@@ -220,6 +228,37 @@ func validatePackageRecords(raw []byte, q OSVPackage) error {
 		}
 		if !named {
 			return fmt.Errorf("osv: package query record %q names no %s %q entry", r.ID, q.Ecosystem, q.Name)
+		}
+	}
+	return nil
+}
+
+// validateAffected: a package with a name and an ecosystem; every range with
+// a type and at least one event; every event with exactly one field; no
+// empty listed version.
+func validateAffected(a OSVAffected) error {
+	if strings.TrimSpace(a.Package.Name) == "" || strings.TrimSpace(a.Package.Ecosystem) == "" {
+		return fmt.Errorf("package without a name or an ecosystem")
+	}
+	for i, r := range a.Ranges {
+		if strings.TrimSpace(r.Type) == "" || len(r.Events) == 0 {
+			return fmt.Errorf("range %d without a type or events", i)
+		}
+		for j, e := range r.Events {
+			n := 0
+			for _, f := range []string{e.Introduced, e.Fixed, e.LastAffected, e.Limit} {
+				if f != "" {
+					n++
+				}
+			}
+			if n != 1 {
+				return fmt.Errorf("range %d event %d has %d fields", i, j, n)
+			}
+		}
+	}
+	for i, v := range a.Versions {
+		if strings.TrimSpace(v) == "" {
+			return fmt.Errorf("versions[%d] is empty", i)
 		}
 	}
 	return nil
@@ -275,6 +314,11 @@ func (c *OSVClient) queryPackagePage(ctx context.Context, q osvPackageQueryReque
 	var env map[string]json.RawMessage
 	if err := json.Unmarshal(trimmed, &env); err != nil {
 		return page, n, fmt.Errorf("osv: decode package query response: %w", err)
+	}
+	if len(env) == 0 && q.PageToken != "" {
+		// `{}` is "no records" only as the FIRST page; after a token it is a
+		// lost or rejected continuation (Codex M70 R15 High-2).
+		return page, n, fmt.Errorf("osv: package query continuation page is empty")
 	}
 	if len(env) > 0 {
 		vulnsRaw, hasVulns := env["vulns"]

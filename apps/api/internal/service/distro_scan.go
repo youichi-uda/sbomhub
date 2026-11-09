@@ -77,8 +77,9 @@ const (
 	// distroCachePayloadVersion is bumped with the distroRecord format
 	// (2: Releases / Packages, Codex M70 R2; 3: Ubuntu binaries, R4;
 	// 4: record modified, R8; 5: records validated as since R11, R12;
-	// 6: no future timestamps, R14).
-	distroCachePayloadVersion = 6
+	// 6: no future timestamps, R14; 7: every affected element validated,
+	// R15).
+	distroCachePayloadVersion = 7
 )
 
 // distroLinkStore is the repository surface the step uses.

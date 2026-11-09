@@ -30,7 +30,7 @@ func TestM70R9_FamilyEcosystemsAreCanonical(t *testing.T) {
 		{alma, "AlmaLinux:9.4", true},
 		{alma, "almalinux:9", true},
 		{alma, "AlmaLinux:8", false},
-		{alma, "Debian:12", false}, // another family: not this target's concern
+		{alma, "Debian:12", true}, // a foreign family in an AlmaLinux answer blocks (Codex R15 High-3)
 	} {
 		if got := noncanonicalFor(c.t, c.eco); got != c.block {
 			t.Errorf("%s / %q: block=%v, want %v", c.t.family, c.eco, got, c.block)
