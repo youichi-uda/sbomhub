@@ -20,7 +20,7 @@ func TestM70GetVulnerabilities_ProjectsDistroLabelsAndEvidence(t *testing.T) {
 	defer db.Close()
 	repo := NewComponentRepository(db)
 	now := time.Now()
-	ev := []byte(`{"source":"osv","source_id":"secret-hash","status":"fixed","basis":"later_releases","release":"Debian:11","package":"openssl","installed":"1.1.1k-1","fixed":"1.1.1k-1","records":["DEBIAN-CVE-2021-3449"],"fetched_at":"2026-11-09T00:00:00Z"}`)
+	ev := []byte(`{"source":"osv","source_id":"secret-hash","status":"fixed","basis":"later_releases","release":"Debian:11","package":"openssl","installed":"1.1.1k-1","fixed":"1.1.1k-1","records":["DEBIAN-CVE-2021-3449"],"fetched_at":"2026-11-09T00:00:00Z","prior_method":"nvd_cpe_unverified","wm_source":"secret-hash","wm_rev":"r","wm_by_source":{"secret-hash":"r"}}`)
 	cols := []string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source",
 		"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method", "match_evidence"}
 	mock.ExpectQuery(`WHEN 'distro_fixed' THEN -1`).
@@ -51,19 +51,24 @@ func TestM70GetVulnerabilities_ProjectsDistroLabelsAndEvidence(t *testing.T) {
 			t.Errorf("row %d: %q / %q / evidence %s, want %+v", i, got[i].MatchMethod, got[i].MatchConfidence, got[i].MatchEvidence, w)
 		}
 	}
-	if strings.Contains(string(got[2].MatchEvidence), "source_id") {
-		t.Errorf("source_id projected: %s", got[2].MatchEvidence)
+	for _, internal := range []string{"source_id", "wm_source", "wm_rev", "wm_by_source", "prior_method"} {
+		if strings.Contains(string(got[2].MatchEvidence), internal) {
+			t.Errorf("%s projected: %s", internal, got[2].MatchEvidence) // Codex M70 R28 Low-3
+		}
 	}
 	if !strings.Contains(string(got[2].MatchEvidence), `"later_releases"`) {
 		t.Errorf("evidence not passed through: %s", got[2].MatchEvidence)
 	}
 }
 
-// The SQL ordering mirrors model.MatchMethod.FindingRank, and both aggregates
-// share it (so the evidence comes from the same link as the method).
+// The SQL ordering mirrors model.MatchMethod.FindingRank; the best link is
+// picked by key (DISTINCT ON) and its evidence read from that same link,
+// never aggregated (Codex M70 R28 High-2).
 func TestM70BestMatchOrderMirrorsFindingRank(t *testing.T) {
-	if strings.Count(bestMatchMethodJoin, "ORDER BY "+bestMatchOrder) != 2 {
-		t.Fatal("the two aggregates do not share bestMatchOrder")
+	if strings.Count(bestMatchMethodJoin, "ORDER BY bm.vulnerability_id, "+bestMatchOrder) != 1 ||
+		strings.Contains(bestMatchMethodJoin, "array_agg") ||
+		!strings.Contains(bestMatchMethodJoin, "bev.component_id = pick.component_id AND bev.vulnerability_id = pick.vulnerability_id") {
+		t.Fatal("the best link is not picked by key and joined back")
 	}
 	for _, c := range []struct {
 		m    string

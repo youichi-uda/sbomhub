@@ -112,8 +112,9 @@ type recordState struct {
 // High-2), so the watermark is kept as it is. It returns the clear's
 // parameter, or nil; failed reports a lookup that failed.
 func (d distroData) withdrawnClear(l repository.SbomLink, lookup func(id string) recordState) (p []byte, failed bool) {
-	if !model.MatchMethod(l.Method).IsDistro() || l.WMSource != d.sourceID || l.LabelSource != d.sourceID ||
-		l.WMRev <= d.revision || lookup == nil || len(l.Records) == 0 {
+	wmRev := l.RevFor(d.sourceID)
+	if !model.MatchMethod(l.Method).IsDistro() || l.LabelSource != d.sourceID ||
+		wmRev <= d.revision || lookup == nil || len(l.Records) == 0 {
 		return nil, false
 	}
 	for _, id := range l.Records {
@@ -134,7 +135,7 @@ func (d distroData) withdrawnClear(l repository.SbomLink, lookup func(id string)
 		SourceID string   `json:"source_id"`
 		Records  []string `json:"records"`
 		WMRev    string   `json:"wm_rev"`
-	}{d.sourceID, l.Records, l.WMRev})
+	}{d.sourceID, l.Records, wmRev})
 	return b, false
 }
 

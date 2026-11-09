@@ -139,8 +139,10 @@ func vulnListOrderBy(sortBy string) string {
 // ranks below it: a CVE one component's distro has fixed but another
 // component still matches must show the other component's label. Equal ranks
 // are broken by the method name so the label does not depend on row order
-// (Codex M60 R8 Low), then by the component id so that the method and the
-// evidence of the two aggregates come from the SAME link.
+// (Codex M60 R8 Low), then by the component id. The best link is chosen by
+// key only (DISTINCT ON), and its evidence is read for that one link
+// afterwards: aggregating the evidence documents themselves materialised
+// every link's JSON per CVE (Codex M70 R28 High-2).
 //
 // It is an aggregate computed ONCE per query and LEFT JOINed, not a
 // correlated subquery (Codex M60 R3 Medium). Measured 2026-11-08 on
@@ -160,13 +162,16 @@ func vulnListOrderBy(sortBy string) string {
 // many rows are returned; the correlated form grew with every row.
 const bestMatchMethodJoin = `
 		LEFT JOIN (
-			SELECT bm.vulnerability_id,
-			       (array_agg(bm.match_method ORDER BY ` + bestMatchOrder + `))[1] AS match_method,
-			       (array_agg(bm.match_evidence ORDER BY ` + bestMatchOrder + `))[1] AS match_evidence
-			FROM component_vulnerabilities bm
-			JOIN components bc ON bc.id = bm.component_id
-			WHERE bc.sbom_id = $1
-			GROUP BY bm.vulnerability_id
+			SELECT pick.vulnerability_id, pick.match_method, bev.match_evidence
+			FROM (
+				SELECT DISTINCT ON (bm.vulnerability_id) bm.vulnerability_id, bm.component_id, bm.match_method
+				FROM component_vulnerabilities bm
+				JOIN components bc ON bc.id = bm.component_id
+				WHERE bc.sbom_id = $1
+				ORDER BY bm.vulnerability_id, ` + bestMatchOrder + `
+			) pick
+			JOIN component_vulnerabilities bev
+			  ON bev.component_id = pick.component_id AND bev.vulnerability_id = pick.vulnerability_id
 		) best ON best.vulnerability_id = v.id`
 
 // bestMatchOrder is the ORDER BY of both aggregates in bestMatchMethodJoin.
@@ -191,13 +196,13 @@ func setMatch(v *model.Vulnerability, best sql.NullString, evidence []byte) {
 	}
 	v.MatchConfidence = model.MatchMethod(v.MatchMethod).Confidence()
 	if model.MatchMethod(v.MatchMethod).IsDistro() && len(evidence) > 0 {
-		// source_id is internal (an endpoint hash for revision ordering):
-		// never shown (Codex M70 R14 High-5).
-		var m map[string]json.RawMessage
-		if json.Unmarshal(evidence, &m) == nil {
-			delete(m, "source_id")
-			delete(m, "wm_source")
-			if b, err := json.Marshal(m); err == nil {
+		// Projected through the public evidence fields only (Codex M70 R28
+		// Low-3): source_id (an endpoint hash, R14 High-5), the watermark
+		// and prior_method are internal and never shown.
+		var ev model.DistroEvidence
+		if json.Unmarshal(evidence, &ev) == nil {
+			ev.SourceID = ""
+			if b, err := json.Marshal(ev); err == nil {
 				v.MatchEvidence = b
 			}
 		}

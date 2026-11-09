@@ -877,3 +877,48 @@ func TestM70ClearDistroWithdrawn(t *testing.T) {
 		return err
 	})
 }
+
+// Codex M70 R28 High-1: the watermark is kept per source; a write from
+// source B does not erase source A's, so an overlapping A scan with older
+// data is still refused.
+func TestM70Watermark_PerSource(t *testing.T) {
+	e := m70Seed(t, "m70wmsrc")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"A","fixed":"a10","data_modified":"2026-11-10T00:00:00.000000000Z"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"B","fixed":"b","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"A","fixed":"a5","data_modified":"2026-11-05T00:00:00.000000000Z"}`))
+		if changed {
+			t.Error("older source-A data relabelled after a source-B write")
+		}
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_fixed" || r.evidence.Fixed != "b" {
+		t.Errorf("%+v", r)
+	}
+	// Newer A data still goes through.
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"A","fixed":"a11","data_modified":"2026-11-11T00:00:00.000000000Z"}`))
+		if !changed {
+			t.Error("newer source-A data refused")
+		}
+		return err
+	})
+}
