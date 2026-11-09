@@ -25,13 +25,8 @@ func TestM70R1_MultiCVEAdvisoryDoesNotFanOut(t *testing.T) {
 	if d := indexDistroRecords([]distroRecord{multi}).decide(deb11, "CVE-2021-0001"); d.verdict != verdictNone {
 		t.Errorf("uncorroborated multi-release advisory = %+v, want no verdict", d)
 	}
-	// ... corroborated by the CVE's own record (later releases affected at
-	// the installed version): affected.
-	spec := rec("DEBIAN-CVE-2021-0001", []string{"CVE-2021-0001"}, entry("Debian:12", "i", "0", "f", "1.1-1"))
-	d := indexDistroRecords([]distroRecord{multi, spec}).decide(deb11, "CVE-2021-0001")
-	if d.verdict != verdictAffected || d.evidence.Fixed != "1.0-1+deb11u1" {
-		t.Errorf("corroborated = %+v, want affected at 1.0-1+deb11u1", d)
-	}
+	// (R1 allowed "affected" when the CVE's own record showed later releases
+	// affected; Codex R3 High-5 removed that: see TestM70R3_NonSpeakingAdvisoryNeverDecides.)
 	// The uncorroborated advisory never yields "fixed" either.
 	deb11Fixed := deb11
 	deb11Fixed.version = "1.0-1+deb11u2"

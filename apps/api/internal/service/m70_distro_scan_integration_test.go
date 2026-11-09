@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -85,17 +86,17 @@ type m70Env struct {
 	tenant, sbom   uuid.UUID
 	project        uuid.UUID
 	openssl, plain uuid.UUID
-	v3711, v3449   uuid.UUID
-	v0778, vNoRec  uuid.UUID
+	v0286, v3449   uuid.UUID
+	v1292, vNoRec  uuid.UUID
 	compRepo       *repository.ComponentRepository
 }
 
 // m70Seed: an SBOM with Debian 11 openssl 1.1.1k-1 (Syft's purl) and a
 // non-distro component, linked as M60 would have linked them.
 //
-//	openssl -> CVE-2021-3711 (DSA-4963-1: fixed in bullseye at 1.1.1k-1+deb11u1 -> affected)
+//	openssl -> CVE-2023-0286 (DSA-5343-1, bullseye only: fixed at 1.1.1n-0+deb11u4 -> affected)
 //	openssl -> CVE-2021-3449 (DEBIAN-CVE: Debian 12/13/14 fixed at 1.1.1k-1 -> fixed, later_releases)
-//	openssl -> CVE-2022-0778 (DSA-5103-1: fixed in bullseye at 1.1.1k-1+deb11u2 -> affected)
+//	openssl -> CVE-2022-1292 (DSA-5139-1, one CVE: fixed in bullseye at 1.1.1n-0+deb11u2 -> affected)
 //	openssl -> CVE-2009-0591 (no Debian openssl record in OSV -> unchanged)
 //	plain   -> CVE-2021-3449 (nvd_cpe, not a distro package)
 func m70Seed(t *testing.T, label string) m70Env {
@@ -111,11 +112,11 @@ func m70Seed(t *testing.T, label string) m70Env {
 	e.sbom = seedSbomVS(t, e.migDB, e.tenant, e.project)
 	e.openssl = seedComponentVS(t, e.migDB, e.tenant, e.sbom, "openssl", "1.1.1k-1", m70SyftOpenSSL)
 	e.plain = seedComponentVS(t, e.migDB, e.tenant, e.sbom, "openssl", "1.1.1k", "pkg:generic/openssl@1.1.1k")
-	e.v3711 = m70Vuln(t, e.migDB, "CVE-2021-3711")
+	e.v0286 = m70Vuln(t, e.migDB, "CVE-2023-0286")
 	e.v3449 = m70Vuln(t, e.migDB, "CVE-2021-3449")
-	e.v0778 = m70Vuln(t, e.migDB, "CVE-2022-0778")
+	e.v1292 = m70Vuln(t, e.migDB, "CVE-2022-1292")
 	e.vNoRec = m70Vuln(t, e.migDB, "CVE-2009-0591")
-	for _, v := range []uuid.UUID{e.v3711, e.v3449, e.v0778, e.vNoRec} {
+	for _, v := range []uuid.UUID{e.v0286, e.v3449, e.v1292, e.vNoRec} {
 		m70Link(t, e.migDB, e.openssl, v, "nvd_cpe_unverified")
 	}
 	m70Link(t, e.migDB, e.plain, e.v3449, "nvd_cpe")
@@ -152,11 +153,11 @@ func TestM70DistroScan_RelabelsWithEvidence(t *testing.T) {
 		t.Errorf("report %+v", rep)
 	}
 
-	a := m70Read(t, e.migDB, e.openssl, e.v3711)
-	if a.method != "distro_affected" || a.evidence.Fixed != "1.1.1k-1+deb11u1" ||
+	a := m70Read(t, e.migDB, e.openssl, e.v0286)
+	if a.method != "distro_affected" || a.evidence.Fixed != "1.1.1n-0+deb11u4" ||
 		a.evidence.Basis != "release" || a.evidence.Release != "Debian:11" || a.evidence.Installed != "1.1.1k-1" ||
 		len(a.evidence.Records) == 0 || a.evidence.FetchedAt.IsZero() {
-		t.Errorf("CVE-2021-3711 = %+v", a)
+		t.Errorf("CVE-2023-0286 = %+v", a)
 	}
 	f := m70Read(t, e.migDB, e.openssl, e.v3449)
 	if f.method != "distro_fixed" || f.evidence.Basis != "later_releases" || f.evidence.Fixed != "1.1.1k-1" ||
@@ -172,7 +173,7 @@ func TestM70DistroScan_RelabelsWithEvidence(t *testing.T) {
 
 	// The vulnerability list: CVE-2021-3449 is fixed for the Debian package
 	// but still matched by the other component, so the CVE shows nvd_cpe,
-	// not distro_fixed; CVE-2021-3711 shows distro_affected with evidence.
+	// not distro_fixed; CVE-2023-0286 shows distro_affected with evidence.
 	var vulns []model.Vulnerability
 	scope, _ := ScanScopeFrom(ctx)
 	if err := scope.ReadTx(ctx, func(txCtx context.Context) error {
@@ -189,8 +190,8 @@ func TestM70DistroScan_RelabelsWithEvidence(t *testing.T) {
 	if v := got["CVE-2021-3449"]; v.MatchMethod != "nvd_cpe" || v.MatchConfidence != "high" || len(v.MatchEvidence) != 0 {
 		t.Errorf("list CVE-2021-3449 = %q / %q / %s", v.MatchMethod, v.MatchConfidence, v.MatchEvidence)
 	}
-	if v := got["CVE-2021-3711"]; v.MatchMethod != "distro_affected" || v.MatchConfidence != "high" || len(v.MatchEvidence) == 0 {
-		t.Errorf("list CVE-2021-3711 = %q / %q / %s", v.MatchMethod, v.MatchConfidence, v.MatchEvidence)
+	if v := got["CVE-2023-0286"]; v.MatchMethod != "distro_affected" || v.MatchConfidence != "high" || len(v.MatchEvidence) == 0 {
+		t.Errorf("list CVE-2023-0286 = %q / %q / %s", v.MatchMethod, v.MatchConfidence, v.MatchEvidence)
 	}
 	if v := got["CVE-2009-0591"]; v.MatchMethod != "nvd_cpe_unverified" || v.MatchConfidence != "low" || len(v.MatchEvidence) != 0 {
 		t.Errorf("list CVE-2009-0591 = %q / %q / %s", v.MatchMethod, v.MatchConfidence, v.MatchEvidence)
@@ -243,7 +244,7 @@ func TestM70DistroScan_RankRule(t *testing.T) {
 	vulnRepo := repository.NewVulnerabilityRepository(e.appDB)
 	scope, _ := ScanScopeFrom(ctx)
 	if err := scope.writeTx(ctx, e.sbom, func(txCtx context.Context) error {
-		for _, v := range []uuid.UUID{e.v3711, e.v3449} {
+		for _, v := range []uuid.UUID{e.v0286, e.v3449} {
 			if err := vulnRepo.LinkComponent(txCtx, e.openssl, v, model.MatchNVDCPEDistro); err != nil {
 				return err
 			}
@@ -252,7 +253,7 @@ func TestM70DistroScan_RankRule(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if r := m70Read(t, e.migDB, e.openssl, e.v3711); r.method != "distro_affected" || !r.hasEv {
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_affected" || !r.hasEv {
 		t.Errorf("NVD writer downgraded distro_affected: %+v", r)
 	}
 }
@@ -273,7 +274,7 @@ func TestM70DistroScan_DataFailureIsAReason(t *testing.T) {
 	if rep.FetchFailures != 1 || rep.LinksKeptForFailure != 4 || rep.Relabelled != 0 {
 		t.Errorf("report %+v", rep)
 	}
-	for _, v := range []uuid.UUID{e.v3711, e.v3449, e.v0778, e.vNoRec} {
+	for _, v := range []uuid.UUID{e.v0286, e.v3449, e.v1292, e.vNoRec} {
 		if row := m70Read(t, e.migDB, e.openssl, v); row.method != "nvd_cpe_unverified" || row.hasEv {
 			t.Errorf("label changed after a failed fetch: %+v", row)
 		}
@@ -292,7 +293,7 @@ func TestM70DistroScan_Offline(t *testing.T) {
 	if got := r.requests(); len(got) != 0 {
 		t.Errorf("offline made requests: %q", got)
 	}
-	if row := m70Read(t, e.migDB, e.openssl, e.v3711); row.method != "nvd_cpe_unverified" {
+	if row := m70Read(t, e.migDB, e.openssl, e.v0286); row.method != "nvd_cpe_unverified" {
 		t.Errorf("offline relabelled: %+v", row)
 	}
 }
@@ -306,7 +307,7 @@ func TestM70RelabelDistro_TenantBoundary(t *testing.T) {
 	changed := true
 	if err := scope.writeTx(ctx, a.sbom, func(txCtx context.Context) error {
 		var err error
-		changed, err = a.compRepo.RelabelDistro(txCtx, b.openssl, b.v3711, model.MatchDistroFixed, []byte(`{"source":"osv"}`))
+		changed, err = a.compRepo.RelabelDistro(txCtx, b.openssl, b.v0286, model.MatchDistroFixed, []byte(`{"source":"osv"}`))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -314,7 +315,7 @@ func TestM70RelabelDistro_TenantBoundary(t *testing.T) {
 	if changed {
 		t.Error("tenant A relabelled tenant B's link")
 	}
-	if row := m70Read(t, b.migDB, b.openssl, b.v3711); row.method != "nvd_cpe_unverified" {
+	if row := m70Read(t, b.migDB, b.openssl, b.v0286); row.method != "nvd_cpe_unverified" {
 		t.Errorf("tenant B's link = %+v", row)
 	}
 }
@@ -360,5 +361,42 @@ func TestM70DistroScan_RedisCache(t *testing.T) {
 	}
 	if rep2.CacheHits != 1 || rep2.Requests != 0 || rep2.Affected != rep1.Affected || rep2.Fixed != rep1.Fixed || rep2.Relabelled != 3 {
 		t.Errorf("cold %+v / warm %+v", rep1, rep2)
+	}
+}
+
+// Codex M70 R3 High-6: a CACHE HIT also waits for a process-wide slot.
+func TestM70DistroLoad_CacheHitTakesASlot(t *testing.T) {
+	url := os.Getenv("REDIS_URL")
+	if url == "" {
+		t.Skip("REDIS_URL not set")
+	}
+	opt, err := redis.ParseURL(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { _ = rdb.Close() })
+	r := m70DebianReplay(t)
+	srvURL := r.start().URL
+	key := cache.DistroCacheKey(distroSource(srvURL), "Debian", "openssl")
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
+	s := NewDistroService(nil, srvURL, cache.NewDistroCache(rdb), false)
+	s.gap = 0
+	k := distroFetchKey{ecosystem: "Debian", pkg: "openssl"}
+	if _, _, hit, _, err := s.load(context.Background(), k, s.pacer()); err != nil || hit {
+		t.Fatalf("cold load: hit=%v err=%v", hit, err)
+	}
+	for i := 0; i < cap(distroQuerySlots); i++ {
+		distroQuerySlots <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap(distroQuerySlots); i++ {
+			<-distroQuerySlots
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, _, hit, _, err := s.load(ctx, k, s.pacer()); err == nil || hit {
+		t.Errorf("a cache hit proceeded without a slot: hit=%v err=%v", hit, err)
 	}
 }

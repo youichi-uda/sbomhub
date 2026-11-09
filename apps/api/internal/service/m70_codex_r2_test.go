@@ -124,12 +124,12 @@ func newStaticOSV(t *testing.T, prefix string) string {
 	return srv.URL
 }
 
-// An AlmaLinux erratum names the binary rpms of one source in one release:
-// it speaks for every CVE it lists. Two releases: it does not.
+// A single-package, single-release erratum speaks for every CVE it lists;
+// two releases: it does not. (Several packages: see Codex R3 High-4.)
 func TestM70R2_RPMErratumSpeaksForItsRelease(t *testing.T) {
 	cves := []string{"CVE-2021-0001", "CVE-2021-0002"}
 	alma := distroTarget{family: "almalinux", query: "AlmaLinux:9", release: "AlmaLinux:9", pkg: "openssl-libs", version: "1:3.0.1-41.el9_0", scheme: schemeRPM}
-	r := distroRecord{ID: "ALSA-1", CVEs: cves, Releases: 1, Packages: 4,
+	r := distroRecord{ID: "ALSA-1", CVEs: cves, Releases: 1, Packages: 1,
 		Entries: []distroEntry{entry("AlmaLinux:9", "i", "0", "f", "1:3.0.1-43.el9_0")}}
 	if d := indexDistroRecords([]distroRecord{r}).decide(alma, "CVE-2021-0002"); d.verdict != verdictAffected {
 		t.Errorf("ALSA = %+v, want affected", d)

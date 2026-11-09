@@ -197,18 +197,32 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 	if id != p.namespace && purlNamespaceAlias[p.namespace] != id {
 		return distroTarget{}, "distro_mismatch"
 	}
+	compVersion = strings.TrimSpace(compVersion)
 	version := p.version
 	if version == "" {
-		version = strings.TrimSpace(compVersion)
+		version = compVersion
 	}
 	if version == "" {
 		return distroTarget{}, "no_version"
+	}
+	// The NVD link was made on the component's version: a purl stating a
+	// different one is no target (Codex M70 R3 High-1). Checked per scheme
+	// below, before any source-package override.
+	mismatch := func(cmp func(a, b string) (int, error), a, b string) bool {
+		if b == "" {
+			return false
+		}
+		c, err := cmp(a, b)
+		return err != nil || c != 0
 	}
 
 	t := distroTarget{family: id}
 	switch p.typ {
 	case "deb":
 		t.scheme = schemeDpkg
+		if mismatch(pkgversion.CompareDpkg, version, compVersion) {
+			return distroTarget{}, "version_mismatch"
+		}
 		t.pkg, t.version = p.name, version
 		up, ok := p.qualifier("upstream")
 		if !ok {
@@ -271,8 +285,15 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 		if _, err := pkgversion.ParseRPMEVR(version); err != nil {
 			return distroTarget{}, "bad_version"
 		}
+		cv := compVersion
+		if cv != "" && epoch != "" && !strings.Contains(cv, ":") {
+			cv = epoch + ":" + cv // Syft's component version omits the epoch
+		}
+		if mismatch(pkgversion.CompareRPMEVR, version, cv) {
+			return distroTarget{}, "version_mismatch"
+		}
 		t.version = version
-		major, ok := releaseMajor(rel)
+		major, ok := numericReleaseMajor(rel) // no codenames (Codex M70 R3 High-2)
 		if !ok {
 			return distroTarget{}, "unknown_release"
 		}
@@ -304,6 +325,12 @@ func releaseMajor(rel string) (int, bool) {
 	if n, ok := debianCodenames[rel]; ok {
 		return n, true
 	}
+	return numericReleaseMajor(rel)
+}
+
+// numericReleaseMajor reads "11", "11.7" or "9.4" as its major number.
+func numericReleaseMajor(rel string) (int, bool) {
+	rel = strings.TrimSpace(rel)
 	// Digits, optionally one numeric point release ("11", "11.7", "9.4").
 	// Anything else ("12.sid", "11.7.1", "9.garbage") is not a release
 	// this code can name an ecosystem for (Codex M70 R1 Medium).
@@ -467,24 +494,11 @@ func (r *distroRecord) isCVERecord() bool {
 // 22.04 is affected. So an advisory speaks for each of its CVEs only when it
 // names ONE CVE, or ONE release and ONE package in the whole record (an LTS
 // advisory for one source package: every listed CVE was fixed there). An
-// AlmaLinux / Rocky Linux erratum (ALSA / RLSA) names one release and the
-// BINARY rpms of the source it rebuilt (openssl, openssl-libs, ...): one
-// release suffices there.
+// AlmaLinux / Rocky Linux erratum that lists several CVEs for several binary
+// rpms (openssl, openssl-libs, ...) does not say which CVE concerns which rpm
+// either (Codex M70 R3 High-4), so it decides only single-CVE cases.
 func (r *distroRecord) speaksFor() bool {
-	if r.isCVERecord() || len(r.CVEs) == 1 {
-		return true
-	}
-	if r.Releases != 1 {
-		return false
-	}
-	if r.Packages == 1 {
-		return true
-	}
-	return len(r.Entries) > 0 && rpmErratumEcosystem(r.Entries[0].Ecosystem)
-}
-
-func rpmErratumEcosystem(eco string) bool {
-	return strings.HasPrefix(eco, "AlmaLinux:") || strings.HasPrefix(eco, "Rocky Linux:")
+	return r.isCVERecord() || len(r.CVEs) == 1 || (r.Releases == 1 && r.Packages == 1)
 }
 
 // debianFirstNumbered is the first Debian release OSV names by its major
@@ -557,10 +571,8 @@ type entryResult struct {
 // Entries for the installed release decide, taken from the records that
 // speak for the CVE in that release (speaksFor): for Ubuntu only the
 // CVE-specific record when there is one; for Debian the CVE-specific record
-// when it names the release, else advisories. A multi-CVE, multi-release
-// advisory is used only to say "affected", and only when the CVE's own
-// record shows the installed version inside an affected range of a later
-// Debian release; it never says "fixed".
+// when it names the release, else advisories that speak for the CVE. An
+// advisory that does not is never used, in either direction.
 func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 	cve := strings.ToUpper(strings.TrimSpace(cveID))
 	recs := d.byCVE[cve]
@@ -602,13 +614,11 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 				excluded = true
 				continue
 			case !r.speaksFor():
-				res := evalEntry(t.version, e, cmp)
-				if res.state != entryAffected || !d.lineageAffected(t, cveRecs, cmp) {
-					excluded = true
-					continue
-				}
-				exact = append(exact, res)
-				exactIDs = appendUnique(exactIDs, r.ID)
+				// No verdict from it, in either direction: other releases'
+				// records do not prove which of its CVEs concerned this one —
+				// Debian's "introduced 0" is lossy (a 3.0-only CVE reads the
+				// same), Codex M70 R3 High-5.
+				excluded = true
 				continue
 			}
 			exact = append(exact, evalEntry(t.version, e, cmp))
@@ -644,23 +654,6 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 		return laterReleaseVerdict(t, cveRecs, ev, cmp)
 	}
 	return distroDecision{reason: "release_not_listed"}
-}
-
-// lineageAffected: the CVE's own records place the installed version inside
-// an affected range of a Debian release later than the installed one.
-func (d distroData) lineageAffected(t distroTarget, cveRecs []*distroRecord, cmp versionCmp) bool {
-	if t.family != "debian" {
-		return false
-	}
-	for _, r := range cveRecs {
-		for _, e := range r.Entries {
-			if n, ok := debianEcosystemMajor(e.Ecosystem); ok && n > t.releaseMajor &&
-				evalEntry(t.version, e, cmp).state == entryAffected {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // combineExact combines the entries that name the installed release.
@@ -803,8 +796,9 @@ func debianEcosystemMajor(eco string) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	major, _, _ := strings.Cut(rest, ".")
-	if !isDigits(major) {
+	// The whole suffix: "12", or "6.0" / "3.1" (Codex M70 R3 High-3).
+	major, minor, hasMinor := strings.Cut(rest, ".")
+	if !isDigits(major) || (hasMinor && !isDigits(minor)) {
 		return 0, false
 	}
 	n, err := strconv.Atoi(major)

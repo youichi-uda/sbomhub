@@ -32,6 +32,10 @@ const (
 	DistroCachePrefix = "distro1:"
 	// DistroCacheTTL matches NVDCacheTTL.
 	DistroCacheTTL = 24 * time.Hour
+	// DistroCacheMaxBytes bounds an entry read back: a larger value (not one
+	// this build writes — a reduced Debian "linux" answer is a few MB) is a
+	// miss, never decoded.
+	DistroCacheMaxBytes = 32 << 20
 )
 
 // DistroCache stores reduced OSV package answers.
@@ -71,7 +75,13 @@ func (c *DistroCache) Get(ctx context.Context, source, ecosystem, name string) (
 	}
 	ctx, cancel := opContext(ctx)
 	defer cancel()
-	data, err := c.client.Get(ctx, DistroCacheKey(source, ecosystem, name)).Bytes()
+	key := DistroCacheKey(source, ecosystem, name)
+	if n, err := c.client.StrLen(ctx, key).Result(); err != nil {
+		return nil, fmt.Errorf("redis strlen error: %w", err)
+	} else if n == 0 || n > DistroCacheMaxBytes {
+		return nil, nil
+	}
+	data, err := c.client.Get(ctx, key).Bytes()
 	if err == redis.Nil {
 		return nil, nil
 	}

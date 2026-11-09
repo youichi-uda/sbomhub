@@ -418,6 +418,15 @@ type distroCachePayload struct {
 // load returns one package's reduced records: from the cache, or from OSV
 // (and then cached). It never returns a partial answer.
 func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(context.Context) error) (recs []distroRecord, fetchedAt time.Time, hit bool, pages int, err error) {
+	// The process-wide slot covers the cache read too: decoding a large
+	// cached answer costs the same memory as fetching it (Codex M70 R3
+	// High-6).
+	select {
+	case distroQuerySlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, time.Time{}, false, 0, ctx.Err()
+	}
+	defer func() { <-distroQuerySlots }()
 	if e, cerr := s.cache.Get(ctx, s.source, k.ecosystem, k.pkg); cerr != nil {
 		slog.Debug("distro cache get error", "ecosystem", k.ecosystem, "package", k.pkg, "error", cerr)
 	} else if e != nil {
@@ -426,12 +435,6 @@ func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(co
 			return p.Records, e.FetchedAt, true, 0, nil
 		}
 	}
-	select {
-	case distroQuerySlots <- struct{}{}:
-	case <-ctx.Done():
-		return nil, time.Time{}, false, 0, ctx.Err()
-	}
-	defer func() { <-distroQuerySlots }()
 	// Each page is reduced as it arrives; only this package's entries are
 	// kept.
 	pages, err = s.osv.QueryPackageEach(ctx, k.ecosystem, k.pkg,

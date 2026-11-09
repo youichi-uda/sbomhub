@@ -219,9 +219,9 @@ func TestM70Fixture_DebianOpenSSL(t *testing.T) {
 
 	// Pinned on the recorded data (2026-11-09).
 	want := map[string]row{
-		"distro_affected":                {25, 25},
+		"distro_affected":                {21, 21},
 		"distro_fixed/later_releases":    {181, 0},
-		"nvd_cpe_unverified (unchanged)": {107, 17},
+		"nvd_cpe_unverified (unchanged)": {111, 21},
 	}
 	for l, w := range want {
 		if g := byLabel[l]; g == nil || *g != w {
@@ -311,13 +311,14 @@ func TestM70Fixture_OtherDistros(t *testing.T) {
 	if d := alma.decide(at, "CVE-2022-3358"); d.verdict != verdictFixed || d.evidence.Fixed != "1:3.0.7-6.el9_2" {
 		t.Errorf("alma CVE-2022-3358 = %+v", d)
 	}
-	// ALSA-2023:0946 (1:3.0.1-47.el9_1) is below 3.0.7: fixed.
-	if d := alma.decide(at, "CVE-2023-0286"); d.verdict != verdictFixed {
-		t.Errorf("alma CVE-2023-0286 = %+v", d)
+	// ALSA-2023:0946 lists 8 CVEs for 4 binary rpms: it does not say which
+	// CVE concerns which rpm, so no verdict (Codex M70 R3 High-4).
+	if d := alma.decide(at, "CVE-2023-0286"); d.verdict != verdictNone {
+		t.Errorf("alma CVE-2023-0286 = %+v, want no verdict", d)
 	}
 	old, _ := distroTargetFor("pkg:rpm/almalinux/openssl@3.0.1-41.el9_0?epoch=1&distro=almalinux-9", "", nil)
-	if d := alma.decide(old, "CVE-2022-3602"); d.verdict != verdictAffected || d.evidence.Fixed != "1:3.0.1-43.el9_0" {
-		t.Errorf("alma CVE-2022-3602 on 3.0.1-41 = %+v", d)
+	if d := alma.decide(old, "CVE-2022-3358"); d.verdict != verdictAffected || d.evidence.Fixed != "1:3.0.7-6.el9_2" {
+		t.Errorf("alma CVE-2022-3358 on 3.0.1-41 = %+v", d)
 	}
 	// The SBOM dropped the epoch: no verdict.
 	noEpoch, _ := distroTargetFor("pkg:rpm/almalinux/openssl@3.0.1-41.el9_0?distro=almalinux-9", "", nil)
