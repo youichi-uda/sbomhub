@@ -726,12 +726,16 @@ type distroData struct {
 	// the releases the CVE-level data still covers. A Debian release absent
 	// from all of them has been dropped from the data (end of life).
 	cveRecordReleases map[string]bool
+	// ids are the ids of every record of the package (built once; Codex M70
+	// R26 Medium-2).
+	ids map[string]bool
 }
 
 func indexDistroRecords(recs []distroRecord) distroData {
-	d := distroData{byCVE: map[string][]*distroRecord{}, cveRecordReleases: map[string]bool{}}
+	d := distroData{byCVE: map[string][]*distroRecord{}, cveRecordReleases: map[string]bool{}, ids: map[string]bool{}}
 	for i := range recs {
 		r := &recs[i]
+		d.ids[r.ID] = true
 		if m := normaliseModified(r.Modified); m > d.revision {
 			d.revision = m
 		}

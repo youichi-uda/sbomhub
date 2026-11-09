@@ -10,7 +10,7 @@ import (
 // absent evidence record is conclusively withdrawn; an active record or a
 // failed lookup blocks it, and a failed lookup is reported.
 func TestM70R25_AllAbsentRecordsMustBeWithdrawn(t *testing.T) {
-	d := distroData{byCVE: map[string][]*distroRecord{}, sourceID: "S", revision: "2026-11-01T00:00:00.000000000Z"}
+	d := distroData{byCVE: map[string][]*distroRecord{}, ids: map[string]bool{}, sourceID: "S", revision: "2026-11-01T00:00:00.000000000Z"}
 	l := repository.SbomLink{Method: "distro_affected", Records: []string{"R1", "R2"}, WMSource: "S", WMRev: "2026-11-05T00:00:00.000000000Z"}
 	wm := []byte(`{"data_modified":"2026-11-01T00:00:00.000000000Z"}`)
 	states := map[string]recordState{

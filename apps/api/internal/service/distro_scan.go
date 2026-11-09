@@ -113,15 +113,9 @@ func (d distroData) noVerdictWatermark(l repository.SbomLink, wm []byte, lookup 
 	if !model.MatchMethod(l.Method).IsDistro() || l.WMSource != d.sourceID || l.WMRev <= d.revision || lookup == nil {
 		return wm, false
 	}
-	present := map[string]bool{}
-	for _, rs := range d.byCVE {
-		for _, r := range rs {
-			present[r.ID] = true
-		}
-	}
 	best, absent := "", 0
 	for _, id := range l.Records {
-		if present[id] {
+		if d.ids[id] {
 			continue
 		}
 		absent++
@@ -484,6 +478,9 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 		}
 		var g []pendingLink
 		for _, l := range byComp[w.comp.ID] {
+			if ctx.Err() != nil { // Codex M70 R26 Medium-2
+				break
+			}
 			dec := d.decide(w.target, l.CVEID)
 			if dec.verdict == verdictNone {
 				counts.NoVerdict[dec.reason]++
@@ -520,7 +517,13 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 				if model.MatchMethod(l.Method).IsDistro() {
 					counts.Cleared++ // Codex M70 R24 Low-4
 				}
-				g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: wm})
+				// The same settlement as any no verdict, withdrawal handling
+				// included (Codex M70 R26 High-1).
+				lwm, failed := d.noVerdictWatermark(l, wm, lookup)
+				if failed {
+					counts.LookupFailures++
+				}
+				g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: lwm})
 				continue
 			}
 			switch dec.verdict {
