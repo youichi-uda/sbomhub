@@ -117,8 +117,8 @@ func parsePurl(s string) (parsedPurl, bool) {
 	if i := strings.IndexByte(rest, '#'); i >= 0 {
 		// A subpath must be well formed even though it is not used (Codex
 		// M70 R34 Low-3): no empty, ".", ".." or slash-decoding segment, and
-		// no misplaced "?" (R38 Low-3).
-		if strings.Contains(rest[i+1:], "?") {
+		// no misplaced "?" (R38 Low-3) or second "#" (R45 Low-2).
+		if strings.ContainsAny(rest[i+1:], "?#") {
 			return parsedPurl{}, false
 		}
 		for _, seg := range strings.Split(rest[i+1:], "/") {
@@ -1141,6 +1141,12 @@ func laterReleaseVerdict(t distroTarget, recs []*distroRecord, ev model.DistroEv
 			}
 			if n <= t.releaseMajor {
 				continue
+			}
+			if _, known := client.ReleaseCodename("debian", strconv.Itoa(n)); !known {
+				// A release this code cannot check the purl qualifiers of
+				// (no codename here yet) cannot vouch for a fix (Codex M70
+				// R45 High-1).
+				return distroDecision{reason: "unverified_release"}
 			}
 			res := evalEntry(t.version, e, cmp)
 			if res.state != entryFixed {
