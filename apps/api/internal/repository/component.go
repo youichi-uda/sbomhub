@@ -191,7 +191,15 @@ func setMatch(v *model.Vulnerability, best sql.NullString, evidence []byte) {
 	}
 	v.MatchConfidence = model.MatchMethod(v.MatchMethod).Confidence()
 	if model.MatchMethod(v.MatchMethod).IsDistro() && len(evidence) > 0 {
-		v.MatchEvidence = append(json.RawMessage(nil), evidence...)
+		// source_id is internal (an endpoint hash for revision ordering):
+		// never shown (Codex M70 R14 High-5).
+		var m map[string]json.RawMessage
+		if json.Unmarshal(evidence, &m) == nil {
+			delete(m, "source_id")
+			if b, err := json.Marshal(m); err == nil {
+				v.MatchEvidence = b
+			}
+		}
 	}
 }
 

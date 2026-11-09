@@ -33,7 +33,7 @@ func TestM70R13_SourceIdentity(t *testing.T) {
 	if distroSourceID(a) == distroSourceID(b) {
 		t.Error("credential-distinct endpoints share an identity")
 	}
-	if distroSource(a) != distroSource(b) || distroSource(a) != "https://mirror/v1" {
+	if distroSource(a) != distroSource(b) || distroSource(a) != "https://mirror" {
 		t.Errorf("display %q / %q", distroSource(a), distroSource(b))
 	}
 	if distroSourceID("") != distroSourceID("https://api.osv.dev/v1/") {

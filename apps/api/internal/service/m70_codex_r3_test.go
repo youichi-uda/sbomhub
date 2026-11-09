@@ -12,7 +12,8 @@ func TestM70R3_PurlAndComponentVersionMustAgree(t *testing.T) {
 	for _, c := range []struct{ purl, version, reason string }{
 		{"pkg:deb/ubuntu/openssl@1.1.1f-1ubuntu2.20?distro=ubuntu-20.04", "1.1.1f-1ubuntu2.1", "version_mismatch"},
 		{"pkg:deb/debian/openssl@1.1.1k-1?distro=debian-11", "1.1.1k-1", ""},
-		{"pkg:deb/debian/openssl@1.1.1k-1?distro=debian-11", "0:1.1.1k-1", ""}, // the same version
+		// Equal to dpkg, but not the same text (Codex R14 High-2).
+		{"pkg:deb/debian/openssl@1.1.1k-1?distro=debian-11", "0:1.1.1k-1", "version_mismatch"},
 		{"pkg:deb/debian/openssl@1.1.1k-1?distro=debian-11", "", ""},
 		{"pkg:rpm/almalinux/openssl@3.0.7-27.el9?epoch=1&distro=almalinux-9", "1:3.0.7-27.el9", ""},
 		{"pkg:rpm/almalinux/openssl@3.0.7-27.el9?epoch=1&distro=almalinux-9", "3.0.7-27.el9", ""}, // Syft's component version has no epoch

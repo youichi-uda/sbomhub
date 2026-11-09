@@ -163,7 +163,16 @@ func (c *OSVClient) QueryPackageEach(ctx context.Context, ecosystem, name string
 // entry for the queried package in the queried ecosystem (exactly, or a
 // release of it: "Debian" -> "Debian:11"). A record the caller would
 // silently drop could be the one that says "affected".
+// maxOSVTimestampSkew is how far in the future an OSV timestamp may lie: a
+// later one would hold the revision guard forever (Codex M70 R14 High-1).
+const maxOSVTimestampSkew = 24 * time.Hour
+
 func validatePackageRecords(raw []byte, q OSVPackage) error {
+	latest := time.Now().Add(maxOSVTimestampSkew)
+	validTime := func(s string) bool {
+		ts, err := time.Parse(time.RFC3339Nano, s)
+		return err == nil && !ts.After(latest)
+	}
 	var env struct {
 		Vulns []json.RawMessage `json:"vulns"`
 	}
@@ -183,13 +192,16 @@ func validatePackageRecords(raw []byte, q OSVPackage) error {
 		if strings.TrimSpace(r.ID) == "" {
 			return fmt.Errorf("osv: package query record %d has no id", i)
 		}
+		if r.Modified != "" && !validTime(r.Modified) {
+			return fmt.Errorf("osv: package query record %q has a malformed or future modified", r.ID)
+		}
 		if r.Withdrawn != "" {
-			if _, err := time.Parse(time.RFC3339Nano, r.Withdrawn); err != nil {
-				return fmt.Errorf("osv: package query record %q has a malformed withdrawn", r.ID)
+			if !validTime(r.Withdrawn) {
+				return fmt.Errorf("osv: package query record %q has a malformed or future withdrawn", r.ID)
 			}
 			continue
 		}
-		if _, err := time.Parse(time.RFC3339Nano, r.Modified); err != nil {
+		if r.Modified == "" {
 			return fmt.Errorf("osv: package query record %q has no valid modified", r.ID)
 		}
 		if r.Affected == nil || !bytes.HasPrefix(bytes.TrimSpace(*r.Affected), []byte("[")) {

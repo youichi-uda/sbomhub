@@ -17,6 +17,7 @@ type DistroEvidence struct {
 	// full configured URL, credentials included, never shown in clear):
 	// revisions are compared, and cache entries shared, only within one
 	// SourceID (Codex M70 R13 Medium-5).
+	// It is stored, never returned by the API (repository setMatch drops it).
 	SourceID string `json:"source_id,omitempty"`
 	// Status is the distro's statement about the installed version:
 	// "affected" (a fix exists above it), "unfixed" (no fix released),

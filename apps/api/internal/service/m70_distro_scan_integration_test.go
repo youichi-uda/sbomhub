@@ -599,3 +599,34 @@ func TestM70Watermark_AndPriorMethod(t *testing.T) {
 		t.Errorf("after clear: %+v", r)
 	}
 }
+
+// Codex M70 R14 High-4: LinkComponent's prior_method update never reaches
+// another tenant's link.
+func TestM70LinkComponent_PriorMethodTenantBoundary(t *testing.T) {
+	a := m70Seed(t, "m70priorA")
+	b := m70Seed(t, "m70priorB")
+	ctxB := WithScanScope(context.Background(), b.appDB, b.tenant)
+	scopeB, _ := ScanScopeFrom(ctxB)
+	if err := scopeB.writeTx(ctxB, b.sbom, func(c context.Context) error {
+		_, err := b.compRepo.RelabelDistro(c, b.openssl, b.v0286, model.MatchDistroFixed, []byte(`{"source":"osv"}`))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctxA := WithScanScope(context.Background(), a.appDB, a.tenant)
+	scopeA, _ := ScanScopeFrom(ctxA)
+	vulnRepo := repository.NewVulnerabilityRepository(a.appDB)
+	if err := scopeA.writeTx(ctxA, a.sbom, func(c context.Context) error {
+		return vulnRepo.LinkComponent(c, b.openssl, b.v0286, model.MatchNVDCPE)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var prior string
+	if err := b.migDB.QueryRow(`SELECT COALESCE(match_evidence->>'prior_method', '') FROM component_vulnerabilities
+		WHERE component_id = $1 AND vulnerability_id = $2`, b.openssl, b.v0286).Scan(&prior); err != nil {
+		t.Fatal(err)
+	}
+	if prior != "nvd_cpe_unverified" {
+		t.Errorf("tenant A rewrote tenant B's prior_method to %q", prior)
+	}
+}

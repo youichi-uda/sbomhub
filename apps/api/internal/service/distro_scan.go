@@ -76,8 +76,9 @@ const (
 	distroMaxBytesPerPackage = 96 << 20
 	// distroCachePayloadVersion is bumped with the distroRecord format
 	// (2: Releases / Packages, Codex M70 R2; 3: Ubuntu binaries, R4;
-	// 4: record modified, R8; 5: records validated as since R11, R12).
-	distroCachePayloadVersion = 5
+	// 4: record modified, R8; 5: records validated as since R11, R12;
+	// 6: no future timestamps, R14).
+	distroCachePayloadVersion = 6
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -514,9 +515,19 @@ func distroSourceID(osvBaseURL string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-// distroSource is an OSV endpoint as SHOWN in evidence (source_url):
-// scheme://host[:port]/path only, so no credentials, query or fragment ever
-// reach a tenant through the API (Codex M70 R12 High-4).
+// notFuture: a revision no later than a day from now (Codex M70 R14 High-1).
+func notFuture(rev string) bool {
+	if rev == "" {
+		return true
+	}
+	ts, err := time.Parse(time.RFC3339Nano, rev)
+	return err == nil && !ts.After(time.Now().Add(24*time.Hour))
+}
+
+// distroSource is an OSV endpoint as SHOWN in evidence (source_url): its
+// origin, scheme://host[:port], only — no credentials, path (which may carry
+// a token), query or fragment ever reach a tenant through the API (Codex M70
+// R12 High-4, R14 High-5).
 func distroSource(osvBaseURL string) string {
 	raw := strings.TrimSpace(osvBaseURL)
 	if raw == "" {
@@ -526,7 +537,7 @@ func distroSource(osvBaseURL string) string {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return "configured-endpoint"
 	}
-	return u.Scheme + "://" + u.Host + strings.TrimRight(u.EscapedPath(), "/")
+	return u.Scheme + "://" + u.Host
 }
 
 // distroCachePayload is what the cache entry holds for one package.
@@ -560,7 +571,8 @@ func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(co
 		slog.Debug("distro cache get error", "ecosystem", k.ecosystem, "package", k.pkg, "error", cerr)
 	} else if e != nil {
 		var p distroCachePayload
-		if json.Unmarshal(e.Payload, &p) == nil && p.Version == distroCachePayloadVersion && validDistroRecords(p.Records) {
+		if json.Unmarshal(e.Payload, &p) == nil && p.Version == distroCachePayloadVersion && validDistroRecords(p.Records) &&
+			notFuture(e.DataModified) {
 			return distroLoad{recs: p.Records, fetchedAt: e.FetchedAt, revision: e.DataModified}, true, 0, nil
 		}
 	}
@@ -621,7 +633,7 @@ func (s *DistroService) loadSlotted(ctx context.Context, k distroFetchKey, pace 
 func validDistroRecords(recs []distroRecord) bool {
 	for _, r := range recs {
 		if strings.TrimSpace(r.ID) == "" || len(r.CVEs) == 0 || len(r.Entries) == 0 || r.Releases < 1 || r.Packages < 1 ||
-			r.Modified == "" || normaliseModified(r.Modified) != r.Modified {
+			r.Modified == "" || normaliseModified(r.Modified) != r.Modified || !notFuture(r.Modified) {
 			return false
 		}
 		for _, c := range r.CVEs {

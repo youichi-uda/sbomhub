@@ -123,11 +123,15 @@ func parsePurl(s string) (parsedPurl, bool) {
 		p.qualifiers = q
 		rest = rest[:i]
 	}
-	rest = strings.Trim(rest, "/")
+	// Strict (Codex M70 R14 Medium-6): no leading or trailing '/', no empty
+	// path segment, and an '@' must be followed by a version.
+	if strings.HasPrefix(rest, "/") || strings.HasSuffix(rest, "/") || strings.Contains(rest, "//") {
+		return parsedPurl{}, false
+	}
 	slash := strings.LastIndexByte(rest, '/')
 	if at := strings.LastIndexByte(rest, '@'); at > slash {
 		v, err := url.PathUnescape(rest[at+1:])
-		if err != nil {
+		if err != nil || v == "" {
 			return parsedPurl{}, false
 		}
 		p.version = v
@@ -211,12 +215,12 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 	// The NVD link was made on the component's version: a purl stating a
 	// different one is no target (Codex M70 R3 High-1). Checked per scheme
 	// below, before any source-package override.
-	mismatch := func(cmp func(a, b string) (int, error), a, b string) bool {
-		if b == "" {
-			return false
-		}
-		c, err := cmp(a, b)
-		return err != nil || c != 0
+	// As TEXT: the installed string is also what OSV's exact `versions`
+	// membership uses, and "1.0" vs "1.0-0" are equal to dpkg but not to it
+	// (Codex M70 R14 High-2). The rpm epoch reconstruction is the one
+	// normalisation allowed (below).
+	mismatch := func(_ func(a, b string) (int, error), a, b string) bool {
+		return b != "" && a != b
 	}
 
 	t := distroTarget{family: id}
@@ -467,7 +471,11 @@ func purlNameAgrees(purl, compName string) bool {
 // else (Codex M70 R7 High-1). CPEs that do not parse, or state ANY / NA, are
 // never matched on a version of their own.
 func cpeVersionsAgree(cpes []string, compVersion string) bool {
-	want := strings.ToLower(strings.TrimSpace(compVersion))
+	// Exact, case included: parseCPE lower-cases, M60 queries that
+	// lower-cased value, and dpkg / rpm are case-sensitive, so a version
+	// with an upper-case letter never agrees with a CPE that states it
+	// (Codex M70 R14 High-3).
+	want := strings.TrimSpace(compVersion)
 	for _, raw := range cpes {
 		n, ok := parseCPE(raw)
 		if !ok {

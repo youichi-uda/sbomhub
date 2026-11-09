@@ -14,9 +14,10 @@ import (
 // query or fragment.
 func TestM70R12_SourceURLIsSanitised(t *testing.T) {
 	for in, want := range map[string]string{
-		"https://svc:password@mirror.internal/v1?token=x#f": "https://mirror.internal/v1",
-		"https://api.osv.dev/v1/":                           "https://api.osv.dev/v1",
-		"":                                                  "https://api.osv.dev/v1",
+		// origin only since Codex R14 High-5
+		"https://svc:password@mirror.internal/v1?token=x#f": "https://mirror.internal",
+		"https://api.osv.dev/v1/":                           "https://api.osv.dev",
+		"":                                                  "https://api.osv.dev",
 	} {
 		if got := distroSource(in); got != want {
 			t.Errorf("distroSource(%q) = %q, want %q", in, got, want)

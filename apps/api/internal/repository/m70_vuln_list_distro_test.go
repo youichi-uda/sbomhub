@@ -20,7 +20,7 @@ func TestM70GetVulnerabilities_ProjectsDistroLabelsAndEvidence(t *testing.T) {
 	defer db.Close()
 	repo := NewComponentRepository(db)
 	now := time.Now()
-	ev := []byte(`{"source":"osv","status":"fixed","basis":"later_releases","release":"Debian:11","package":"openssl","installed":"1.1.1k-1","fixed":"1.1.1k-1","records":["DEBIAN-CVE-2021-3449"],"fetched_at":"2026-11-09T00:00:00Z"}`)
+	ev := []byte(`{"source":"osv","source_id":"secret-hash","status":"fixed","basis":"later_releases","release":"Debian:11","package":"openssl","installed":"1.1.1k-1","fixed":"1.1.1k-1","records":["DEBIAN-CVE-2021-3449"],"fetched_at":"2026-11-09T00:00:00Z"}`)
 	cols := []string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source",
 		"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method", "match_evidence"}
 	mock.ExpectQuery(`WHEN 'distro_fixed' THEN -1`).
@@ -50,6 +50,9 @@ func TestM70GetVulnerabilities_ProjectsDistroLabelsAndEvidence(t *testing.T) {
 		if got[i].MatchMethod != w.method || got[i].MatchConfidence != w.confidence || (len(got[i].MatchEvidence) > 0) != w.evidence {
 			t.Errorf("row %d: %q / %q / evidence %s, want %+v", i, got[i].MatchMethod, got[i].MatchConfidence, got[i].MatchEvidence, w)
 		}
+	}
+	if strings.Contains(string(got[2].MatchEvidence), "source_id") {
+		t.Errorf("source_id projected: %s", got[2].MatchEvidence)
 	}
 	if !strings.Contains(string(got[2].MatchEvidence), `"later_releases"`) {
 		t.Errorf("evidence not passed through: %s", got[2].MatchEvidence)
