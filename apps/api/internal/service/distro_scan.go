@@ -292,8 +292,8 @@ func (s *DistroService) fetchAndDecide(ctx context.Context, work []distroWork, b
 				var g [][]pendingLink
 				var counts DistroScanReport
 				var derr error
-				hit, pages, ferr := s.loadSlotted(ctx, k, pace, func(recs []distroRecord, at time.Time) error {
-					g, counts, derr = decideKey(ctx, indexDistroRecords(recs), at, byKey[k], byComp)
+				hit, pages, ferr := s.loadSlotted(ctx, k, pace, func(l distroLoad) error {
+					g, counts, derr = decideKey(ctx, l.data(), l.fetchedAt, byKey[k], byComp)
 					return nil
 				})
 				mu.Lock()
@@ -466,59 +466,82 @@ type distroCachePayload struct {
 	Records []distroRecord `json:"records"`
 }
 
+// distroLoad is one package's data as loaded.
+type distroLoad struct {
+	recs      []distroRecord
+	fetchedAt time.Time
+	// revision is the data's snapshot revision (rawRevision of the query).
+	revision string
+}
+
+// data indexes the records under the load's revision.
+func (l distroLoad) data() distroData {
+	d := indexDistroRecords(l.recs)
+	if l.revision > d.revision {
+		d.revision = l.revision
+	}
+	return d
+}
+
 // load returns one package's reduced records: from the cache, or from OSV
-// (and then cached). It never returns a partial answer.
-//
-// It holds no slot itself; callers in a scan go through loadSlotted.
-func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(context.Context) error) (recs []distroRecord, fetchedAt time.Time, hit bool, pages int, err error) {
+// (and then cached). It never returns a partial answer. It holds no slot
+// itself; callers in a scan go through loadSlotted.
+func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(context.Context) error) (l distroLoad, hit bool, pages int, err error) {
 	if e, cerr := s.cache.Get(ctx, s.source, k.ecosystem, k.pkg); cerr != nil {
 		slog.Debug("distro cache get error", "ecosystem", k.ecosystem, "package", k.pkg, "error", cerr)
 	} else if e != nil {
 		var p distroCachePayload
 		if json.Unmarshal(e.Payload, &p) == nil && p.Version == distroCachePayloadVersion && validDistroRecords(p.Records) {
-			return p.Records, e.FetchedAt, true, 0, nil
+			return distroLoad{recs: p.Records, fetchedAt: e.FetchedAt, revision: e.DataModified}, true, 0, nil
 		}
 	}
+	// The generation is taken BEFORE the request: a fetch that started later
+	// saw the source at least as new, so it wins in the cache (Codex M70 R9
+	// High-2).
+	generation := s.now().UnixNano()
 	// Each page is reduced as it arrives; only this package's entries are
-	// kept.
+	// kept, but the revision counts every record returned.
 	pages, err = s.osv.QueryPackageEach(ctx, k.ecosystem, k.pkg,
 		client.PackageQueryLimits{MaxPages: distroMaxPages, MaxTotalBytes: distroMaxBytesPerPackage}, pace,
 		func(page []client.OSVPackageRecord) error {
-			recs = append(recs, reduceOSVRecords(page, k.pkg)...)
+			l.recs = append(l.recs, reduceOSVRecords(page, k.pkg)...)
+			if r := rawRevision(page); r > l.revision {
+				l.revision = r
+			}
 			return nil
 		})
 	if err != nil {
-		return nil, time.Time{}, false, pages, err
+		return distroLoad{}, false, pages, err
 	}
-	at := s.now().UTC()
-	payload, merr := json.Marshal(distroCachePayload{Version: distroCachePayloadVersion, Records: recs})
+	l.fetchedAt = s.now().UTC()
+	payload, merr := json.Marshal(distroCachePayload{Version: distroCachePayloadVersion, Records: l.recs})
 	if merr == nil {
-		if serr := s.cache.Set(ctx, s.source, k.ecosystem, k.pkg, cache.DistroCacheEntry{FetchedAt: at, Payload: payload,
-			DataModified: indexDistroRecords(recs).revision}); serr != nil {
+		if serr := s.cache.Set(ctx, s.source, k.ecosystem, k.pkg, cache.DistroCacheEntry{FetchedAt: l.fetchedAt, Payload: payload,
+			DataModified: l.revision, Generation: generation}); serr != nil {
 			slog.Debug("distro cache set error", "ecosystem", k.ecosystem, "package", k.pkg, "error", serr)
 		}
 	}
-	return recs, at, false, pages, nil
+	return l, false, pages, nil
 }
 
-// loadSlotted loads one package and hands its records to use, holding one
+// loadSlotted loads one package and hands it to use, holding one
 // process-wide slot (distroQuerySlots) from before the cache read until use
 // has returned: the slot bounds every package's data that is decoded or in
 // use across all scans, not only the loading (Codex M70 R3 High-6, R6
-// High-1). The records must not be retained past use.
+// High-1). The data must not be retained past use.
 func (s *DistroService) loadSlotted(ctx context.Context, k distroFetchKey, pace func(context.Context) error,
-	use func([]distroRecord, time.Time) error) (hit bool, pages int, err error) {
+	use func(distroLoad) error) (hit bool, pages int, err error) {
 	select {
 	case distroQuerySlots <- struct{}{}:
 	case <-ctx.Done():
 		return false, 0, ctx.Err()
 	}
 	defer func() { <-distroQuerySlots }()
-	recs, at, hit, pages, err := s.load(ctx, k, pace)
+	l, hit, pages, err := s.load(ctx, k, pace)
 	if err != nil {
 		return hit, pages, err
 	}
-	return hit, pages, use(recs, at)
+	return hit, pages, use(l)
 }
 
 // validDistroRecords rejects a cache entry that does not look like one this

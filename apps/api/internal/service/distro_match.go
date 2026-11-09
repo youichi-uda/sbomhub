@@ -383,11 +383,72 @@ func noncanonicalFor(t distroTarget, eco string) bool {
 	if eco != t.release && strings.EqualFold(eco, t.release) {
 		return true
 	}
-	if t.family == "debian" && strings.HasPrefix(strings.ToLower(eco), "debian") {
-		_, ok := debianEcosystemMajor(eco)
-		return !ok
+	lower := strings.ToLower(eco)
+	switch t.family {
+	case "debian":
+		if strings.HasPrefix(lower, "debian") {
+			_, ok := debianEcosystemMajor(eco)
+			return !ok
+		}
+	case "ubuntu":
+		if strings.HasPrefix(lower, "ubuntu") {
+			return !canonicalUbuntuEcosystem(eco)
+		}
+	case "almalinux":
+		if strings.HasPrefix(lower, "almalinux") {
+			return !canonicalNumbered(eco, "AlmaLinux:")
+		}
+	case "rocky":
+		if strings.HasPrefix(lower, "rocky") {
+			return !canonicalNumbered(eco, "Rocky Linux:")
+		}
 	}
 	return false
+}
+
+// canonicalUbuntuEcosystem: "Ubuntu:YY.MM" for an interim release,
+// "Ubuntu:YY.MM:LTS" for an LTS one (as ubuntuEcosystem spells them), or an
+// Ubuntu Pro stream "Ubuntu:Pro:[<stream>:]YY.MM:LTS" (Codex M70 R9 High-1).
+func canonicalUbuntuEcosystem(eco string) bool {
+	if rest, ok := strings.CutPrefix(eco, "Ubuntu:Pro:"); ok {
+		parts := strings.Split(rest, ":")
+		switch len(parts) {
+		case 2:
+		case 3:
+			if parts[0] == "" || !isStreamName(parts[0]) {
+				return false
+			}
+			parts = parts[1:]
+		default:
+			return false
+		}
+		want, ok := ubuntuEcosystem(parts[0])
+		return ok && parts[1] == "LTS" && want == "Ubuntu:"+parts[0]+":LTS"
+	}
+	rest, ok := strings.CutPrefix(eco, "Ubuntu:")
+	if !ok {
+		return false
+	}
+	yymm, _, _ := strings.Cut(rest, ":")
+	want, ok := ubuntuEcosystem(yymm)
+	return ok && want == eco
+}
+
+func isStreamName(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		letter := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+		if !letter && c != '-' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// canonicalNumbered: prefix + a canonical major number ("AlmaLinux:9").
+func canonicalNumbered(eco, prefix string) bool {
+	rest, ok := strings.CutPrefix(eco, prefix)
+	return ok && isDigits(rest) && rest[0] != '0' && len(rest) <= 3
 }
 
 // purlNameAgrees: the component's name is the purl's package name (the
@@ -586,6 +647,22 @@ func reduceOSVRecords(recs []client.OSVPackageRecord, pkg string) []distroRecord
 	return out
 }
 
+// rawRevision is the newest `modified` (or `withdrawn`) of EVERY record a
+// query returned, withdrawn and unrelated ones included, normalised: the
+// data's snapshot revision. Counting dropped records keeps a withdrawal from
+// lowering it (Codex M70 R9 High-2).
+func rawRevision(recs []client.OSVPackageRecord) string {
+	rev := ""
+	for _, r := range recs {
+		for _, ts := range []string{r.Modified, r.Withdrawn} {
+			if m := normaliseModified(ts); m > rev {
+				rev = m
+			}
+		}
+	}
+	return rev
+}
+
 // isCVEID: "CVE-<4 digits>-<4+ digits>".
 func isCVEID(s string) bool {
 	rest, ok := strings.CutPrefix(s, "CVE-")
@@ -628,12 +705,26 @@ func indexDistroRecords(recs []distroRecord) distroData {
 	return d
 }
 
-// isCVERecord: the record is generated per CVE (DEBIAN-CVE-*, UBUNTU-CVE-*,
-// or an id that is itself a CVE), so each of its entries is about that CVE.
-func (r *distroRecord) isCVERecord() bool {
-	id := strings.ToUpper(r.ID)
-	return isCVEID(id) || strings.HasPrefix(id, "DEBIAN-CVE-") || strings.HasPrefix(id, "UBUNTU-CVE-")
+// recordCVE returns the CVE a per-CVE record (DEBIAN-CVE-<id>,
+// UBUNTU-CVE-<id>, or an id that is itself a CVE) is generated for, or "".
+// The suffix must be a canonical CVE id (Codex M70 R9 High-3).
+func (r *distroRecord) recordCVE() string {
+	id := strings.ToUpper(strings.TrimSpace(r.ID))
+	for _, pfx := range []string{"DEBIAN-", "UBUNTU-"} {
+		id = strings.TrimPrefix(id, pfx)
+	}
+	if isCVEID(id) {
+		return id
+	}
+	return ""
 }
+
+// isCVERecord: the record is generated per CVE.
+func (r *distroRecord) isCVERecord() bool { return r.recordCVE() != "" }
+
+// isCVERecordFor: the record is THE per-CVE record of cve; its entries are
+// statements about cve (and only cve).
+func (r *distroRecord) isCVERecordFor(cve string) bool { return r.recordCVE() == cve }
 
 // speaksFor reports whether the record's entries can be read as a statement
 // about cve in EVERY release they name (Codex M70 R1 High-1). An advisory
@@ -646,8 +737,8 @@ func (r *distroRecord) isCVERecord() bool {
 // AlmaLinux / Rocky Linux erratum that lists several CVEs for several binary
 // rpms (openssl, openssl-libs, ...) does not say which CVE concerns which rpm
 // either (Codex M70 R3 High-4), so it decides only single-CVE cases.
-func (r *distroRecord) speaksFor() bool {
-	return r.isCVERecord() || len(r.CVEs) == 1 || (r.Releases == 1 && r.Packages == 1)
+func (r *distroRecord) speaksFor(cve string) bool {
+	return r.isCVERecordFor(cve) || len(r.CVEs) == 1 || (r.Releases == 1 && r.Packages == 1)
 }
 
 // debianFirstNumbered is the first Debian release OSV names by its major
@@ -744,7 +835,7 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 	var cveRecs []*distroRecord
 	cveRecordNamesRelease := false
 	for _, r := range recs {
-		if r.isCVERecord() {
+		if r.isCVERecordFor(cve) {
 			cveRecs = append(cveRecs, r)
 			for _, e := range r.Entries {
 				if e.Ecosystem == t.release {
@@ -772,7 +863,7 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 				continue
 			}
 			switch {
-			case r.isCVERecord():
+			case r.isCVERecordFor(cve):
 			case t.family == "ubuntu" && len(cveRecs) > 0:
 				// UBUNTU-CVE lists every affected release; the USNs add only
 				// ambiguity.
@@ -781,7 +872,7 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 			case t.family == "debian" && cveRecordNamesRelease:
 				excluded = true
 				continue
-			case !r.speaksFor():
+			case !r.speaksFor(cve):
 				// No verdict from it, in either direction: other releases'
 				// records do not prove which of its CVEs concerned this one —
 				// Debian's "introduced 0" is lossy (a 3.0-only CVE reads the

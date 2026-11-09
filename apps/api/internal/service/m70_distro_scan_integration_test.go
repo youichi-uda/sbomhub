@@ -383,7 +383,7 @@ func TestM70DistroLoad_CacheHitTakesASlot(t *testing.T) {
 	s := NewDistroService(nil, srvURL, cache.NewDistroCache(rdb), false)
 	s.gap = 0
 	k := distroFetchKey{ecosystem: "Debian", pkg: "openssl"}
-	if _, _, hit, _, err := s.load(context.Background(), k, s.pacer()); err != nil || hit {
+	if _, hit, _, err := s.load(context.Background(), k, s.pacer()); err != nil || hit {
 		t.Fatalf("cold load: hit=%v err=%v", hit, err)
 	}
 	for i := 0; i < cap(distroQuerySlots); i++ {
@@ -396,7 +396,7 @@ func TestM70DistroLoad_CacheHitTakesASlot(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if hit, _, err := s.loadSlotted(ctx, k, s.pacer(), func([]distroRecord, time.Time) error { return nil }); err == nil || hit {
+	if hit, _, err := s.loadSlotted(ctx, k, s.pacer(), func(distroLoad) error { return nil }); err == nil || hit {
 		t.Errorf("a cache hit proceeded without a slot: hit=%v err=%v", hit, err)
 	}
 }
@@ -440,14 +440,14 @@ func TestM70DistroFreshness_DBAndCache(t *testing.T) {
 	key := cache.DistroCacheKey("test-fresh", "Debian", "p")
 	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
 	now := time.Now()
-	set := func(dm, payload string) {
+	set := func(gen int64, payload string) {
 		t.Helper()
-		if err := c.Set(context.Background(), "test-fresh", "Debian", "p", cache.DistroCacheEntry{FetchedAt: now, DataModified: dm, Payload: []byte(payload)}); err != nil {
+		if err := c.Set(context.Background(), "test-fresh", "Debian", "p", cache.DistroCacheEntry{FetchedAt: now, Generation: gen, Payload: []byte(payload)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	set("2026-11-09T00:00:00.000000000Z", `"new"`)
-	set("2026-11-08T00:00:00.000000000Z", `"old"`)
+	set(2, `"new"`)
+	set(1, `"old"`)
 	got, err := c.Get(context.Background(), "test-fresh", "Debian", "p")
 	if err != nil || got == nil || string(got.Payload) != `"new"` {
 		t.Errorf("cache = %+v, %v; want the newer payload", got, err)

@@ -19,9 +19,10 @@ func TestM70DistroLoad(t *testing.T) {
 	s.now = func() time.Time { return at }
 	pace := s.pacer()
 
-	recs, fetchedAt, hit, pages, err := s.load(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "openssl"}, pace)
-	if err != nil || hit || pages != 1 || !fetchedAt.Equal(at) {
-		t.Fatalf("openssl: err=%v hit=%v pages=%d at=%v", err, hit, pages, fetchedAt)
+	l, hit, pages, err := s.load(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "openssl"}, pace)
+	recs := l.recs
+	if err != nil || hit || pages != 1 || !l.fetchedAt.Equal(at) || l.revision == "" {
+		t.Fatalf("openssl: err=%v hit=%v pages=%d at=%v rev=%q", err, hit, pages, l.fetchedAt, l.revision)
 	}
 	// 390 records, all naming openssl; 4 name no CVE at all (DSA-2343-1,
 	// DSA-3197-2, DSA-3673-2, DSA-4539-3: regression / update advisories) and
@@ -30,12 +31,12 @@ func TestM70DistroLoad(t *testing.T) {
 		t.Errorf("openssl: %d records, want 386 of the 390 OSV returned", len(recs))
 	}
 
-	recs, _, _, pages, err = s.load(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "linux-signed-amd64"}, pace)
-	if err != nil || len(recs) != 0 || pages != 1 {
-		t.Errorf("linux-signed-amd64 (`{}`): recs=%d pages=%d err=%v", len(recs), pages, err)
+	l, _, pages, err = s.load(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "linux-signed-amd64"}, pace)
+	if err != nil || len(l.recs) != 0 || pages != 1 {
+		t.Errorf("linux-signed-amd64 (`{}`): recs=%d pages=%d err=%v", len(l.recs), pages, err)
 	}
 
-	if _, _, _, pages, err = s.load(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "bash"}, pace); err == nil || pages != 1 {
+	if _, _, pages, err = s.load(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "bash"}, pace); err == nil || pages != 1 {
 		t.Errorf("a 503 must be an error: pages=%d err=%v", pages, err)
 	}
 	if got := len(r.requests()); got != 3 {

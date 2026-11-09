@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/sbomhub/sbomhub/internal/client"
 )
@@ -58,7 +57,7 @@ func TestM70R6_SlotCoversTheUse(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, _, err := s.loadSlotted(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "openssl"}, s.pacer(),
-			func([]distroRecord, time.Time) error { close(inUse); <-release; return nil })
+			func(distroLoad) error { close(inUse); <-release; return nil })
 		done <- err
 	}()
 	<-inUse
