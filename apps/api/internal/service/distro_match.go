@@ -133,9 +133,27 @@ func parsePurl(s string) (parsedPurl, bool) {
 		if strings.Contains(rest[i+1:], "?") { // Codex M70 R40 Medium-3
 			return parsedPurl{}, false
 		}
-		q, err := url.ParseQuery(rest[i+1:])
-		if err != nil {
-			return parsedPurl{}, false
+		// Strict key=value pairs (Codex M70 R47 Medium-1): url.ParseQuery
+		// took "arch" without "=" as empty, decoded keys ("%64istro"), and
+		// read "+" as a space. Keys are plain [A-Za-z0-9._-] (folded and
+		// checked for duplicates by qualifier); values are percent-decoded
+		// and non-empty.
+		q := url.Values{}
+		for _, kv := range strings.Split(rest[i+1:], "&") {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok || k == "" || v == "" {
+				return parsedPurl{}, false
+			}
+			for _, c := range k {
+				if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '.' && c != '-' && c != '_' {
+					return parsedPurl{}, false
+				}
+			}
+			dv, err := url.PathUnescape(v)
+			if err != nil || dv == "" {
+				return parsedPurl{}, false
+			}
+			q[k] = append(q[k], dv)
 		}
 		p.qualifiers = q
 		rest = rest[:i]

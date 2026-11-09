@@ -84,9 +84,9 @@ func TestM70R15_QualifierStrictness(t *testing.T) {
 	for _, c := range []struct{ purl, reason string }{
 		{"pkg:deb/debian/openssl@1.1.1k-1?Distro=debian-12", ""}, // folded: Debian 12, not the OS fallback
 		{"pkg:deb/debian/openssl@1.1.1k-1?distro=debian-11&DISTRO=debian-12", "ambiguous_qualifier"},
-		{"pkg:deb/debian/openssl@1.1.1k-1?distro=", "bad_qualifier"},
-		{"pkg:deb/debian/libc6@2.31-13?distro=debian-11&upstream=", "bad_qualifier"},
-		{"pkg:rpm/almalinux/openssl@3.0.7-27.el9?distro=almalinux-9&epoch=", "bad_qualifier"},
+		{"pkg:deb/debian/openssl@1.1.1k-1?distro=", "no_purl"},                          // an empty value: refused by the strict parser (R47)
+		{"pkg:deb/debian/libc6@2.31-13?distro=debian-11&upstream=", "no_purl"},          // an empty value: refused by the strict parser (R47)
+		{"pkg:rpm/almalinux/openssl@3.0.7-27.el9?distro=almalinux-9&epoch=", "no_purl"}, // an empty value: refused by the strict parser (R47)
 	} {
 		tgt, reason := distroTargetFor(c.purl, "", os)
 		if reason != c.reason {
