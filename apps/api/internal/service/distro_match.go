@@ -629,19 +629,20 @@ func (e distroEntry) namesBinary(b string) bool {
 func reduceOSVRecords(recs []client.OSVPackageRecord, pkg string) []distroRecord {
 	var out []distroRecord
 	for _, r := range recs {
-		if strings.TrimSpace(r.Withdrawn) != "" {
+		if r.Withdrawn != "" {
 			continue
 		}
+		// Exact matching only: the client refused any CVE-like identity
+		// that is not canonical (Codex M70 R19 High-2).
 		cves := map[string]bool{}
 		add := func(id string) {
-			id = strings.ToUpper(strings.TrimSpace(id))
 			if isCVEID(id) {
 				cves[id] = true
 			}
 		}
 		add(r.ID)
 		for _, pfx := range []string{"DEBIAN-", "UBUNTU-"} {
-			if rest, ok := strings.CutPrefix(strings.ToUpper(r.ID), pfx); ok {
+			if rest, ok := strings.CutPrefix(r.ID, pfx); ok {
 				add(rest)
 			}
 		}
@@ -749,7 +750,7 @@ func indexDistroRecords(recs []distroRecord) distroData {
 func (r *distroRecord) recordCVE() string {
 	// Exactly one of three forms (Codex M70 R12 High-3): "CVE-…",
 	// "DEBIAN-CVE-…", "UBUNTU-CVE-…".
-	id := strings.ToUpper(strings.TrimSpace(r.ID))
+	id := r.ID
 	if isCVEID(id) {
 		return id
 	}
@@ -861,7 +862,7 @@ type entryResult struct {
 // when it names the release, else advisories that speak for the CVE. An
 // advisory that does not is never used, in either direction.
 func (d distroData) decide(t distroTarget, cveID string) distroDecision {
-	cve := strings.ToUpper(strings.TrimSpace(cveID))
+	cve := cveID // the catalogue's canonical CVE id, matched exactly
 	recs := d.byCVE[cve]
 	if len(recs) == 0 {
 		return distroDecision{reason: "no_record"}

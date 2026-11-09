@@ -182,6 +182,8 @@ func validatePackageRecords(raw []byte, q OSVPackage) error {
 	for i, rv := range env.Vulns {
 		var r struct {
 			ID        string           `json:"id"`
+			Aliases   []string         `json:"aliases"`
+			Upstream  []string         `json:"upstream"`
 			Modified  string           `json:"modified"`
 			Withdrawn string           `json:"withdrawn"`
 			Affected  *json.RawMessage `json:"affected"`
@@ -189,8 +191,22 @@ func validatePackageRecords(raw []byte, q OSVPackage) error {
 		if err := json.Unmarshal(rv, &r); err != nil {
 			return fmt.Errorf("osv: package query record %d: %w", i, err)
 		}
-		if strings.TrimSpace(r.ID) == "" {
-			return fmt.Errorf("osv: package query record %d has no id", i)
+		if !canonicalToken(r.ID) {
+			return fmt.Errorf("osv: package query record %d has no canonical id", i)
+		}
+		// Every identity the caller matches on is canonical: a CVE-like id,
+		// alias or upstream entry spelt otherwise would be silently dropped
+		// later (Codex M70 R19 High-2).
+		if err := checkCVELike(r.ID); err != nil {
+			return fmt.Errorf("osv: package query record %q: %w", r.ID, err)
+		}
+		for _, a := range append(append([]string(nil), r.Aliases...), r.Upstream...) {
+			if !canonicalToken(a) {
+				return fmt.Errorf("osv: package query record %q has a non-canonical alias %q", r.ID, a)
+			}
+			if err := checkCVELike(a); err != nil {
+				return fmt.Errorf("osv: package query record %q: %w", r.ID, err)
+			}
 		}
 		if r.Modified != "" && !validTime(r.Modified) {
 			return fmt.Errorf("osv: package query record %q has a malformed or future modified", r.ID)
@@ -269,6 +285,41 @@ func validateAffected(a OSVAffected) error {
 		}
 	}
 	return nil
+}
+
+// checkCVELike: an identity that mentions a CVE (case-insensitively "CVE-"
+// at the start or after "DEBIAN-" / "UBUNTU-") must be exactly CVE-YYYY-NNNN…
+// with an upper-case, exact prefix.
+func checkCVELike(id string) error {
+	up := strings.ToUpper(id)
+	rest := up
+	for _, pfx := range []string{"DEBIAN-", "UBUNTU-"} {
+		rest = strings.TrimPrefix(rest, pfx)
+	}
+	if !strings.HasPrefix(rest, "CVE-") {
+		return nil
+	}
+	if id != up || !canonicalCVE(rest) {
+		return fmt.Errorf("non-canonical CVE identity %q", id)
+	}
+	return nil
+}
+
+func canonicalCVE(s string) bool {
+	rest, ok := strings.CutPrefix(s, "CVE-")
+	if !ok {
+		return false
+	}
+	y, n, ok := strings.Cut(rest, "-")
+	if !ok || len(y) != 4 || len(n) < 4 {
+		return false
+	}
+	for _, c := range y + n {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // canonicalToken: non-empty printable ASCII without whitespace.

@@ -79,8 +79,8 @@ const (
 	// 4: record modified, R8; 5: records validated as since R11, R12;
 	// 6: no future timestamps, R14; 7: every affected element validated,
 	// R15; 8: empty continuation pages refused (R16) and canonical identity
-	// strings (R18)).
-	distroCachePayloadVersion = 8
+	// strings (R18); 9: canonical record identities, exact CVE matching (R19)).
+	distroCachePayloadVersion = 9
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -654,13 +654,17 @@ func validDistroRecords(recs []distroRecord) bool {
 func sbomOperatingSystem(comps []model.Component) *distroOS {
 	var found *distroOS
 	for _, c := range comps {
-		if !strings.EqualFold(strings.TrimSpace(c.Type), "operating-system") {
+		if c.Type != "operating-system" {
 			continue
 		}
 		if found != nil {
 			return nil
 		}
-		found = &distroOS{id: strings.ToLower(strings.TrimSpace(c.Name)), version: strings.TrimSpace(c.Version)}
+		// As stored: no trimming or case-folding (Codex M70 R19 Medium-3).
+		if !cleanVersionText(c.Name) || !cleanVersionText(c.Version) || c.Name != strings.ToLower(c.Name) {
+			return nil
+		}
+		found = &distroOS{id: c.Name, version: c.Version}
 	}
 	if found == nil || found.id == "" || found.version == "" {
 		return nil

@@ -317,7 +317,7 @@ func TestM70Decide(t *testing.T) {
 			reason: "no_record"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			d := indexDistroRecords(c.recs).decide(c.t, "cve-2021-3711")
+			d := indexDistroRecords(c.recs).decide(c.t, "CVE-2021-3711")
 			if d.verdict != c.verdict || d.reason != c.reason {
 				t.Fatalf("verdict=%d reason=%q, want %d / %q (evidence %+v)", d.verdict, d.reason, c.verdict, c.reason, d.evidence)
 			}
@@ -349,7 +349,7 @@ func TestM70ReduceOSVRecords(t *testing.T) {
 		{ID: "DSA-5103-1", Upstream: []string{"CVE-2021-4160", "DEBIAN-CVE-2021-4160", "CVE-2022-0778"}, Affected: []client.OSVAffected{
 			{Package: client.OSVPackage{Name: "openssl", Ecosystem: "Debian:11"}, Ranges: eco(ev("i", "0", "f", "1.1.1k-1+deb11u2"))},
 		}},
-		{ID: "ALSA-2022:6224", Aliases: []string{"cve-2022-1292"}, Affected: []client.OSVAffected{
+		{ID: "ALSA-2022:6224", Aliases: []string{"CVE-2022-1292"}, Affected: []client.OSVAffected{
 			{Package: client.OSVPackage{Name: "openssl", Ecosystem: "AlmaLinux:9"}},
 		}},
 		{ID: "DSA-WITHDRAWN", Withdrawn: "2026-01-01T00:00:00Z", Upstream: []string{"CVE-2020-0001"}, Affected: []client.OSVAffected{
