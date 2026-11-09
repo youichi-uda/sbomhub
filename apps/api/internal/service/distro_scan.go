@@ -86,8 +86,9 @@ const (
 	// package-less GIT entries (R23); 13: strict affected purl, Ubuntu
 	// binaries validated (R27); 14: purl distro / arch qualifiers (R31);
 	// 15: rpm distro qualifier, strict subpath (R32); 16: every returned
-	// record id (R34)).
-	distroCachePayloadVersion = 16
+	// record id (R34); 17: Ubuntu stream qualifiers, arch-qualified rpm
+	// refused (R35)).
+	distroCachePayloadVersion = 17
 )
 
 // distroLinkStore is the repository surface the step uses.

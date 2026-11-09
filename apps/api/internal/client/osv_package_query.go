@@ -260,11 +260,11 @@ var (
 // or "trusty/esm").
 func purlQualifiersAgree(ecosystem, typ string, quals map[string]string) error {
 	if typ == "rpm" {
-		// An architecture-specific rpm entry is not a statement about the
-		// component's architecture, which is not compared (Codex M70 R33
-		// High-2): refused until it is.
-		if a, ok := quals["arch"]; ok && a != "src" && a != "noarch" {
-			return fmt.Errorf("arch=%s: architecture-specific rpm entries are not supported", a)
+		// The component's architecture is not compared, and noarch / src
+		// are not wildcards over binary architectures (Codex M70 R33 High-2,
+		// R35 High-2): any architecture-qualified rpm entry is refused.
+		if a, ok := quals["arch"]; ok {
+			return fmt.Errorf("arch=%s: architecture-qualified rpm entries are not supported", a)
 		}
 		return rpmDistroAgrees(ecosystem, quals)
 	}
@@ -300,11 +300,20 @@ func purlQualifiersAgree(ecosystem, typ string, quals map[string]string) error {
 	default:
 		return nil
 	}
-	// Ubuntu Pro streams carry the codename as one "/" part
-	// ("esm-apps/xenial", "trusty/esm"); Debian's is the codename alone.
+	// Ubuntu Pro streams carry the codename as one "/" part next to the
+	// stream ("esm-apps/xenial", "trusty/esm"); a standard release's — and
+	// Debian's — is the codename alone (Codex M70 R35 High-1: a stream
+	// marker on a standard ecosystem is a different package set).
 	words := []string{distro}
 	if parts[0] == "Ubuntu" {
+		pro := len(parts) > 1 && parts[1] != "" && (len(parts[1]) != 5 || parts[1][2] != '.')
 		words = strings.Split(distro, "/")
+		switch {
+		case !pro && len(words) != 1:
+			return fmt.Errorf("distro=%s is a stream, not the standard %s", distro, ecosystem)
+		case pro && len(words) < 2:
+			return fmt.Errorf("distro=%s names no stream for %s", distro, ecosystem)
+		}
 	}
 	want, known := table[release]
 	named := false

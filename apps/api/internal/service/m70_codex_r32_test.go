@@ -81,9 +81,9 @@ func TestM70R33_ArchPartialLookupBinaryName(t *testing.T) {
 	if err := r32Query(t, "AlmaLinux:9", "pkg:rpm/almalinux/p?arch=aarch64"); err == nil {
 		t.Error("an aarch64 rpm entry accepted")
 	}
-	for _, a := range []string{"src", "noarch"} {
-		if err := r32Query(t, "AlmaLinux:9", "pkg:rpm/almalinux/p?arch="+a); err != nil {
-			t.Errorf("arch=%s refused: %v", a, err)
+	for _, a := range []string{"src", "noarch"} { // R35 High-2: not wildcards
+		if err := r32Query(t, "AlmaLinux:9", "pkg:rpm/almalinux/p?arch="+a); err == nil {
+			t.Errorf("arch=%s accepted", a)
 		}
 	}
 	for _, body := range []string{

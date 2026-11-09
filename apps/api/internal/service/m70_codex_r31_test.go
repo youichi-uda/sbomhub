@@ -62,6 +62,8 @@ func TestM70R31_PurlQualifiersAgree(t *testing.T) {
 		{"Debian:12", "pkg:deb/debian/p?arch=source&distro=bookworm", true},
 		{"Debian:12", "pkg:deb/debian/p?arch=source&distro=bullseye", false},
 		{"Debian:12", "pkg:deb/debian/p?distro=debian-12", true},
+		{"Ubuntu:22.04:LTS", "pkg:deb/ubuntu/p@1?arch=source&distro=esm-apps%2Fjammy", false}, // R35 High-1
+		{"Ubuntu:Pro:16.04:LTS", "pkg:deb/ubuntu/p@1?arch=source&distro=xenial", false},
 	} {
 		if err := q(c.eco, c.purl); (err == nil) != c.ok {
 			t.Errorf("%s %s: err=%v, want ok=%v", c.eco, c.purl, err, c.ok)
