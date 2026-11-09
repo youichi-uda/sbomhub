@@ -196,6 +196,7 @@ func setMatch(v *model.Vulnerability, best sql.NullString, evidence []byte) {
 		var m map[string]json.RawMessage
 		if json.Unmarshal(evidence, &m) == nil {
 			delete(m, "source_id")
+			delete(m, "wm_source")
 			if b, err := json.Marshal(m); err == nil {
 				v.MatchEvidence = b
 			}

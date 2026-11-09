@@ -65,10 +65,24 @@ const distroLabels = `'distro_affected', 'distro_unfixed', 'distro_fixed'`
 // priorMethodVocabulary: the non-distro methods a clear may restore.
 const priorMethodVocabulary = `'nvd_cpe', 'nvd_cpe_distro', 'nvd_cpe_unverified', 'nvd_keyword', 'jvn_keyword', 'cve_sync_keyword'`
 
+// The link's watermark is (wm_source, wm_rev): the source and revision of the
+// NEWEST data any write has checked the link against, advanced even when the
+// rank rule refuses the label change (Codex M70 R17 High-1). An older link
+// without it falls back to its evidence's source_id / data_modified.
+const (
+	storedWMSource = `COALESCE(cv.match_evidence->>'wm_source', cv.match_evidence->>'source_id')`
+	storedWMRev    = `COALESCE(cv.match_evidence->>'wm_rev', cv.match_evidence->>'data_modified', '')`
+)
+
 // distroFreshness is the revision guard against the JSON parameter p.
 func distroFreshness(p string) string {
-	return `((cv.match_evidence->>'source_id') IS DISTINCT FROM (` + p + `::jsonb->>'source_id')
-		        OR COALESCE(cv.match_evidence->>'data_modified', '') <= COALESCE(` + p + `::jsonb->>'data_modified', ''))`
+	return `(` + storedWMSource + ` IS DISTINCT FROM (` + p + `::jsonb->>'source_id')
+		        OR ` + storedWMRev + ` <= COALESCE(` + p + `::jsonb->>'data_modified', ''))`
+}
+
+// withWM appends the watermark of the JSON parameter p to the expression e.
+func withWM(e, p string) string {
+	return e + ` || jsonb_build_object('wm_source', ` + p + `::jsonb->>'source_id', 'wm_rev', COALESCE(` + p + `::jsonb->>'data_modified', ''))`
 }
 
 // relabelDistroFreshness is the guard RelabelDistro applies.
@@ -99,7 +113,7 @@ func (r *ComponentRepository) RelabelDistro(ctx context.Context, componentID, vu
 	res, err := r.q(ctx).ExecContext(ctx, `
 		UPDATE component_vulnerabilities cv
 		   SET match_method = $3,
-		       match_evidence = $4::jsonb || jsonb_build_object('prior_method',
+		       match_evidence = `+withWM(`$4::jsonb`, "$4")+` || jsonb_build_object('prior_method',
 		           CASE WHEN cv.match_method IN (`+distroLabels+`)
 		                THEN cv.match_evidence->'prior_method'
 		                ELSE to_jsonb(cv.match_method) END)
@@ -109,14 +123,32 @@ func (r *ComponentRepository) RelabelDistro(ctx context.Context, componentID, vu
 		   AND (cv.match_method IS NULL
 		        OR cv.match_method = ANY($5)
 		        OR (cv.match_method = $3
-		            AND (cv.match_evidence - 'fetched_at' - 'prior_method') IS DISTINCT FROM ($4::jsonb - 'fetched_at')))
+		            AND (cv.match_evidence - 'fetched_at' - 'prior_method' - 'wm_source' - 'wm_rev')
+		                IS DISTINCT FROM ($4::jsonb - 'fetched_at')))
 		   AND `+relabelDistroFreshness,
 		componentID, vulnID, string(method), string(evidence), pq.Array(model.WeakerMatchMethods(method)))
 	if err != nil {
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n == 1, err
+	if err != nil || n == 1 {
+		return n == 1, err
+	}
+	// Not relabelled (a stronger distro label, or nothing changed): the data
+	// was still checked, so the watermark advances (Codex M70 R17 High-1).
+	_, err = r.q(ctx).ExecContext(ctx, `
+		UPDATE component_vulnerabilities cv
+		   SET match_evidence = `+withWM(`cv.match_evidence`, "$3")+`
+		 WHERE cv.component_id = $1
+		   AND cv.vulnerability_id = $2
+		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
+		   AND cv.match_method IN (`+distroLabels+`)
+		   AND cv.match_evidence IS NOT NULL
+		   AND `+distroFreshness("$3")+`
+		   AND (`+storedWMSource+` IS DISTINCT FROM ($3::jsonb->>'source_id')
+		        OR `+storedWMRev+` IS DISTINCT FROM COALESCE($3::jsonb->>'data_modified', ''))`,
+		componentID, vulnID, string(evidence))
+	return false, err
 }
 
 // ClearDistro takes a distro label the current data no longer supports back
@@ -132,13 +164,13 @@ func (r *ComponentRepository) ClearDistro(ctx context.Context, componentID, vuln
 		UPDATE component_vulnerabilities cv
 		   SET match_method = CASE WHEN cv.match_evidence->>'prior_method' IN (`+priorMethodVocabulary+`)
 		                           THEN cv.match_evidence->>'prior_method' END,
-		       match_evidence = $3::jsonb
+		       match_evidence = `+withWM(`$3::jsonb`, "$3")+`
 		 WHERE cv.component_id = $1
 		   AND cv.vulnerability_id = $2
 		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
 		   AND cv.match_method IN (`+distroLabels+`)
-		   AND (cv.match_evidence->>'source_id') IS NOT DISTINCT FROM ($3::jsonb->>'source_id')
-		   AND COALESCE(cv.match_evidence->>'data_modified', '') <= COALESCE($3::jsonb->>'data_modified', '')`,
+		   AND `+storedWMSource+` IS NOT DISTINCT FROM ($3::jsonb->>'source_id')
+		   AND `+storedWMRev+` <= COALESCE($3::jsonb->>'data_modified', '')`,
 		componentID, vulnID, string(watermark))
 	if err != nil {
 		return false, err
@@ -159,12 +191,12 @@ func (r *ComponentRepository) MarkDistroChecked(ctx context.Context, componentID
 	}
 	res, err := r.q(ctx).ExecContext(ctx, `
 		UPDATE component_vulnerabilities cv
-		   SET match_evidence = $3::jsonb
+		   SET match_evidence = `+withWM(`$3::jsonb`, "$3")+`
 		 WHERE cv.component_id = $1
 		   AND cv.vulnerability_id = $2
 		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
 		   AND COALESCE(cv.match_method, '') NOT IN (`+distroLabels+`)
-		   AND cv.match_evidence IS DISTINCT FROM $3::jsonb
+		   AND cv.match_evidence IS DISTINCT FROM `+withWM(`$3::jsonb`, "$3")+`
 		   AND `+distroFreshness("$3"),
 		componentID, vulnID, string(watermark))
 	if err != nil {

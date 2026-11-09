@@ -217,7 +217,12 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 	if id != p.namespace && purlNamespaceAlias[p.namespace] != id {
 		return distroTarget{}, "distro_mismatch"
 	}
-	compVersion = strings.TrimSpace(compVersion)
+	// Identity is compared as stored: surrounding whitespace (any Unicode
+	// space) or a non-ASCII byte is malformed data, never trimmed away
+	// (Codex M70 R17 Medium-2).
+	if !cleanVersionText(compVersion) || !cleanVersionText(p.version) {
+		return distroTarget{}, "bad_version"
+	}
 	version := p.version
 	if version == "" {
 		version = compVersion
@@ -468,8 +473,17 @@ func canonicalNumbered(eco, prefix string) bool {
 // binary the NVD link was made for). Codex M70 R8 High-3.
 func purlNameAgrees(purl, compName string) bool {
 	p, ok := parsePurl(purl)
-	name := strings.TrimSpace(compName)
-	return ok && name != "" && p.name == name
+	return ok && compName != "" && p.name == compName
+}
+
+// cleanVersionText: empty, or printable ASCII without spaces.
+func cleanVersionText(v string) bool {
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x21 || v[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // cpeVersionsAgree reports whether every concrete version the component's

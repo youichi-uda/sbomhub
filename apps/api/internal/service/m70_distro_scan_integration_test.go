@@ -676,3 +676,42 @@ func TestM70DistroCache_RevisionBeforeGeneration(t *testing.T) {
 		t.Errorf("equal revision, earlier generation overwrote: %s", got)
 	}
 }
+
+// Codex M70 R17 High-1: a write refused by the rank rule still advances the
+// link's watermark, so an overlapping scan holding OLDER data cannot clear
+// the label afterwards: affected@R1 -> fixed@R3 refused -> clear@R2 refused.
+func TestM70Watermark_AdvancesWhenRankRefuses(t *testing.T) {
+	e := m70Seed(t, "m70wmrank")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"S","fixed":"r1","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"S","fixed":"r3","data_modified":"2026-11-03T00:00:00.000000000Z"}`))
+		if changed {
+			t.Error("rank allowed affected -> fixed")
+		}
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.ClearDistro(c, e.openssl, e.v0286,
+			[]byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-02T00:00:00.000000000Z"}`))
+		if changed {
+			t.Error("an older clear went through after newer data was processed")
+		}
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_affected" || r.evidence.Fixed != "r1" {
+		t.Errorf("%+v", r)
+	}
+}
