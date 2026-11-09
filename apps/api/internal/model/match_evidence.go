@@ -10,6 +10,9 @@ import "time"
 type DistroEvidence struct {
 	// Source is the data source: "osv" (OSV.dev's distro ecosystems).
 	Source string `json:"source"`
+	// SourceURL is the endpoint the data came from (SBOMHUB_OSV_URL or
+	// OSV's public API). Revisions are compared only within one endpoint.
+	SourceURL string `json:"source_url,omitempty"`
 	// Status is the distro's statement about the installed version:
 	// "affected" (a fix exists above it), "unfixed" (no fix released),
 	// "fixed" (installed >= the fixed version).

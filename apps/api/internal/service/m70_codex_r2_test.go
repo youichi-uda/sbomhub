@@ -68,7 +68,7 @@ func TestM70R2_OldDebianReleasesAreNotTargets(t *testing.T) {
 // Codex M70 R2 High-3: a package query is bounded in TOTAL bytes, and pages
 // are reduced as they arrive.
 func TestM70R2_PackageQueryTotalBudget(t *testing.T) {
-	big := `{"vulns":[{"id":"DSA-1","upstream":["CVE-2021-0001"],"affected":[{"package":{"name":"p","ecosystem":"Debian:11"}}],"pad":"` +
+	big := `{"vulns":[{"id":"DSA-1","upstream":["CVE-2021-0001"],"modified":"2026-11-01T00:00:00Z","affected":[{"package":{"name":"p","ecosystem":"Debian:11"}}],"pad":"` +
 		strings.Repeat("x", 4096) + `"}],"next_page_token":"t"}`
 	srv := newStaticOSV(t, big[:len(big)-len(`"t"}`)])
 	c := client.NewOSVClient().WithBaseURL(srv)

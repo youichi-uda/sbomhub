@@ -439,6 +439,18 @@ func TestM70DistroFreshness_DBAndCache(t *testing.T) {
 	if r := m70Read(t, e.migDB, e.openssl, e.v3449); r.method != "distro_fixed" {
 		t.Errorf("an older affected replaced a newer fixed: %+v", r)
 	}
+	// Another endpoint (a mirror): its revisions are not comparable, the
+	// rank rule decides (Codex M70 R11 High-1).
+	if err := scope.writeTx(ctx, e.sbom, func(txCtx context.Context) error {
+		_, err := e.compRepo.RelabelDistro(txCtx, e.openssl, e.v3449, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_url":"https://mirror.example/v1","fixed":"m","data_modified":"2026-01-01T00:00:00.000000000Z"}`))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r := m70Read(t, e.migDB, e.openssl, e.v3449); r.method != "distro_affected" || r.evidence.Fixed != "m" {
+		t.Errorf("another endpoint's affected was blocked by an incomparable revision: %+v", r)
+	}
 	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.evidence.Fixed != "v4" {
 		t.Errorf("newer evidence not written: %+v", r)
 	}

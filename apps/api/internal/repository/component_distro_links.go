@@ -52,7 +52,12 @@ func (r *ComponentRepository) ListSbomLinks(ctx context.Context, sbomID uuid.UUI
 // fetches straddled an OSV update; Codex M70 R8 High-4, R10 Medium-2). data_modified is
 // fixed-width UTC RFC 3339, so text order is time order; a missing one is
 // the oldest.
-const relabelDistroFreshness = `COALESCE(cv.match_evidence->>'data_modified', '') <= COALESCE($4::jsonb->>'data_modified', '')`
+//
+// Revisions of different endpoints (an operator switching SBOMHUB_OSV_URL to
+// a mirror) are not comparable: then the rank rule alone decides (Codex M70
+// R11 High-1).
+const relabelDistroFreshness = `((cv.match_evidence->>'source_url') IS DISTINCT FROM ($4::jsonb->>'source_url')
+		        OR COALESCE(cv.match_evidence->>'data_modified', '') <= COALESCE($4::jsonb->>'data_modified', ''))`
 
 // ErrNotDistroMethod is returned before any statement when RelabelDistro is
 // handed a method that is not a distro label.

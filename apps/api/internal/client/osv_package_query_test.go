@@ -46,7 +46,7 @@ func TestOSVQueryPackage_FollowsEveryPage(t *testing.T) {
 		}
 		next := map[int]string{1: "t1", 2: "t2"}[page]
 		// Page 2 is a token-only page (OSV documents these).
-		vulns := `[{"id":"DSA-` + fmt.Sprint(page) + `"}]`
+		vulns := `[{"id":"DSA-` + fmt.Sprint(page) + `","modified":"2026-11-01T00:00:00Z","affected":[{"package":{"name":"openssl","ecosystem":"Debian:11"}}]}]`
 		if page == 2 {
 			vulns = `[]`
 		}
@@ -79,17 +79,17 @@ func TestOSVQueryPackage_NeverAShortAnswer(t *testing.T) {
 		pages   int
 	}{
 		{"budget exhausted", func(w http.ResponseWriter, page int, _ string) {
-			fmt.Fprintf(w, `{"vulns":[{"id":"X-%d"}],"next_page_token":"t%d"}`, page, page)
+			fmt.Fprintf(w, `{"vulns":[{"id":"X-%d","modified":"2026-11-01T00:00:00Z","affected":[{"package":{"name":"openssl","ecosystem":"Debian:11"}}]}],"next_page_token":"t%d"}`, page, page)
 		}, ErrOSVQueryTruncated, 2},
 		{"repeated token", func(w http.ResponseWriter, _ int, _ string) {
-			_, _ = io.WriteString(w, `{"vulns":[{"id":"X"}],"next_page_token":"same"}`)
+			_, _ = io.WriteString(w, `{"vulns":[{"id":"X","modified":"2026-11-01T00:00:00Z","affected":[{"package":{"name":"openssl","ecosystem":"Debian:11"}}]}],"next_page_token":"same"}`)
 		}, nil, 2},
 		{"second page fails", func(w http.ResponseWriter, page int, _ string) {
 			if page == 2 {
 				http.Error(w, "boom", http.StatusServiceUnavailable)
 				return
 			}
-			_, _ = io.WriteString(w, `{"vulns":[{"id":"X"}],"next_page_token":"t"}`)
+			_, _ = io.WriteString(w, `{"vulns":[{"id":"X","modified":"2026-11-01T00:00:00Z","affected":[{"package":{"name":"openssl","ecosystem":"Debian:11"}}]}],"next_page_token":"t"}`)
 		}, nil, 2},
 		{"rate limited", func(w http.ResponseWriter, _ int, _ string) { http.Error(w, "slow down", http.StatusTooManyRequests) }, nil, 1},
 		{"html from a proxy", func(w http.ResponseWriter, _ int, _ string) { _, _ = io.WriteString(w, "<html>gateway</html>") }, nil, 1},

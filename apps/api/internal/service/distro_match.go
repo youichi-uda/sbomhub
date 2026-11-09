@@ -679,6 +679,8 @@ type distroData struct {
 	// revision is the newest record `modified` of the package (normalised):
 	// the data snapshot the decisions rest on.
 	revision string
+	// source is the endpoint the data came from (evidence source_url).
+	source string
 	// cveRecordReleases are the release ecosystems named by at least one
 	// CVE-specific record (DEBIAN-CVE-* / UBUNTU-CVE-*) of the package:
 	// the releases the CVE-level data still covers. A Debian release absent
@@ -892,6 +894,7 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 		Package:      t.pkg,
 		Installed:    t.version,
 		DataModified: d.revision,
+		SourceURL:    d.source,
 	}
 	if len(exact) > 0 {
 		dec := combineExact(exact, exactIDs, ev, cmp)

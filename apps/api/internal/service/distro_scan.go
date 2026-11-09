@@ -293,7 +293,9 @@ func (s *DistroService) fetchAndDecide(ctx context.Context, work []distroWork, b
 				var counts DistroScanReport
 				var derr error
 				hit, pages, ferr := s.loadSlotted(ctx, k, pace, func(l distroLoad) error {
-					g, counts, derr = decideKey(ctx, l.data(), l.fetchedAt, byKey[k], byComp)
+					d := l.data()
+					d.source = s.source
+					g, counts, derr = decideKey(ctx, d, l.fetchedAt, byKey[k], byComp)
 					return nil
 				})
 				mu.Lock()

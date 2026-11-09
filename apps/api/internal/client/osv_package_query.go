@@ -156,6 +156,63 @@ func (c *OSVClient) QueryPackageEach(ctx context.Context, ecosystem, name string
 	}
 }
 
+// validatePackageRecords refuses a structurally partial answer (Codex M70
+// R10 High-1, R11 High-2). Every record needs an id. A withdrawn record needs
+// an RFC 3339 `withdrawn` and nothing else. An active record needs an RFC
+// 3339 `modified`, an `affected` ARRAY (present, not null) and at least one
+// entry for the queried package in the queried ecosystem (exactly, or a
+// release of it: "Debian" -> "Debian:11"). A record the caller would
+// silently drop could be the one that says "affected".
+func validatePackageRecords(raw []byte, q OSVPackage) error {
+	var env struct {
+		Vulns []json.RawMessage `json:"vulns"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return fmt.Errorf("osv: decode package query response: %w", err)
+	}
+	for i, rv := range env.Vulns {
+		var r struct {
+			ID        string           `json:"id"`
+			Modified  string           `json:"modified"`
+			Withdrawn string           `json:"withdrawn"`
+			Affected  *json.RawMessage `json:"affected"`
+		}
+		if err := json.Unmarshal(rv, &r); err != nil {
+			return fmt.Errorf("osv: package query record %d: %w", i, err)
+		}
+		if strings.TrimSpace(r.ID) == "" {
+			return fmt.Errorf("osv: package query record %d has no id", i)
+		}
+		if r.Withdrawn != "" {
+			if _, err := time.Parse(time.RFC3339Nano, r.Withdrawn); err != nil {
+				return fmt.Errorf("osv: package query record %q has a malformed withdrawn", r.ID)
+			}
+			continue
+		}
+		if _, err := time.Parse(time.RFC3339Nano, r.Modified); err != nil {
+			return fmt.Errorf("osv: package query record %q has no valid modified", r.ID)
+		}
+		if r.Affected == nil || !bytes.HasPrefix(bytes.TrimSpace(*r.Affected), []byte("[")) {
+			return fmt.Errorf("osv: package query record %q has no affected array", r.ID)
+		}
+		var affected []OSVAffected
+		if err := json.Unmarshal(*r.Affected, &affected); err != nil {
+			return fmt.Errorf("osv: package query record %q: %w", r.ID, err)
+		}
+		named := false
+		for _, a := range affected {
+			if a.Package.Name == q.Name && (a.Package.Ecosystem == q.Ecosystem || strings.HasPrefix(a.Package.Ecosystem, q.Ecosystem+":")) {
+				named = true
+				break
+			}
+		}
+		if !named {
+			return fmt.Errorf("osv: package query record %q names no %s %q entry", r.ID, q.Ecosystem, q.Name)
+		}
+	}
+	return nil
+}
+
 // queryPackagePage fetches one page, reading at most min(budget, one page's
 // cap) bytes; n is the bytes read.
 func (c *OSVClient) queryPackagePage(ctx context.Context, q osvPackageQueryRequest, budget int64) (page osvPackageQueryResponse, n int64, err error) {
@@ -225,17 +282,8 @@ func (c *OSVClient) queryPackagePage(ctx context.Context, q osvPackageQueryReque
 	if err := json.Unmarshal(trimmed, &page); err != nil {
 		return page, n, fmt.Errorf("osv: decode package query response: %w", err)
 	}
-	for i, r := range page.Vulns {
-		if strings.TrimSpace(r.ID) == "" {
-			return osvPackageQueryResponse{}, n, fmt.Errorf("osv: package query record %d has no id", i)
-		}
-		// `withdrawn` is an RFC 3339 time; anything else is not a
-		// withdrawal the caller may act on (Codex M70 R10 High-1).
-		if r.Withdrawn != "" {
-			if _, err := time.Parse(time.RFC3339Nano, r.Withdrawn); err != nil {
-				return osvPackageQueryResponse{}, n, fmt.Errorf("osv: package query record %q has a malformed withdrawn", r.ID)
-			}
-		}
+	if err := validatePackageRecords(trimmed, q.Package); err != nil {
+		return osvPackageQueryResponse{}, n, err
 	}
 	return page, n, nil
 }
