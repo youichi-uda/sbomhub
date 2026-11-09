@@ -679,8 +679,9 @@ type distroData struct {
 	// revision is the newest record `modified` of the package (normalised):
 	// the data snapshot the decisions rest on.
 	revision string
-	// source is the endpoint the data came from (evidence source_url).
-	source string
+	// source / sourceID: the endpoint the data came from, as shown and as
+	// identified (evidence source_url / source_id).
+	source, sourceID string
 	// cveRecordReleases are the release ecosystems named by at least one
 	// CVE-specific record (DEBIAN-CVE-* / UBUNTU-CVE-*) of the package:
 	// the releases the CVE-level data still covers. A Debian release absent
@@ -744,7 +745,12 @@ func (r *distroRecord) isCVERecordFor(cve string) bool { return r.recordCVE() ==
 // rpms (openssl, openssl-libs, ...) does not say which CVE concerns which rpm
 // either (Codex M70 R3 High-4), so it decides only single-CVE cases.
 func (r *distroRecord) speaksFor(cve string) bool {
-	return r.isCVERecordFor(cve) || len(r.CVEs) == 1 || (r.Releases == 1 && r.Packages == 1)
+	if r.isCVERecord() {
+		// A per-CVE record speaks for its own CVE only, whatever else it
+		// aliases (Codex M70 R13 High-2).
+		return r.isCVERecordFor(cve)
+	}
+	return len(r.CVEs) == 1 || (r.Releases == 1 && r.Packages == 1)
 }
 
 // debianFirstNumbered is the first Debian release OSV names by its major
@@ -899,6 +905,7 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 		Installed:    t.version,
 		DataModified: d.revision,
 		SourceURL:    d.source,
+		SourceID:     d.sourceID,
 	}
 	if len(exact) > 0 {
 		dec := combineExact(exact, exactIDs, ev, cmp)
@@ -1049,9 +1056,9 @@ func laterReleaseVerdict(t distroTarget, recs []*distroRecord, ev model.DistroEv
 	var ids, ecos []string
 	for _, r := range recs {
 		for _, e := range r.Entries {
-			if !strings.HasPrefix(strings.ToLower(e.Ecosystem), "debian") {
-				continue
-			}
+			// Every entry of a Debian per-CVE record must be a canonical
+			// Debian ecosystem; a misspelling ("Debain:11") could be the
+			// installed release (Codex M70 R13 High-3).
 			n, ok := debianEcosystemMajor(e.Ecosystem)
 			if !ok {
 				// "Debian:sid" or anything else this code cannot order:

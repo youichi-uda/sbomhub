@@ -201,8 +201,9 @@ type pendingLink struct {
 	// the distro step); nil for every other writer.
 	evidence []byte
 	// clear (M70): take a stale distro label back to its earlier method;
-	// evidence then holds the guard (endpoint, revision).
-	clear bool
+	// mark (M70): record a no-verdict check on a non-distro link. evidence
+	// then holds the data's watermark (source, revision).
+	clear, mark bool
 }
 
 // linkWriter is the one repository call the write phase makes per link.

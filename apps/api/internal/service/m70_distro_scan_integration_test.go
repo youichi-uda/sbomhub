@@ -149,7 +149,8 @@ func TestM70DistroScan_RelabelsWithEvidence(t *testing.T) {
 	if got := r.requests(); len(got) != 1 || got[0] != "Debian|openssl" {
 		t.Errorf("OSV requests = %q, want one query for Debian openssl", got)
 	}
-	if rep.Affected != 2 || rep.Fixed != 1 || rep.Unfixed != 0 || rep.Relabelled != 3 || rep.Targeted != 1 || rep.Packages != 1 {
+	// 3 relabels + 1 no-verdict watermark (Codex M70 R13 High-1).
+	if rep.Affected != 2 || rep.Fixed != 1 || rep.Unfixed != 0 || rep.Relabelled != 4 || rep.Targeted != 1 || rep.Packages != 1 {
 		t.Errorf("report %+v", rep)
 	}
 
@@ -164,8 +165,9 @@ func TestM70DistroScan_RelabelsWithEvidence(t *testing.T) {
 		f.evidence.Status != "fixed" || len(f.evidence.Ecosystems) == 0 {
 		t.Errorf("CVE-2021-3449 = %+v", f)
 	}
-	if u := m70Read(t, e.migDB, e.openssl, e.vNoRec); u.method != "nvd_cpe_unverified" || u.hasEv {
-		t.Errorf("CVE-2009-0591 (no record) = %+v, want unchanged", u)
+	// Label unchanged; only the watermark of the check is stored.
+	if u := m70Read(t, e.migDB, e.openssl, e.vNoRec); u.method != "nvd_cpe_unverified" || u.evidence.Status != "" || u.evidence.DataModified == "" {
+		t.Errorf("CVE-2009-0591 (no record) = %+v, want unchanged label with a watermark", u)
 	}
 	if p := m70Read(t, e.migDB, e.plain, e.v3449); p.method != "nvd_cpe" || p.hasEv {
 		t.Errorf("the non-distro component's link was touched: %+v", p)
@@ -359,7 +361,7 @@ func TestM70DistroScan_RedisCache(t *testing.T) {
 	if got := r.requests(); len(got) != 1 {
 		t.Errorf("OSV requests = %q, want 1 (the second scan from the cache)", got)
 	}
-	if rep2.CacheHits != 1 || rep2.Requests != 0 || rep2.Affected != rep1.Affected || rep2.Fixed != rep1.Fixed || rep2.Relabelled != 3 {
+	if rep2.CacheHits != 1 || rep2.Requests != 0 || rep2.Affected != rep1.Affected || rep2.Fixed != rep1.Fixed || rep2.Relabelled != 4 {
 		t.Errorf("cold %+v / warm %+v", rep1, rep2)
 	}
 }
@@ -443,7 +445,7 @@ func TestM70DistroFreshness_DBAndCache(t *testing.T) {
 	// rank rule decides (Codex M70 R11 High-1).
 	if err := scope.writeTx(ctx, e.sbom, func(txCtx context.Context) error {
 		_, err := e.compRepo.RelabelDistro(txCtx, e.openssl, e.v3449, model.MatchDistroAffected,
-			[]byte(`{"source":"osv","source_url":"https://mirror.example/v1","fixed":"m","data_modified":"2026-01-01T00:00:00.000000000Z"}`))
+			[]byte(`{"source":"osv","source_id":"mirror","fixed":"m","data_modified":"2026-01-01T00:00:00.000000000Z"}`))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -500,7 +502,7 @@ func TestM70ClearDistro_RestoresPriorMethod(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ev := `{"source":"osv","source_url":"https://a/v1","data_modified":"2026-11-05T00:00:00.000000000Z"}`
+	ev := `{"source":"osv","source_id":"A","data_modified":"2026-11-05T00:00:00.000000000Z"}`
 	run(func(c context.Context) error {
 		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed, []byte(ev))
 		return err
@@ -513,8 +515,8 @@ func TestM70ClearDistro_RestoresPriorMethod(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	for _, g := range []string{
-		`{"source_url":"https://b/v1","data_modified":"2026-11-09T00:00:00.000000000Z"}`, // another endpoint
-		`{"source_url":"https://a/v1","data_modified":"2026-11-01T00:00:00.000000000Z"}`, // older data
+		`{"source_id":"B","data_modified":"2026-11-09T00:00:00.000000000Z"}`, // another endpoint
+		`{"source_id":"A","data_modified":"2026-11-01T00:00:00.000000000Z"}`, // older data
 	} {
 		run(func(c context.Context) error {
 			changed, err := e.compRepo.ClearDistro(c, e.openssl, e.v0286, []byte(g))
@@ -525,10 +527,75 @@ func TestM70ClearDistro_RestoresPriorMethod(t *testing.T) {
 		})
 	}
 	run(func(c context.Context) error {
-		_, err := e.compRepo.ClearDistro(c, e.openssl, e.v0286, []byte(`{"source_url":"https://a/v1","data_modified":"2026-11-06T00:00:00.000000000Z"}`))
+		_, err := e.compRepo.ClearDistro(c, e.openssl, e.v0286, []byte(`{"source_id":"A","data_modified":"2026-11-06T00:00:00.000000000Z"}`))
 		return err
 	})
-	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "nvd_cpe_unverified" || r.hasEv {
-		t.Errorf("after clear: %+v, want nvd_cpe_unverified with no evidence", r)
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "nvd_cpe_unverified" || r.evidence.Status != "" ||
+		r.evidence.DataModified != "2026-11-06T00:00:00.000000000Z" {
+		t.Errorf("after clear: %+v, want nvd_cpe_unverified with only the watermark", r)
+	}
+}
+
+// Codex M70 R13 High-1 / Medium-4 / Medium-6 (database and cache).
+func TestM70Watermark_AndPriorMethod(t *testing.T) {
+	e := m70Seed(t, "m70wm")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A no-verdict check with NEWER data leaves its watermark; a delayed
+	// scan with OLDER data cannot then label the link.
+	run(func(c context.Context) error {
+		_, err := e.compRepo.MarkDistroChecked(c, e.openssl, e.vNoRec, []byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-09T00:00:00.000000000Z"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.vNoRec, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		if changed {
+			t.Error("older data labelled a link a newer check had seen")
+		}
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.vNoRec); r.method != "nvd_cpe_unverified" {
+		t.Errorf("%+v", r)
+	}
+	// prior_method follows a stronger NVD method while the distro label stays.
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-05T00:00:00.000000000Z"}`))
+		return err
+	})
+	vulnRepo := repository.NewVulnerabilityRepository(e.appDB)
+	run(func(c context.Context) error {
+		return vulnRepo.LinkComponent(c, e.openssl, e.v0286, model.MatchNVDCPEDistro)
+	})
+	var prior string
+	if err := e.migDB.QueryRow(`SELECT match_method || '/' || (match_evidence->>'prior_method') FROM component_vulnerabilities
+		WHERE component_id = $1 AND vulnerability_id = $2`, e.openssl, e.v0286).Scan(&prior); err != nil {
+		t.Fatal(err)
+	}
+	if prior != "distro_fixed/nvd_cpe_distro" {
+		t.Errorf("method/prior = %q, want distro_fixed/nvd_cpe_distro", prior)
+	}
+	// A clear restores it and keeps the watermark: older data cannot relabel.
+	run(func(c context.Context) error {
+		_, err := e.compRepo.ClearDistro(c, e.openssl, e.v0286, []byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-07T00:00:00.000000000Z"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-05T00:00:00.000000000Z"}`))
+		if changed {
+			t.Error("older data re-labelled a cleared link")
+		}
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "nvd_cpe_distro" || r.evidence.DataModified != "2026-11-07T00:00:00.000000000Z" {
+		t.Errorf("after clear: %+v", r)
 	}
 }

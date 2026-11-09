@@ -46,71 +46,49 @@ func (r *ComponentRepository) ListSbomLinks(ctx context.Context, sbomID uuid.UUI
 	return out, rows.Err()
 }
 
-// ClearDistro takes a distro label the current data no longer supports back
-// to the method the link had before the distro step (evidence prior_method;
-// NULL = unknown when there was none) and drops the evidence. It is guarded
-// like a relabel: only a distro label, only with data of the same endpoint
-// that is at least as new (guard: {"source_url", "data_modified"}), only for
-// a component visible under the tenant GUC. It reports whether a row
-// changed.
-func (r *ComponentRepository) ClearDistro(ctx context.Context, componentID, vulnID uuid.UUID, guard []byte) (bool, error) {
-	if len(guard) == 0 {
-		return false, fmt.Errorf("clear: needs the data's endpoint and revision")
-	}
-	res, err := r.q(ctx).ExecContext(ctx, `
-		UPDATE component_vulnerabilities cv
-		   SET match_method = CASE WHEN cv.match_evidence->>'prior_method' IN (`+priorMethodVocabulary+`)
-		                           THEN cv.match_evidence->>'prior_method' END,
-		       match_evidence = NULL
-		 WHERE cv.component_id = $1
-		   AND cv.vulnerability_id = $2
-		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
-		   AND cv.match_method IN ('distro_affected', 'distro_unfixed', 'distro_fixed')
-		   AND (cv.match_evidence->>'source_url') IS NOT DISTINCT FROM ($3::jsonb->>'source_url')
-		   AND COALESCE(cv.match_evidence->>'data_modified', '') <= COALESCE($3::jsonb->>'data_modified', '')`,
-		componentID, vulnID, string(guard))
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n == 1, err
-}
+// The distro step's writes (M70). Every one is guarded the same way:
+//
+//   - only a component visible under the transaction's tenant GUC
+//     (components FORCE RLS; component_vulnerabilities has no policy);
+//   - never with data OLDER than what the link already rests on: evidence
+//     carries the data's source identity (source_id, a hash of the configured
+//     endpoint) and revision (data_modified, fixed-width UTC RFC 3339, text
+//     order = time order). Within one source, a write needs a revision at
+//     least as new as the stored one; across sources revisions are not
+//     comparable and the rank rule alone decides. The watermark stays on the
+//     link after a clear and after a no-verdict check, so an overlapping scan
+//     that fetched older data can never write afterwards (Codex M70 R8
+//     High-4, R10 Medium-2, R11 High-1, R13 High-1).
+
+const distroLabels = `'distro_affected', 'distro_unfixed', 'distro_fixed'`
 
 // priorMethodVocabulary: the non-distro methods a clear may restore.
 const priorMethodVocabulary = `'nvd_cpe', 'nvd_cpe_distro', 'nvd_cpe_unverified', 'nvd_keyword', 'jvn_keyword', 'cve_sync_keyword'`
 
-// relabelDistroFreshness keeps any write over a distro label — a refresh of
-// the same label or an upgrade to a stronger one — from replacing evidence
-// of a NEWER data revision with an older one (two overlapping scans whose
-// fetches straddled an OSV update; Codex M70 R8 High-4, R10 Medium-2). data_modified is
-// fixed-width UTC RFC 3339, so text order is time order; a missing one is
-// the oldest.
-//
-// Revisions of different endpoints (an operator switching SBOMHUB_OSV_URL to
-// a mirror) are not comparable: then the rank rule alone decides (Codex M70
-// R11 High-1).
-const relabelDistroFreshness = `((cv.match_evidence->>'source_url') IS DISTINCT FROM ($4::jsonb->>'source_url')
-		        OR COALESCE(cv.match_evidence->>'data_modified', '') <= COALESCE($4::jsonb->>'data_modified', ''))`
+// distroFreshness is the revision guard against the JSON parameter p.
+func distroFreshness(p string) string {
+	return `((cv.match_evidence->>'source_id') IS DISTINCT FROM (` + p + `::jsonb->>'source_id')
+		        OR COALESCE(cv.match_evidence->>'data_modified', '') <= COALESCE(` + p + `::jsonb->>'data_modified', ''))`
+}
+
+// relabelDistroFreshness is the guard RelabelDistro applies.
+var relabelDistroFreshness = distroFreshness("$4")
 
 // ErrNotDistroMethod is returned before any statement when RelabelDistro is
 // handed a method that is not a distro label.
 var ErrNotDistroMethod = errors.New("relabel: not a distro match method")
 
-// RelabelDistro sets a distro label and its evidence on an EXISTING link
-// (M70). It never inserts: the distro step only relabels what the NVD / JVN
-// sweeps linked, so a link removed meanwhile stays removed.
+// RelabelDistro sets a distro label and its evidence on an EXISTING link. It
+// never inserts: the distro step only relabels what the NVD / JVN sweeps
+// linked, so a link removed meanwhile stays removed.
 //
-// The rank rule is LinkComponent's (model.MatchMethod.Rank): the stored method
-// is replaced only by a strictly stronger one, so a link a scan once found
-// distro_affected is never relabelled distro_fixed by a later one. A link that
-// already carries THIS method gets its evidence refreshed (e.g. a newer fixed
-// version), and only if the evidence changed other than its fetched_at, so an
-// unchanged rescan locks no row.
-//
-// The component must be visible under the transaction's tenant GUC
-// (components FORCE RLS): component_vulnerabilities has no policy of its own,
-// and this keeps a component id from another tenant from ever being
-// relabelled, whatever the caller passes. It reports whether a row changed.
+// The stored method is replaced only by a strictly stronger one
+// (model.MatchMethod.Rank), so a link a scan once found distro_affected is
+// never relabelled distro_fixed by a later one; a link already carrying THIS
+// method gets its evidence refreshed when it changed other than fetched_at /
+// prior_method. prior_method records the method before the FIRST distro
+// label, carried across distro relabels, so ClearDistro can restore it. It
+// reports whether a row changed.
 func (r *ComponentRepository) RelabelDistro(ctx context.Context, componentID, vulnID uuid.UUID, method model.MatchMethod, evidence []byte) (bool, error) {
 	if !method.IsDistro() {
 		return false, fmt.Errorf("%w: %q", ErrNotDistroMethod, string(method))
@@ -121,11 +99,8 @@ func (r *ComponentRepository) RelabelDistro(ctx context.Context, componentID, vu
 	res, err := r.q(ctx).ExecContext(ctx, `
 		UPDATE component_vulnerabilities cv
 		   SET match_method = $3,
-		       -- prior_method: the method before the FIRST distro label,
-		       -- carried across distro relabels, so a clear can restore it
-		       -- (Codex M70 R12 High-1).
 		       match_evidence = $4::jsonb || jsonb_build_object('prior_method',
-		           CASE WHEN cv.match_method IN ('distro_affected', 'distro_unfixed', 'distro_fixed')
+		           CASE WHEN cv.match_method IN (`+distroLabels+`)
 		                THEN cv.match_evidence->'prior_method'
 		                ELSE to_jsonb(cv.match_method) END)
 		 WHERE cv.component_id = $1
@@ -135,9 +110,63 @@ func (r *ComponentRepository) RelabelDistro(ctx context.Context, componentID, vu
 		        OR cv.match_method = ANY($5)
 		        OR (cv.match_method = $3
 		            AND (cv.match_evidence - 'fetched_at' - 'prior_method') IS DISTINCT FROM ($4::jsonb - 'fetched_at')))
-		   AND (COALESCE(cv.match_method, '') NOT IN ('distro_affected', 'distro_unfixed', 'distro_fixed')
-		        OR `+relabelDistroFreshness+`)`,
+		   AND `+relabelDistroFreshness,
 		componentID, vulnID, string(method), string(evidence), pq.Array(model.WeakerMatchMethods(method)))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// ClearDistro takes a distro label the current data no longer supports back
+// to the method the link had before the distro step (evidence prior_method;
+// NULL = unknown when there was none or it is not a known method), and leaves
+// the data's watermark (source, revision) as the evidence. Only with data of
+// the SAME source at least as new. It reports whether a row changed.
+func (r *ComponentRepository) ClearDistro(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error) {
+	if len(watermark) == 0 {
+		return false, fmt.Errorf("clear: needs the data's watermark")
+	}
+	res, err := r.q(ctx).ExecContext(ctx, `
+		UPDATE component_vulnerabilities cv
+		   SET match_method = CASE WHEN cv.match_evidence->>'prior_method' IN (`+priorMethodVocabulary+`)
+		                           THEN cv.match_evidence->>'prior_method' END,
+		       match_evidence = $3::jsonb
+		 WHERE cv.component_id = $1
+		   AND cv.vulnerability_id = $2
+		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
+		   AND cv.match_method IN (`+distroLabels+`)
+		   AND (cv.match_evidence->>'source_id') IS NOT DISTINCT FROM ($3::jsonb->>'source_id')
+		   AND COALESCE(cv.match_evidence->>'data_modified', '') <= COALESCE($3::jsonb->>'data_modified', '')`,
+		componentID, vulnID, string(watermark))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// MarkDistroChecked records on a link WITHOUT a distro label that data of
+// this source and revision gave no verdict for it: the watermark is stored as
+// its match_evidence (the API shows evidence only for distro labels), so an
+// overlapping scan holding OLDER data cannot label it afterwards. It writes
+// only when the watermark changes and is not older. It reports whether a row
+// changed.
+func (r *ComponentRepository) MarkDistroChecked(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error) {
+	if len(watermark) == 0 {
+		return false, fmt.Errorf("mark: needs the data's watermark")
+	}
+	res, err := r.q(ctx).ExecContext(ctx, `
+		UPDATE component_vulnerabilities cv
+		   SET match_evidence = $3::jsonb
+		 WHERE cv.component_id = $1
+		   AND cv.vulnerability_id = $2
+		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
+		   AND COALESCE(cv.match_method, '') NOT IN (`+distroLabels+`)
+		   AND cv.match_evidence IS DISTINCT FROM $3::jsonb
+		   AND `+distroFreshness("$3"),
+		componentID, vulnID, string(watermark))
 	if err != nil {
 		return false, err
 	}

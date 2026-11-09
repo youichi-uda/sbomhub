@@ -38,6 +38,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,15 +81,20 @@ const (
 )
 
 // distroLinkStore is the repository surface the step uses.
-// clearEvidence is what a clear is guarded by: the endpoint and revision of
-// the data that no longer supports the label.
-func clearEvidence(d distroData) []byte {
-	b, _ := json.Marshal(model.DistroEvidence{Source: model.DistroSourceOSV, SourceURL: d.source, DataModified: d.revision})
+// watermark is the evidence a clear or a no-verdict check leaves on a link:
+// the source and revision of the data that was checked.
+func watermark(d distroData) []byte {
+	b, _ := json.Marshal(struct {
+		Source       string `json:"source"`
+		SourceID     string `json:"source_id"`
+		DataModified string `json:"data_modified"`
+	}{model.DistroSourceOSV, d.sourceID, d.revision})
 	return b
 }
 
 type distroLinkStore interface {
-	ClearDistro(ctx context.Context, componentID, vulnID uuid.UUID, guard []byte) (bool, error)
+	ClearDistro(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error)
+	MarkDistroChecked(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error)
 	ListScanTargetsBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error)
 	ListSbomLinks(ctx context.Context, sbomID uuid.UUID) ([]repository.SbomLink, error)
 	RelabelDistro(ctx context.Context, componentID, vulnID uuid.UUID, method model.MatchMethod, evidence []byte) (bool, error)
@@ -104,25 +111,28 @@ type distroFetcher interface {
 type DistroService struct {
 	store distroLinkStore
 	osv   distroFetcher
-	// source identifies the data source in cache keys (the OSV endpoint).
-	source  string
-	cache   *cache.DistroCache
-	offline bool
-	gap     time.Duration
-	now     func() time.Time
+	// source is the endpoint as shown in evidence (no credentials);
+	// sourceID identifies it exactly (cache keys, revision guards).
+	source   string
+	sourceID string
+	cache    *cache.DistroCache
+	offline  bool
+	gap      time.Duration
+	now      func() time.Time
 }
 
 // NewDistroService builds the step. osvBaseURL "" is OSV's public API;
 // offline (SBOMHUB_OFFLINE) disables every request.
 func NewDistroService(cr *repository.ComponentRepository, osvBaseURL string, distroCache *cache.DistroCache, offline bool) *DistroService {
 	return &DistroService{
-		store:   cr,
-		osv:     client.NewOSVClient().WithBaseURL(osvBaseURL).WithOffline(offline),
-		source:  distroSource(osvBaseURL),
-		cache:   distroCache,
-		offline: offline,
-		gap:     distroRequestGap,
-		now:     time.Now,
+		store:    cr,
+		osv:      client.NewOSVClient().WithBaseURL(osvBaseURL).WithOffline(offline),
+		source:   distroSource(osvBaseURL),
+		sourceID: distroSourceID(osvBaseURL),
+		cache:    distroCache,
+		offline:  offline,
+		gap:      distroRequestGap,
+		now:      time.Now,
 	}
 }
 
@@ -240,9 +250,12 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 	refused, _, werr := scope.writeLinks(ctx, sbomID, groups, func(txCtx context.Context, l pendingLink) error {
 		var changed bool
 		var err error
-		if l.clear {
+		switch {
+		case l.clear:
 			changed, err = s.store.ClearDistro(txCtx, l.componentID, l.vulnID, l.evidence)
-		} else {
+		case l.mark:
+			changed, err = s.store.MarkDistroChecked(txCtx, l.componentID, l.vulnID, l.evidence)
+		default:
 			changed, err = s.store.RelabelDistro(txCtx, l.componentID, l.vulnID, l.method, l.evidence)
 		}
 		if changed {
@@ -312,7 +325,7 @@ func (s *DistroService) fetchAndDecide(ctx context.Context, work []distroWork, b
 				var derr error
 				hit, pages, ferr := s.loadSlotted(ctx, k, pace, func(l distroLoad) error {
 					d := l.data()
-					d.source = s.source
+					d.source, d.sourceID = s.source, s.sourceID
 					g, counts, derr = decideKey(ctx, d, l.fetchedAt, byKey[k], byComp)
 					return nil
 				})
@@ -377,10 +390,16 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 					// The complete, current data no longer supports the
 					// stored distro label: clear it back to the method it
 					// had before (Codex M70 R12 High-1). The write is
-					// guarded by endpoint and revision like a relabel.
+					// guarded by source and revision like a relabel.
 					g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, clear: true,
-						evidence: clearEvidence(d)})
+						evidence: watermark(d)})
 					counts.Cleared++
+				} else {
+					// Leave the watermark: an overlapping scan with OLDER
+					// data cannot label this link afterwards (Codex M70 R13
+					// High-1). Written only when it changes.
+					g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, mark: true,
+						evidence: watermark(d)})
 				}
 				continue
 			}
@@ -482,10 +501,22 @@ func (s *DistroService) pacer() func(context.Context) error {
 // multiply the per-query memory bound (Codex M70 R2 High-3).
 var distroQuerySlots = make(chan struct{}, 2)
 
-// distroSource is the identity of an OSV endpoint, used in cache keys and
-// shown in evidence (source_url). It is scheme://host[:port]/path only: no
-// credentials, query or fragment ever reach a tenant through the API
-// (Codex M70 R12 High-4).
+// distroSourceID identifies the configured endpoint exactly, credentials and
+// query included, as an opaque hash: two mirrors that differ only in their
+// credentials share no cache entry and no revision order (Codex M70 R13
+// Medium-5).
+func distroSourceID(osvBaseURL string) string {
+	raw := strings.TrimRight(strings.TrimSpace(osvBaseURL), "/")
+	if raw == "" {
+		raw = client.DefaultOSVBaseURL
+	}
+	sum := sha256.Sum256([]byte("osv\x00" + raw))
+	return hex.EncodeToString(sum[:16])
+}
+
+// distroSource is an OSV endpoint as SHOWN in evidence (source_url):
+// scheme://host[:port]/path only, so no credentials, query or fragment ever
+// reach a tenant through the API (Codex M70 R12 High-4).
 func distroSource(osvBaseURL string) string {
 	raw := strings.TrimSpace(osvBaseURL)
 	if raw == "" {
@@ -525,7 +556,7 @@ func (l distroLoad) data() distroData {
 // (and then cached). It never returns a partial answer. It holds no slot
 // itself; callers in a scan go through loadSlotted.
 func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(context.Context) error) (l distroLoad, hit bool, pages int, err error) {
-	if e, cerr := s.cache.Get(ctx, s.source, k.ecosystem, k.pkg); cerr != nil {
+	if e, cerr := s.cache.Get(ctx, s.sourceID, k.ecosystem, k.pkg); cerr != nil {
 		slog.Debug("distro cache get error", "ecosystem", k.ecosystem, "package", k.pkg, "error", cerr)
 	} else if e != nil {
 		var p distroCachePayload
@@ -553,8 +584,11 @@ func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(co
 	}
 	l.fetchedAt = s.now().UTC()
 	payload, merr := json.Marshal(distroCachePayload{Version: distroCachePayloadVersion, Records: l.recs})
-	if merr == nil {
-		if serr := s.cache.Set(ctx, s.source, k.ecosystem, k.pkg, cache.DistroCacheEntry{FetchedAt: l.fetchedAt, Payload: payload,
+	if merr == nil && generation != "" {
+		// No generation (Redis unreachable when the fetch started): not
+		// cached, since its order against other writes is unknown (Codex
+		// M70 R13 Medium-6).
+		if serr := s.cache.Set(ctx, s.sourceID, k.ecosystem, k.pkg, cache.DistroCacheEntry{FetchedAt: l.fetchedAt, Payload: payload,
 			DataModified: l.revision, Generation: generation}); serr != nil {
 			slog.Debug("distro cache set error", "ecosystem", k.ecosystem, "package", k.pkg, "error", serr)
 		}

@@ -23,8 +23,11 @@
 --   written together with a distro label: the data source and record ids,
 --   the release ecosystem ("Debian:11"), the package name, the installed and
 --   the fixed version, and the basis ('release' or, for an end-of-life
---   Debian release the data no longer lists, 'later_releases'). NULL for
---   every other method. component_vulnerabilities has no tenant_id and no
+--   Debian release the data no longer lists, 'later_releases'), plus
+--   prior_method (the method before the first distro label). On a link
+--   without a distro label it may hold only the distro data's watermark
+--   (source_id, data_modified) of the last check; the API shows evidence only
+--   for distro labels. component_vulnerabilities has no tenant_id and no
 --   RLS policy of its own (001; 063 lists its inbound FKs): every reader and
 --   writer reaches it through components, which FORCE row-level security
 --   (007 / 023), and the distro step's relabel additionally requires its

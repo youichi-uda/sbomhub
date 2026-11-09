@@ -84,7 +84,8 @@ func itoa(n int) string {
 
 // Codex M70 R8 High-4: a same-method refresh is guarded by data_modified.
 func TestM70RelabelDistro_FreshnessGuard(t *testing.T) {
-	if !strings.Contains(relabelDistroFreshness, "data_modified") || !strings.Contains(relabelDistroFreshness, "<=") {
+	if !strings.Contains(relabelDistroFreshness, "data_modified") || !strings.Contains(relabelDistroFreshness, "<=") ||
+		!strings.Contains(relabelDistroFreshness, "source_id") {
 		t.Errorf("guard %q", relabelDistroFreshness)
 	}
 }

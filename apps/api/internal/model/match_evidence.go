@@ -13,6 +13,11 @@ type DistroEvidence struct {
 	// SourceURL is the endpoint the data came from (SBOMHUB_OSV_URL or
 	// OSV's public API). Revisions are compared only within one endpoint.
 	SourceURL string `json:"source_url,omitempty"`
+	// SourceID identifies the configured endpoint exactly (a hash of the
+	// full configured URL, credentials included, never shown in clear):
+	// revisions are compared, and cache entries shared, only within one
+	// SourceID (Codex M70 R13 Medium-5).
+	SourceID string `json:"source_id,omitempty"`
 	// Status is the distro's statement about the installed version:
 	// "affected" (a fix exists above it), "unfixed" (no fix released),
 	// "fixed" (installed >= the fixed version).
