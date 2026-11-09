@@ -12,14 +12,18 @@
 -- distro labels and match_evidence and fails loudly against a schema without
 -- them.
 --
--- LOCK BUDGET: see 063. The UPDATE locks only the relabelled rows;
--- DROP CONSTRAINT / ADD CONSTRAINT ... NOT VALID / DROP COLUMN take ACCESS
--- EXCLUSIVE. statement_timeout bounds the UPDATE, whose size is the number of
--- distro-labelled links.
+-- LOCK BUDGET: see 063. The whole file holds ACCESS EXCLUSIVE on
+-- component_vulnerabilities from its first statement. statement_timeout
+-- bounds the UPDATE, whose size is the number of distro-labelled links.
 -- ============================================
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '300s';
+
+-- ACCESS EXCLUSIVE first (Codex M70 R2 Medium-5): a still-running M70 binary
+-- could otherwise relabel a row between the UPDATE and the narrowed CHECK,
+-- which NOT VALID would not catch.
+LOCK TABLE component_vulnerabilities IN ACCESS EXCLUSIVE MODE;
 
 UPDATE component_vulnerabilities
    SET match_method = NULL

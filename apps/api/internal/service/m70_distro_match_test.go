@@ -206,8 +206,13 @@ func TestM70EvalEntry(t *testing.T) {
 // Decisions (distroData.decide)
 // ---------------------------------------------------------------------------
 
+// rec builds a record of ONE package; its release count is that of entries.
 func rec(id string, cves []string, entries ...distroEntry) distroRecord {
-	return distroRecord{ID: id, CVEs: cves, Entries: entries}
+	rel := map[string]bool{}
+	for _, e := range entries {
+		rel[e.Ecosystem] = true
+	}
+	return distroRecord{ID: id, CVEs: cves, Entries: entries, Releases: len(rel), Packages: 1}
 }
 
 func entry(eco string, events ...string) distroEntry {

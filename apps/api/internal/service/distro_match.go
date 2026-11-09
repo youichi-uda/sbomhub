@@ -232,7 +232,10 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 		switch id {
 		case "debian":
 			major, ok := releaseMajor(rel)
-			if !ok {
+			if !ok || major < debianFirstNumbered {
+				// OSV names Debian 3.0 .. 6.0 "Debian:3.0", "Debian:3.1",
+				// ...: a major number cannot identify them (Codex M70 R2
+				// High-2), and they ended long before this data existed.
 				return distroTarget{}, "unknown_release"
 			}
 			t.releaseMajor = major
@@ -342,6 +345,12 @@ type distroRecord struct {
 	ID      string        `json:"id"`
 	CVEs    []string      `json:"cves"`
 	Entries []distroEntry `json:"entries"`
+	// Releases / Packages are how many distinct release ecosystems and
+	// package names the ORIGINAL record had, all packages included: the CVE
+	// list is about all of them, so filtering to one package must not make
+	// an advisory look single-entry (Codex M70 R2 High-1).
+	Releases int `json:"releases"`
+	Packages int `json:"packages"`
 }
 
 type distroEntry struct {
@@ -385,7 +394,10 @@ func reduceOSVRecords(recs []client.OSVPackageRecord, pkg string) []distroRecord
 			continue
 		}
 		var entries []distroEntry
+		releases, packages := map[string]bool{}, map[string]bool{}
 		for _, a := range r.Affected {
+			releases[a.Package.Ecosystem] = true
+			packages[a.Package.Name] = true
 			if a.Package.Name != pkg || a.Package.Ecosystem == "" {
 				continue
 			}
@@ -394,7 +406,7 @@ func reduceOSVRecords(recs []client.OSVPackageRecord, pkg string) []distroRecord
 		if len(entries) == 0 {
 			continue
 		}
-		d := distroRecord{ID: r.ID, Entries: entries}
+		d := distroRecord{ID: r.ID, Entries: entries, Releases: len(releases), Packages: len(packages)}
 		for c := range cves {
 			d.CVEs = append(d.CVEs, c)
 		}
@@ -427,11 +439,12 @@ type distroData struct {
 func indexDistroRecords(recs []distroRecord) distroData {
 	d := distroData{byCVE: map[string][]*distroRecord{}, cveRecordReleases: map[string]bool{}}
 	for i := range recs {
-		for _, c := range recs[i].CVEs {
-			d.byCVE[c] = append(d.byCVE[c], &recs[i])
+		r := &recs[i]
+		for _, c := range r.CVEs {
+			d.byCVE[c] = append(d.byCVE[c], r)
 		}
-		if recs[i].isCVERecord() {
-			for _, e := range recs[i].Entries {
+		if r.isCVERecord() {
+			for _, e := range r.Entries {
 				d.cveRecordReleases[e.Ecosystem] = true
 			}
 		}
@@ -452,21 +465,31 @@ func (r *distroRecord) isCVERecord() bool {
 // release, but not which CVE applies to which release: USN-5402-1 lists
 // CVE-2022-1343 with 18.04 / 20.04 fixes, and UBUNTU-CVE-2022-1343 shows only
 // 22.04 is affected. So an advisory speaks for each of its CVEs only when it
-// names ONE CVE, or ONE release (an LTS advisory: every listed CVE was fixed
-// in that release).
+// names ONE CVE, or ONE release and ONE package in the whole record (an LTS
+// advisory for one source package: every listed CVE was fixed there). An
+// AlmaLinux / Rocky Linux erratum (ALSA / RLSA) names one release and the
+// BINARY rpms of the source it rebuilt (openssl, openssl-libs, ...): one
+// release suffices there.
 func (r *distroRecord) speaksFor() bool {
 	if r.isCVERecord() || len(r.CVEs) == 1 {
 		return true
 	}
-	eco := ""
-	for _, e := range r.Entries {
-		if eco != "" && e.Ecosystem != eco {
-			return false
-		}
-		eco = e.Ecosystem
+	if r.Releases != 1 {
+		return false
 	}
-	return true
+	if r.Packages == 1 {
+		return true
+	}
+	return len(r.Entries) > 0 && rpmErratumEcosystem(r.Entries[0].Ecosystem)
 }
+
+func rpmErratumEcosystem(eco string) bool {
+	return strings.HasPrefix(eco, "AlmaLinux:") || strings.HasPrefix(eco, "Rocky Linux:")
+}
+
+// debianFirstNumbered is the first Debian release OSV names by its major
+// number alone ("Debian:7"); older ones are "Debian:6.0", "Debian:3.1", ...
+const debianFirstNumbered = 7
 
 // debianLastEndOfLife is the newest Debian major release that is past its
 // LTS period (bullseye, 11: LTS ended 2026-08-31). laterReleaseVerdict

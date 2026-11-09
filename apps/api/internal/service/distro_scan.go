@@ -67,8 +67,13 @@ const (
 	// distroWorkers is how many package queries run at once (sharing the
 	// pacer, so the request RATE stays one per distroRequestGap).
 	distroWorkers = 4
-	// distroCachePayloadVersion is bumped with the distroRecord format.
-	distroCachePayloadVersion = 1
+	// distroMaxBytesPerPackage bounds one package query's response bytes,
+	// all pages together. The largest measured answer (Debian "linux") is
+	// ~7 MB per 3,000-record page.
+	distroMaxBytesPerPackage = 96 << 20
+	// distroCachePayloadVersion is bumped with the distroRecord format
+	// (2: Releases / Packages, Codex M70 R2).
+	distroCachePayloadVersion = 2
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -80,14 +85,17 @@ type distroLinkStore interface {
 
 // distroFetcher is the OSV surface the step uses.
 type distroFetcher interface {
-	QueryPackage(ctx context.Context, ecosystem, name string, maxPages int, before func(context.Context) error) (client.OSVPackageQueryResult, error)
+	QueryPackageEach(ctx context.Context, ecosystem, name string, lim client.PackageQueryLimits,
+		before func(context.Context) error, onPage func([]client.OSVPackageRecord) error) (int, error)
 }
 
 // DistroService is the distro step. It satisfies the handlers'
 // componentScanner (ScanComponents).
 type DistroService struct {
-	store   distroLinkStore
-	osv     distroFetcher
+	store distroLinkStore
+	osv   distroFetcher
+	// source identifies the data source in cache keys (the OSV endpoint).
+	source  string
 	cache   *cache.DistroCache
 	offline bool
 	gap     time.Duration
@@ -100,6 +108,7 @@ func NewDistroService(cr *repository.ComponentRepository, osvBaseURL string, dis
 	return &DistroService{
 		store:   cr,
 		osv:     client.NewOSVClient().WithBaseURL(osvBaseURL).WithOffline(offline),
+		source:  distroSource(osvBaseURL),
 		cache:   distroCache,
 		offline: offline,
 		gap:     distroRequestGap,
@@ -387,6 +396,19 @@ func (s *DistroService) pacer() func(context.Context) error {
 	}
 }
 
+// distroQuerySlots bounds the package queries in flight across the WHOLE
+// process (every scan, upload and manual alike), so overlapping scans cannot
+// multiply the per-query memory bound (Codex M70 R2 High-3).
+var distroQuerySlots = make(chan struct{}, 2)
+
+// distroSource is the cache identity of an OSV endpoint.
+func distroSource(osvBaseURL string) string {
+	if strings.TrimSpace(osvBaseURL) == "" {
+		return client.DefaultOSVBaseURL
+	}
+	return strings.TrimRight(strings.TrimSpace(osvBaseURL), "/")
+}
+
 // distroCachePayload is what the cache entry holds for one package.
 type distroCachePayload struct {
 	Version int            `json:"v"`
@@ -396,7 +418,7 @@ type distroCachePayload struct {
 // load returns one package's reduced records: from the cache, or from OSV
 // (and then cached). It never returns a partial answer.
 func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(context.Context) error) (recs []distroRecord, fetchedAt time.Time, hit bool, pages int, err error) {
-	if e, cerr := s.cache.Get(ctx, k.ecosystem, k.pkg); cerr != nil {
+	if e, cerr := s.cache.Get(ctx, s.source, k.ecosystem, k.pkg); cerr != nil {
 		slog.Debug("distro cache get error", "ecosystem", k.ecosystem, "package", k.pkg, "error", cerr)
 	} else if e != nil {
 		var p distroCachePayload
@@ -404,26 +426,38 @@ func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(co
 			return p.Records, e.FetchedAt, true, 0, nil
 		}
 	}
-	res, err := s.osv.QueryPackage(ctx, k.ecosystem, k.pkg, distroMaxPages, pace)
-	if err != nil {
-		return nil, time.Time{}, false, res.Pages, err
+	select {
+	case distroQuerySlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, time.Time{}, false, 0, ctx.Err()
 	}
-	recs = reduceOSVRecords(res.Records, k.pkg)
+	defer func() { <-distroQuerySlots }()
+	// Each page is reduced as it arrives; only this package's entries are
+	// kept.
+	pages, err = s.osv.QueryPackageEach(ctx, k.ecosystem, k.pkg,
+		client.PackageQueryLimits{MaxPages: distroMaxPages, MaxTotalBytes: distroMaxBytesPerPackage}, pace,
+		func(page []client.OSVPackageRecord) error {
+			recs = append(recs, reduceOSVRecords(page, k.pkg)...)
+			return nil
+		})
+	if err != nil {
+		return nil, time.Time{}, false, pages, err
+	}
 	at := s.now().UTC()
 	payload, merr := json.Marshal(distroCachePayload{Version: distroCachePayloadVersion, Records: recs})
 	if merr == nil {
-		if serr := s.cache.Set(ctx, k.ecosystem, k.pkg, cache.DistroCacheEntry{FetchedAt: at, Payload: payload}); serr != nil {
+		if serr := s.cache.Set(ctx, s.source, k.ecosystem, k.pkg, cache.DistroCacheEntry{FetchedAt: at, Payload: payload}); serr != nil {
 			slog.Debug("distro cache set error", "ecosystem", k.ecosystem, "package", k.pkg, "error", serr)
 		}
 	}
-	return recs, at, false, res.Pages, nil
+	return recs, at, false, pages, nil
 }
 
 // validDistroRecords rejects a cache entry that does not look like one this
 // build wrote (the cache is shared and outlives builds).
 func validDistroRecords(recs []distroRecord) bool {
 	for _, r := range recs {
-		if strings.TrimSpace(r.ID) == "" || len(r.CVEs) == 0 || len(r.Entries) == 0 {
+		if strings.TrimSpace(r.ID) == "" || len(r.CVEs) == 0 || len(r.Entries) == 0 || r.Releases < 1 || r.Packages < 1 {
 			return false
 		}
 		for _, c := range r.CVEs {

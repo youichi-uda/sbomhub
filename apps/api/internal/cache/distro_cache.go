@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -52,20 +53,25 @@ type DistroCacheEntry struct {
 	Payload   json.RawMessage `json:"payload"`
 }
 
-// DistroCacheKey is the Redis key of (ecosystem, name).
-func DistroCacheKey(ecosystem, name string) string {
-	sum := sha256.Sum256([]byte(strconv.Itoa(len(ecosystem)) + ":" + ecosystem + name))
+// DistroCacheKey is the Redis key of (source, ecosystem, name). source is the
+// data source's endpoint (SBOMHUB_OSV_URL): two deployments pointed at
+// different mirrors share no entry (Codex M70 R2 Medium-6). A trailing '/' is
+// not part of the identity.
+func DistroCacheKey(source, ecosystem, name string) string {
+	source = strings.TrimRight(strings.TrimSpace(source), "/")
+	sum := sha256.Sum256([]byte(strconv.Itoa(len(source)) + ":" + source +
+		strconv.Itoa(len(ecosystem)) + ":" + ecosystem + name))
 	return DistroCachePrefix + hex.EncodeToString(sum[:])
 }
 
 // Get returns the entry, or (nil, nil) on a miss or an undecodable entry.
-func (c *DistroCache) Get(ctx context.Context, ecosystem, name string) (*DistroCacheEntry, error) {
+func (c *DistroCache) Get(ctx context.Context, source, ecosystem, name string) (*DistroCacheEntry, error) {
 	if c == nil || c.client == nil {
 		return nil, nil
 	}
 	ctx, cancel := opContext(ctx)
 	defer cancel()
-	data, err := c.client.Get(ctx, DistroCacheKey(ecosystem, name)).Bytes()
+	data, err := c.client.Get(ctx, DistroCacheKey(source, ecosystem, name)).Bytes()
 	if err == redis.Nil {
 		return nil, nil
 	}
@@ -80,7 +86,7 @@ func (c *DistroCache) Get(ctx context.Context, ecosystem, name string) (*DistroC
 }
 
 // Set stores an entry.
-func (c *DistroCache) Set(ctx context.Context, ecosystem, name string, e DistroCacheEntry) error {
+func (c *DistroCache) Set(ctx context.Context, source, ecosystem, name string, e DistroCacheEntry) error {
 	if c == nil || c.client == nil {
 		return nil
 	}
@@ -90,7 +96,7 @@ func (c *DistroCache) Set(ctx context.Context, ecosystem, name string, e DistroC
 	}
 	ctx, cancel := opContext(ctx)
 	defer cancel()
-	if err := c.client.Set(ctx, DistroCacheKey(ecosystem, name), data, c.ttl).Err(); err != nil {
+	if err := c.client.Set(ctx, DistroCacheKey(source, ecosystem, name), data, c.ttl).Err(); err != nil {
 		return fmt.Errorf("redis set error: %w", err)
 	}
 	return nil

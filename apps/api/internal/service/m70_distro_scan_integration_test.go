@@ -335,12 +335,13 @@ func TestM70DistroScan_RedisCache(t *testing.T) {
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
 		t.Skipf("redis: %v", err)
 	}
-	_ = rdb.Del(context.Background(), cache.DistroCacheKey("Debian", "openssl")).Err()
-	t.Cleanup(func() { _ = rdb.Del(context.Background(), cache.DistroCacheKey("Debian", "openssl")).Err() })
-
 	e := m70Seed(t, "m70cache")
 	r := m70DebianReplay(t)
-	svc := m70Service(t, e, r.start().URL, cache.NewDistroCache(rdb))
+	srvURL := r.start().URL
+	key := cache.DistroCacheKey(distroSource(srvURL), "Debian", "openssl")
+	_ = rdb.Del(context.Background(), key).Err()
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
+	svc := m70Service(t, e, srvURL, cache.NewDistroCache(rdb))
 	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
 	rep1, err := svc.ScanComponentsWithReport(ctx, e.sbom)
 	if err != nil {
