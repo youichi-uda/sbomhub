@@ -473,7 +473,7 @@ func TestM70DistroFreshness_DBAndCache(t *testing.T) {
 	now := time.Now()
 	set := func(gen string, payload string) {
 		t.Helper()
-		if err := c.Set(context.Background(), "test-fresh", "Debian", "p", cache.DistroCacheEntry{FetchedAt: now, Generation: gen, Payload: []byte(payload)}); err != nil {
+		if _, err := c.Set(context.Background(), "test-fresh", "Debian", "p", cache.DistroCacheEntry{FetchedAt: now, Generation: gen, Payload: []byte(payload)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -649,7 +649,7 @@ func TestM70DistroCache_RevisionBeforeGeneration(t *testing.T) {
 	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
 	set := func(gen, dm, payload string) {
 		t.Helper()
-		if err := c.Set(context.Background(), "test-rev", "Debian", "p", cache.DistroCacheEntry{FetchedAt: time.Now(),
+		if _, err := c.Set(context.Background(), "test-rev", "Debian", "p", cache.DistroCacheEntry{FetchedAt: time.Now(),
 			Generation: gen, DataModified: dm, Payload: []byte(payload)}); err != nil {
 			t.Fatal(err)
 		}
@@ -713,5 +713,40 @@ func TestM70Watermark_AdvancesWhenRankRefuses(t *testing.T) {
 	})
 	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_affected" || r.evidence.Fixed != "r1" {
 		t.Errorf("%+v", r)
+	}
+}
+
+// Codex M70 R21 High-1: a fetch that LOSES the cache race uses the winner.
+func TestM70DistroLoad_LoserUsesTheWinner(t *testing.T) {
+	url := os.Getenv("REDIS_URL")
+	if url == "" {
+		t.Skip("REDIS_URL not set")
+	}
+	opt, err := redis.ParseURL(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { _ = rdb.Close() })
+	r := m70DebianReplay(t)
+	srvURL := r.start().URL
+	dc := cache.NewDistroCache(rdb)
+	s := NewDistroService(nil, srvURL, dc, false)
+	s.gap = 0
+	key := cache.DistroCacheKey(s.sourceID, "Debian", "openssl")
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
+	// A winner with a NEWER revision is already cached, as if another scan
+	// stored it while this one was fetching.
+	winner := distroCachePayload{Version: distroCachePayloadVersion, Records: []distroRecord{{ID: "DSA-WIN", CVEs: []string{"CVE-2021-0001"},
+		Releases: 1, Packages: 1, Modified: normaliseModified("2026-11-08T00:00:00Z"), Entries: []distroEntry{entry("Debian:11", "i", "0", "f", "9.9-1")}}}}
+	raw, _ := json.Marshal(winner)
+	if _, err := dc.Set(context.Background(), s.sourceID, "Debian", "openssl", cache.DistroCacheEntry{FetchedAt: time.Now(),
+		Payload: raw, DataModified: "2026-11-08T12:00:00.000000000Z", Generation: "99999999999999999999"}); err != nil {
+		t.Fatal(err)
+	}
+	// Bypass the read of the cache for this load so it fetches and loses.
+	l, hit, _, err := s.loadFetch(context.Background(), distroFetchKey{ecosystem: "Debian", pkg: "openssl"}, s.pacer())
+	if err != nil || len(l.recs) != 1 || l.recs[0].ID != "DSA-WIN" || hit {
+		t.Errorf("loser did not use the winner: err=%v hit=%v %d records", err, hit, len(l.recs))
 	}
 }

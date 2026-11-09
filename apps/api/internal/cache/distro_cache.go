@@ -140,23 +140,26 @@ func (c *DistroCache) NextGeneration(ctx context.Context) string {
 	return fmt.Sprintf("%020d", n)
 }
 
-// Set stores an entry.
-func (c *DistroCache) Set(ctx context.Context, source, ecosystem, name string, e DistroCacheEntry) error {
+// Set stores an entry. won is false when the stored entry was newer and was
+// kept: the caller must then use THAT entry, not its own (Codex M70 R21
+// High-1).
+func (c *DistroCache) Set(ctx context.Context, source, ecosystem, name string, e DistroCacheEntry) (won bool, err error) {
 	if c == nil || c.client == nil {
-		return nil
+		return true, nil
 	}
 	data, err := json.Marshal(e)
 	if err != nil {
-		return fmt.Errorf("failed to marshal distro cache entry: %w", err)
+		return false, fmt.Errorf("failed to marshal distro cache entry: %w", err)
 	}
 	if len(data) > DistroCacheMaxBytes {
-		return fmt.Errorf("distro cache entry of %d bytes exceeds %d", len(data), DistroCacheMaxBytes)
+		return false, fmt.Errorf("distro cache entry of %d bytes exceeds %d", len(data), DistroCacheMaxBytes)
 	}
 	ctx, cancel := opContext(ctx)
 	defer cancel()
-	if err := distroSetIfNotNewer.Run(ctx, c.client, []string{DistroCacheKey(source, ecosystem, name)},
-		data, e.Generation, c.ttl.Milliseconds(), e.DataModified).Err(); err != nil {
-		return fmt.Errorf("redis set error: %w", err)
+	n, err := distroSetIfNotNewer.Run(ctx, c.client, []string{DistroCacheKey(source, ecosystem, name)},
+		data, e.Generation, c.ttl.Milliseconds(), e.DataModified).Int()
+	if err != nil {
+		return false, fmt.Errorf("redis set error: %w", err)
 	}
-	return nil
+	return n == 1, nil
 }

@@ -120,6 +120,7 @@ func (c *OSVClient) QueryPackageEach(ctx context.Context, ecosystem, name string
 	}
 	token := ""
 	seen := map[string]bool{}
+	ids := map[string]bool{}
 	var spent int64
 	for {
 		if pages >= lim.MaxPages {
@@ -139,6 +140,15 @@ func (c *OSVClient) QueryPackageEach(ctx context.Context, ecosystem, name string
 		spent += n
 		if err != nil {
 			return pages, err
+		}
+		// An id appears once in a walk (OSV: the later-modified entry of an
+		// id is authoritative, so two of them mean the walk straddled an
+		// update). Codex M70 R21 High-2.
+		for _, r := range page.Vulns {
+			if ids[r.ID] {
+				return pages, fmt.Errorf("osv: package query returned record %q twice", r.ID)
+			}
+			ids[r.ID] = true
 		}
 		if err := onPage(page.Vulns); err != nil {
 			return pages, err
@@ -191,7 +201,7 @@ func validatePackageRecords(raw []byte, q OSVPackage) error {
 		if err := json.Unmarshal(rv, &r); err != nil {
 			return fmt.Errorf("osv: package query record %d: %w", i, err)
 		}
-		if !canonicalToken(r.ID) {
+		if !canonicalOSVID(r.ID) {
 			return fmt.Errorf("osv: package query record %d has no canonical id", i)
 		}
 		// Every identity the caller matches on is canonical: a CVE-like id,
@@ -201,7 +211,7 @@ func validatePackageRecords(raw []byte, q OSVPackage) error {
 			return fmt.Errorf("osv: package query record %q: %w", r.ID, err)
 		}
 		for _, a := range append(append([]string(nil), r.Aliases...), r.Upstream...) {
-			if !canonicalToken(a) {
+			if !canonicalOSVID(a) {
 				return fmt.Errorf("osv: package query record %q has a non-canonical alias %q", r.ID, a)
 			}
 			if err := checkCVELike(a); err != nil {
@@ -316,6 +326,22 @@ func canonicalCVE(s string) bool {
 	}
 	for _, c := range y + n {
 		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// canonicalOSVID: OSV's id character set, [A-Za-z0-9:_.-]+ (Codex M70 R21
+// High-3).
+func canonicalOSVID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ':' || c == '_' || c == '.' || c == '-'
+		if !ok {
 			return false
 		}
 	}

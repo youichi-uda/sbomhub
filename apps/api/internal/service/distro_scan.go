@@ -79,8 +79,9 @@ const (
 	// 4: record modified, R8; 5: records validated as since R11, R12;
 	// 6: no future timestamps, R14; 7: every affected element validated,
 	// R15; 8: empty continuation pages refused (R16) and canonical identity
-	// strings (R18); 9: canonical record identities, exact CVE matching (R19)).
-	distroCachePayloadVersion = 9
+	// strings (R18); 9: canonical record identities, exact CVE matching (R19);
+	// 10: unique record ids, OSV id character set (R21)).
+	distroCachePayloadVersion = 10
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -569,15 +570,35 @@ func (l distroLoad) data() distroData {
 // (and then cached). It never returns a partial answer. It holds no slot
 // itself; callers in a scan go through loadSlotted.
 func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(context.Context) error) (l distroLoad, hit bool, pages int, err error) {
-	if e, cerr := s.cache.Get(ctx, s.sourceID, k.ecosystem, k.pkg); cerr != nil {
-		slog.Debug("distro cache get error", "ecosystem", k.ecosystem, "package", k.pkg, "error", cerr)
-	} else if e != nil {
-		var p distroCachePayload
-		if json.Unmarshal(e.Payload, &p) == nil && p.Version == distroCachePayloadVersion && validDistroRecords(p.Records) &&
-			notFuture(e.DataModified) {
-			return distroLoad{recs: p.Records, fetchedAt: e.FetchedAt, revision: e.DataModified}, true, 0, nil
-		}
+	if c, ok := s.cachedLoad(ctx, k); ok {
+		return c, true, 0, nil
 	}
+	return s.loadFetch(ctx, k, pace)
+}
+
+// cachedLoad returns the cached data of k when there is a usable entry.
+func (s *DistroService) cachedLoad(ctx context.Context, k distroFetchKey) (distroLoad, bool) {
+	e, cerr := s.cache.Get(ctx, s.sourceID, k.ecosystem, k.pkg)
+	if cerr != nil {
+		slog.Debug("distro cache get error", "ecosystem", k.ecosystem, "package", k.pkg, "error", cerr)
+		return distroLoad{}, false
+	}
+	if e == nil {
+		return distroLoad{}, false
+	}
+	var p distroCachePayload
+	if json.Unmarshal(e.Payload, &p) != nil || p.Version != distroCachePayloadVersion || !validDistroRecords(p.Records) ||
+		!notFuture(e.DataModified) {
+		return distroLoad{}, false
+	}
+	return distroLoad{recs: p.Records, fetchedAt: e.FetchedAt, revision: e.DataModified}, true
+}
+
+// loadFetch fetches k from OSV and offers the answer to the cache. When the
+// cache keeps a NEWER answer (another scan stored it meanwhile), that answer
+// is used instead of this one; when it cannot then be read back, the package
+// fails rather than decide on data known to be older (Codex M70 R21 High-1).
+func (s *DistroService) loadFetch(ctx context.Context, k distroFetchKey, pace func(context.Context) error) (l distroLoad, hit bool, pages int, err error) {
 	// The generation is taken BEFORE the request: a fetch that started later
 	// saw the source at least as new, so it wins in the cache (Codex M70 R9
 	// High-2).
@@ -602,9 +623,17 @@ func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(co
 		// No generation (Redis unreachable when the fetch started): not
 		// cached, since its order against other writes is unknown (Codex
 		// M70 R13 Medium-6).
-		if serr := s.cache.Set(ctx, s.sourceID, k.ecosystem, k.pkg, cache.DistroCacheEntry{FetchedAt: l.fetchedAt, Payload: payload,
-			DataModified: l.revision, Generation: generation}); serr != nil {
+		won, serr := s.cache.Set(ctx, s.sourceID, k.ecosystem, k.pkg, cache.DistroCacheEntry{FetchedAt: l.fetchedAt, Payload: payload,
+			DataModified: l.revision, Generation: generation})
+		switch {
+		case serr != nil:
 			slog.Debug("distro cache set error", "ecosystem", k.ecosystem, "package", k.pkg, "error", serr)
+		case !won:
+			winner, ok := s.cachedLoad(ctx, k)
+			if !ok || winner.revision < l.revision {
+				return distroLoad{}, false, pages, fmt.Errorf("distro: a newer cached answer for %s %q exists but could not be read", k.ecosystem, k.pkg)
+			}
+			return winner, false, pages, nil
 		}
 	}
 	return l, false, pages, nil
@@ -633,7 +662,12 @@ func (s *DistroService) loadSlotted(ctx context.Context, k distroFetchKey, pace 
 // validDistroRecords rejects a cache entry that does not look like one this
 // build wrote (the cache is shared and outlives builds).
 func validDistroRecords(recs []distroRecord) bool {
+	seen := map[string]bool{}
 	for _, r := range recs {
+		if seen[r.ID] {
+			return false // ids are unique in an answer (Codex M70 R21 High-2)
+		}
+		seen[r.ID] = true
 		if strings.TrimSpace(r.ID) == "" || len(r.CVEs) == 0 || len(r.Entries) == 0 || r.Releases < 1 || r.Packages < 1 ||
 			r.Modified == "" || normaliseModified(r.Modified) != r.Modified || !notFuture(r.Modified) {
 			return false
