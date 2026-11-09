@@ -450,7 +450,7 @@ func TestSBOMHandler_GetVulnerabilities_DefaultLimit_F26(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "cve_id", "description", "severity", "cvss_score", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
-			"published_at", "updated_at", "match_method",
+			"published_at", "updated_at", "match_method", "match_evidence",
 		}))
 
 	sbomService := service.NewSbomService(
@@ -547,9 +547,9 @@ func TestSBOMHandler_GetVulnerabilities_OffsetPagination_F26(t *testing.T) {
 			"id", "cve_id", "description", "severity", "cvss_score",
 			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
-			"published_at", "updated_at", "match_method",
+			"published_at", "updated_at", "match_method", "match_evidence",
 		}).AddRow(uuid.New(), "CVE-2024-1", "desc", "HIGH", 7.5, 0.0, 0.0, "NVD",
-			false, nil, nil, nil, now, now, nil))
+			false, nil, nil, nil, now, now, nil, nil))
 
 	sbomService := service.NewSbomService(
 		repository.NewSbomRepository(db),
@@ -665,7 +665,7 @@ func driveSortHappyPath(t *testing.T, query, wantOrderBy string) {
 			"id", "cve_id", "description", "severity", "cvss_score",
 			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
-			"published_at", "updated_at", "match_method",
+			"published_at", "updated_at", "match_method", "match_evidence",
 		}))
 
 	sbomService := service.NewSbomService(
@@ -777,7 +777,7 @@ func TestSBOMHandler_GetVulnerabilities_OffsetAtCap_F27(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "cve_id", "description", "severity", "cvss_score", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
-			"published_at", "updated_at", "match_method",
+			"published_at", "updated_at", "match_method", "match_evidence",
 		}))
 
 	sbomService := service.NewSbomService(
@@ -842,7 +842,7 @@ func TestSBOMHandler_GetVulnerabilities_TotalCountHeader_F28(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "cve_id", "description", "severity", "cvss_score", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
-			"published_at", "updated_at", "match_method",
+			"published_at", "updated_at", "match_method", "match_evidence",
 		}))
 
 	sbomService := service.NewSbomService(
@@ -929,12 +929,12 @@ func TestSBOMHandler_GetVulnerabilities_DistinctRows_F29(t *testing.T) {
 			"id", "cve_id", "description", "severity", "cvss_score",
 			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
-			"published_at", "updated_at", "match_method",
+			"published_at", "updated_at", "match_method", "match_evidence",
 		}).
 			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, 0.0, 0.0, "NVD",
-				false, nil, nil, nil, now, now, nil).
+				false, nil, nil, nil, now, now, nil, nil).
 			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, 0.0, 0.0, "NVD",
-				false, nil, nil, nil, now, now, nil))
+				false, nil, nil, nil, now, now, nil, nil))
 
 	sbomService := service.NewSbomService(
 		repository.NewSbomRepository(db),

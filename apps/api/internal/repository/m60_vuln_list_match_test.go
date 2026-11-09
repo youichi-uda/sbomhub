@@ -21,13 +21,13 @@ func TestM60GetVulnerabilities_ProjectsMatchMethodAndConfidence(t *testing.T) {
 	repo := NewComponentRepository(db)
 	now := time.Now()
 	cols := []string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source",
-		"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method"}
+		"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method", "match_evidence"}
 	mock.ExpectQuery(`ORDER BY CASE bm.match_method`).
 		WillReturnRows(sqlmock.NewRows(cols).
-			AddRow(uuid.New(), "CVE-2021-44228", "d", "CRITICAL", 10.0, nil, nil, "NVD", true, now, now, false, now, now, "nvd_cpe").
-			AddRow(uuid.New(), "CVE-2021-0001", "d", "HIGH", 7.0, nil, nil, "JVN", false, nil, nil, nil, now, now, "jvn_keyword").
-			AddRow(uuid.New(), "CVE-2021-0002", "d", "LOW", 2.0, nil, nil, "NVD", false, nil, nil, nil, now, now, "nvd_cpe_distro").
-			AddRow(uuid.New(), "CVE-2020-0003", "d", "LOW", 2.0, nil, nil, "NVD", false, nil, nil, nil, now, now, nil))
+			AddRow(uuid.New(), "CVE-2021-44228", "d", "CRITICAL", 10.0, nil, nil, "NVD", true, now, now, false, now, now, "nvd_cpe", nil).
+			AddRow(uuid.New(), "CVE-2021-0001", "d", "HIGH", 7.0, nil, nil, "JVN", false, nil, nil, nil, now, now, "jvn_keyword", nil).
+			AddRow(uuid.New(), "CVE-2021-0002", "d", "LOW", 2.0, nil, nil, "NVD", false, nil, nil, nil, now, now, "nvd_cpe_distro", nil).
+			AddRow(uuid.New(), "CVE-2020-0003", "d", "LOW", 2.0, nil, nil, "NVD", false, nil, nil, nil, now, now, nil, nil))
 
 	got, err := repo.GetVulnerabilitiesPaginated(context.Background(), uuid.New(), 10, 0, "cvss")
 	if err != nil {

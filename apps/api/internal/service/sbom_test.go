@@ -663,9 +663,9 @@ func TestGetVulnerabilitiesBySbom_VerifiesProjectMembership(t *testing.T) {
 				"id", "cve_id", "description", "severity", "cvss_score",
 				"epss_score", "epss_percentile", "source",
 				"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
-				"published_at", "updated_at", "match_method",
+				"published_at", "updated_at", "match_method", "match_evidence",
 			}).AddRow(uuid.New(), "CVE-2024-1", "desc", "CRITICAL", 9.8, 0.0, 0.0, "NVD",
-				false, nil, nil, nil, now, now, nil))
+				false, nil, nil, nil, now, now, nil, nil))
 
 		vulns, err := svc.GetVulnerabilitiesBySbom(context.Background(), projectID, sbomID)
 		if err != nil {

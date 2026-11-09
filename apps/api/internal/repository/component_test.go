@@ -338,9 +338,9 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 			name:   "successful get vulnerabilities",
 			sbomID: sbomID,
 			setupMock: func() {
-				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method"}).
-					AddRow(vulnID1, "CVE-2023-1234", "Critical vulnerability in lodash", "CRITICAL", 9.8, 0.42, 0.88, "NVD", true, now, now, false, now, now, nil).
-					AddRow(vulnID2, "CVE-2023-5678", "High severity XSS vulnerability", "HIGH", 7.5, nil, nil, "NVD", false, nil, nil, nil, now, now, nil)
+				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method", "match_evidence"}).
+					AddRow(vulnID1, "CVE-2023-1234", "Critical vulnerability in lodash", "CRITICAL", 9.8, 0.42, 0.88, "NVD", true, now, now, false, now, now, nil, nil).
+					AddRow(vulnID2, "CVE-2023-5678", "High severity XSS vulnerability", "HIGH", 7.5, nil, nil, "NVD", false, nil, nil, nil, now, now, nil, nil)
 				mock.ExpectQuery(`SELECT v.id, v.cve_id, COALESCE\(v.description, ''\), COALESCE\(v.severity, ''\), v.cvss_score`).
 					WithArgs(sbomID).
 					WillReturnRows(rows)
@@ -382,7 +382,7 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 			name:   "no vulnerabilities found",
 			sbomID: uuid.New(),
 			setupMock: func() {
-				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method"})
+				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method", "match_evidence"})
 				mock.ExpectQuery(`SELECT v.id, v.cve_id, COALESCE\(v.description, ''\), COALESCE\(v.severity, ''\), v.cvss_score`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnRows(rows)
@@ -681,12 +681,12 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_DistinctByVulnID_F29(t 
 			"id", "cve_id", "description", "severity", "cvss_score",
 			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
-			"published_at", "updated_at", "match_method",
+			"published_at", "updated_at", "match_method", "match_evidence",
 		}).
 			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, 0.0, 0.0, "NVD",
-				false, nil, nil, nil, now, now, nil).
+				false, nil, nil, nil, now, now, nil, nil).
 			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, 0.0, 0.0, "NVD",
-				false, nil, nil, nil, now, now, nil))
+				false, nil, nil, nil, now, now, nil, nil))
 
 	got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0, "cvss")
 	if err != nil {
@@ -760,9 +760,9 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_SortOrderBy_F446(t *tes
 					"id", "cve_id", "description", "severity", "cvss_score",
 					"epss_score", "epss_percentile", "source",
 					"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
-					"published_at", "updated_at", "match_method",
+					"published_at", "updated_at", "match_method", "match_evidence",
 				}).AddRow(vulnID, "CVE-2024-EPSS", "epss-sorted vuln", "CRITICAL", 9.1,
-					0.55, 0.97, "NVD", false, nil, nil, nil, now, now, nil))
+					0.55, 0.97, "NVD", false, nil, nil, nil, now, now, nil, nil))
 
 			got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0, tt.sortBy)
 			if err != nil {
@@ -808,11 +808,11 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_UnscoredEPSSNil(t *test
 			"id", "cve_id", "description", "severity", "cvss_score",
 			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
-			"published_at", "updated_at", "match_method",
+			"published_at", "updated_at", "match_method", "match_evidence",
 		}).AddRow(uuid.New(), "CVE-2024-NULL", "un-scored vuln", "LOW", 3.1,
-			nil, nil, "NVD", false, nil, nil, nil, now, now, nil).
+			nil, nil, "NVD", false, nil, nil, nil, now, now, nil, nil).
 			AddRow(uuid.New(), "CVE-2024-ZERO", "really ~0% vuln", "LOW", 3.1,
-				0.0, 0.0, "NVD", false, nil, nil, nil, now, now, nil))
+				0.0, 0.0, "NVD", false, nil, nil, nil, now, now, nil, nil))
 
 	got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0, "epss")
 	if err != nil {

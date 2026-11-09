@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -131,10 +132,15 @@ func vulnListOrderBy(sortBy string) string {
 }
 
 // bestMatchMethodJoin joins, for every vulnerability linked from SBOM $1, the
-// strongest match_method among that SBOM's links to it (M60). The CASE
-// mirrors model.MatchMethod.Rank; NULL (a pre-M60 link) ranks lowest and is
-// the result only when every link is NULL. Equal ranks are broken by the
-// method name so the label does not depend on row order (Codex M60 R8 Low).
+// strongest match_method among that SBOM's links to it (M60), and the
+// match_evidence stored with that same link (M70). The CASE mirrors
+// model.MatchMethod.FindingRank; NULL (a pre-M60 link) ranks 0 and is the
+// result only when every link is NULL or distro_fixed, and distro_fixed (M70)
+// ranks below it: a CVE one component's distro has fixed but another
+// component still matches must show the other component's label. Equal ranks
+// are broken by the method name so the label does not depend on row order
+// (Codex M60 R8 Low), then by the component id so that the method and the
+// evidence of the two aggregates come from the SAME link.
 //
 // It is an aggregate computed ONCE per query and LEFT JOINed, not a
 // correlated subquery (Codex M60 R3 Medium). Measured 2026-11-08 on
@@ -155,26 +161,38 @@ func vulnListOrderBy(sortBy string) string {
 const bestMatchMethodJoin = `
 		LEFT JOIN (
 			SELECT bm.vulnerability_id,
-			       (array_agg(bm.match_method ORDER BY CASE bm.match_method
-			            WHEN 'nvd_cpe' THEN 3
-			            WHEN 'nvd_cpe_distro' THEN 2
-			            WHEN 'nvd_cpe_unverified' THEN 1
-			            WHEN 'nvd_keyword' THEN 1
-			            WHEN 'jvn_keyword' THEN 1
-			            WHEN 'cve_sync_keyword' THEN 1
-			            ELSE 0 END DESC, bm.match_method))[1] AS match_method
+			       (array_agg(bm.match_method ORDER BY ` + bestMatchOrder + `))[1] AS match_method,
+			       (array_agg(bm.match_evidence ORDER BY ` + bestMatchOrder + `))[1] AS match_evidence
 			FROM component_vulnerabilities bm
 			JOIN components bc ON bc.id = bm.component_id
 			WHERE bc.sbom_id = $1
 			GROUP BY bm.vulnerability_id
 		) best ON best.vulnerability_id = v.id`
 
-// setMatch fills the M60 projection fields from the scanned best method.
-func setMatch(v *model.Vulnerability, best sql.NullString) {
+// bestMatchOrder is the ORDER BY of both aggregates in bestMatchMethodJoin.
+const bestMatchOrder = `CASE bm.match_method
+			            WHEN 'distro_affected' THEN 6
+			            WHEN 'distro_unfixed' THEN 5
+			            WHEN 'nvd_cpe' THEN 3
+			            WHEN 'nvd_cpe_distro' THEN 2
+			            WHEN 'nvd_cpe_unverified' THEN 1
+			            WHEN 'nvd_keyword' THEN 1
+			            WHEN 'jvn_keyword' THEN 1
+			            WHEN 'cve_sync_keyword' THEN 1
+			            WHEN 'distro_fixed' THEN -1
+			            ELSE 0 END DESC, bm.match_method, bm.component_id`
+
+// setMatch fills the M60 / M70 projection fields from the scanned best link.
+// Evidence is projected only for a distro label: it is written only with one,
+// and a stray value under any other method is not shown as if it backed it.
+func setMatch(v *model.Vulnerability, best sql.NullString, evidence []byte) {
 	if best.Valid {
 		v.MatchMethod = best.String
 	}
 	v.MatchConfidence = model.MatchMethod(v.MatchMethod).Confidence()
+	if model.MatchMethod(v.MatchMethod).IsDistro() && len(evidence) > 0 {
+		v.MatchEvidence = append(json.RawMessage(nil), evidence...)
+	}
 }
 
 func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uuid.UUID, sortBy string) ([]model.Vulnerability, error) {
@@ -193,7 +211,7 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
 		       v.published_at, v.updated_at,
-		       best.match_method
+		       best.match_method, best.match_evidence
 		FROM vulnerabilities v
 		JOIN component_vulnerabilities cv ON cv.vulnerability_id = v.id
 		JOIN components c ON c.id = cv.component_id
@@ -212,14 +230,15 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 		var v model.Vulnerability
 		var epssScore, epssPercentile sql.NullFloat64
 		var best sql.NullString
+		var evidence []byte
 		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
 			&epssScore, &epssPercentile,
 			&v.Source,
 			&v.InKEV, &v.KEVDateAdded, &v.KEVDueDate, &v.KEVRansomwareUse,
-			&v.PublishedAt, &v.UpdatedAt, &best); err != nil {
+			&v.PublishedAt, &v.UpdatedAt, &best, &evidence); err != nil {
 			return nil, err
 		}
-		setMatch(&v, best)
+		setMatch(&v, best, evidence)
 		if epssScore.Valid {
 			v.EPSSScore = &epssScore.Float64
 		}
@@ -334,7 +353,7 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
 		       v.published_at, v.updated_at,
-		       best.match_method
+		       best.match_method, best.match_evidence
 		FROM vulnerabilities v
 		` + bestMatchMethodJoin + `
 		WHERE EXISTS (
@@ -357,14 +376,15 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 		var v model.Vulnerability
 		var epssScore, epssPercentile sql.NullFloat64
 		var best sql.NullString
+		var evidence []byte
 		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
 			&epssScore, &epssPercentile,
 			&v.Source,
 			&v.InKEV, &v.KEVDateAdded, &v.KEVDueDate, &v.KEVRansomwareUse,
-			&v.PublishedAt, &v.UpdatedAt, &best); err != nil {
+			&v.PublishedAt, &v.UpdatedAt, &best, &evidence); err != nil {
 			return nil, err
 		}
-		setMatch(&v, best)
+		setMatch(&v, best, evidence)
 		if epssScore.Valid {
 			v.EPSSScore = &epssScore.Float64
 		}
