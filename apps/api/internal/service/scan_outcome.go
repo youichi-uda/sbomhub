@@ -28,6 +28,13 @@ var (
 	ErrScanTruncated = errors.New("match set truncated")
 	// ErrScanWriteRefused: the database refused at least one write.
 	ErrScanWriteRefused = errors.New("database refused writes")
+	// ErrScanDistroDataFailed (M70): the distro step could not read the
+	// distro's fixed-version data for at least one package (fetch error,
+	// undecodable answer, page budget). No finding is missing — the links of
+	// those packages keep their NVD / JVN labels — but their labels are not
+	// the distro-aware ones the scan promises, and a failure must not read as
+	// "the distro has no fix".
+	ErrScanDistroDataFailed = errors.New("distro data unavailable")
 )
 
 // Reason codes as reported in scan status (GET .../scan-status `reasons`,
@@ -38,6 +45,7 @@ const (
 	ScanReasonFetchFailed      = "fetch_failed"
 	ScanReasonTruncated        = "truncated"
 	ScanReasonWriteRefused     = "write_refused"
+	ScanReasonDistroDataFailed = "distro_data_failed"
 	ScanReasonError            = "scan_error"
 )
 
@@ -58,6 +66,7 @@ func ScanReasons(err error) []string {
 		{ErrScanFetchFailed, ScanReasonFetchFailed},
 		{ErrScanTruncated, ScanReasonTruncated},
 		{ErrScanWriteRefused, ScanReasonWriteRefused},
+		{ErrScanDistroDataFailed, ScanReasonDistroDataFailed},
 	} {
 		if errors.Is(err, p.sentinel) {
 			out = append(out, p.code)

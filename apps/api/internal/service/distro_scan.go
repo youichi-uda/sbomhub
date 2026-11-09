@@ -1,0 +1,457 @@
+package service
+
+// The distro step of a scan (M70).
+//
+// # What it does
+//
+// After the NVD and JVN sweeps have linked an SBOM's components, this step
+// reads, for every DISTRO package that has links, the distro's own
+// fixed-version data (OSV's distro ecosystems) and relabels each link with
+// what that data says about the installed version, compared with the distro's
+// own ordering (internal/pkgversion):
+//
+//	distro_affected  fix released in the installed release, installed below it
+//	distro_unfixed   installed release affected, no fix released
+//	distro_fixed     installed version at or above the fix (kept, for review)
+//
+// It never adds or removes a link, and only ever relabels upward
+// (model.MatchMethod.Rank). See distro_match.go for the rules and why a gap
+// costs a label, never a finding.
+//
+// # Shape (M62)
+//
+// The three phases of every scanner: one short tenant READ transaction (the
+// SBOM's components and links), fetching with NO transaction open (one OSV
+// package query per distinct (ecosystem, package), cached in Redis, paced,
+// bounded by the scan deadline), and one short locked WRITE transaction with
+// a SAVEPOINT per component (ScanScope.writeLinks).
+//
+// # Failure reporting
+//
+//   - A package whose data could not be read: its links keep their labels,
+//     and the scan reports distro_data_failed (ErrScanDistroDataFailed).
+//   - The scan deadline / a cancellation before every package was read:
+//     deadline_exceeded / cancelled, with what was decided committed.
+//   - A refused write: write_refused.
+//   - Offline mode (SBOMHUB_OFFLINE): no request at all, no relabel, no
+//     failure — the links keep the M60 labels, exactly as before M70.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/cache"
+	"github.com/sbomhub/sbomhub/internal/client"
+	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/repository"
+)
+
+const (
+	// distroMaxPages bounds one package query. The largest measured answer
+	// (Debian "linux") is 3,000 records per page and several pages; 20 pages
+	// is ~60,000 records. A query that needs more is a distro_data_failed
+	// for that package, never a short answer.
+	distroMaxPages = 20
+	// distroRequestGap is the minimum gap between two OSV requests of one
+	// scan. OSV publishes no rate limit; this keeps one scan's burst polite
+	// (the fixture SBOM needs one request).
+	distroRequestGap = 250 * time.Millisecond
+	// distroWorkers is how many package queries run at once (sharing the
+	// pacer, so the request RATE stays one per distroRequestGap).
+	distroWorkers = 4
+	// distroCachePayloadVersion is bumped with the distroRecord format.
+	distroCachePayloadVersion = 1
+)
+
+// distroLinkStore is the repository surface the step uses.
+type distroLinkStore interface {
+	ListScanTargetsBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error)
+	ListSbomLinks(ctx context.Context, sbomID uuid.UUID) ([]repository.SbomLink, error)
+	RelabelDistro(ctx context.Context, componentID, vulnID uuid.UUID, method model.MatchMethod, evidence []byte) (bool, error)
+}
+
+// distroFetcher is the OSV surface the step uses.
+type distroFetcher interface {
+	QueryPackage(ctx context.Context, ecosystem, name string, maxPages int, before func(context.Context) error) (client.OSVPackageQueryResult, error)
+}
+
+// DistroService is the distro step. It satisfies the handlers'
+// componentScanner (ScanComponents).
+type DistroService struct {
+	store   distroLinkStore
+	osv     distroFetcher
+	cache   *cache.DistroCache
+	offline bool
+	gap     time.Duration
+	now     func() time.Time
+}
+
+// NewDistroService builds the step. osvBaseURL "" is OSV's public API;
+// offline (SBOMHUB_OFFLINE) disables every request.
+func NewDistroService(cr *repository.ComponentRepository, osvBaseURL string, distroCache *cache.DistroCache, offline bool) *DistroService {
+	return &DistroService{
+		store:   cr,
+		osv:     client.NewOSVClient().WithBaseURL(osvBaseURL).WithOffline(offline),
+		cache:   distroCache,
+		offline: offline,
+		gap:     distroRequestGap,
+		now:     time.Now,
+	}
+}
+
+// DistroScanReport is the accounting of one distro step.
+type DistroScanReport struct {
+	// LinkedComponents: components with at least one link.
+	LinkedComponents int
+	// Targeted: linked distro components whose release and package were
+	// identified; Untargeted counts the others by reason (not_distro is
+	// not counted).
+	Targeted   int
+	Untargeted map[string]int
+	// Packages: distinct (ecosystem, package) queries needed.
+	Packages  int
+	CacheHits int
+	// Requests: OSV HTTP requests made (pages, failed ones included).
+	Requests int
+	// FetchFailures: packages whose data could not be read.
+	FetchFailures int
+	// Unfetched: packages never read because the scan's context ended.
+	Unfetched int
+	// Verdicts by label, and links with no verdict (by reason).
+	Affected, Unfixed, Fixed int
+	NoVerdict                map[string]int
+	// LinksKeptForFailure: links of a package whose data failed.
+	LinksKeptForFailure int
+	// Relabelled: relabel statements that changed a row (a group later
+	// rolled back to its savepoint is not subtracted; 0 when the write
+	// transaction failed). RefusedWrites as in NVDScanReport.
+	Relabelled    int
+	RefusedWrites int
+
+	DeadlineExceeded bool
+	Cancelled        bool
+}
+
+// ScanComponents runs the step for one SBOM (componentScanner).
+func (s *DistroService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error {
+	_, err := s.ScanComponentsWithReport(ctx, sbomID)
+	return err
+}
+
+// ScanComponentsWithReport is ScanComponents with the accounting.
+func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.UUID) (DistroScanReport, error) {
+	rep := DistroScanReport{Untargeted: map[string]int{}, NoVerdict: map[string]int{}}
+	scope, err := scanScopeFrom(ctx)
+	if err != nil {
+		return rep, err
+	}
+	if s.offline {
+		slog.Info("scan skipped: offline mode", "source", "distro")
+		return rep, nil
+	}
+
+	// Phase 1 — read.
+	var comps []model.Component
+	var links []repository.SbomLink
+	if err := scope.readTx(ctx, func(txCtx context.Context) error {
+		var lerr error
+		if comps, lerr = s.store.ListScanTargetsBySbom(txCtx, sbomID); lerr != nil {
+			return lerr
+		}
+		links, lerr = s.store.ListSbomLinks(txCtx, sbomID)
+		return lerr
+	}); err != nil {
+		return rep, fmt.Errorf("distro: read components and links: %w", err)
+	}
+	byComp := map[uuid.UUID][]repository.SbomLink{}
+	for _, l := range links {
+		byComp[l.ComponentID] = append(byComp[l.ComponentID], l)
+	}
+	os := sbomOperatingSystem(comps)
+
+	type targeted struct {
+		comp   model.Component
+		target distroTarget
+	}
+	var work []targeted
+	keys := map[distroFetchKey]bool{}
+	for _, c := range comps {
+		if len(byComp[c.ID]) == 0 {
+			continue
+		}
+		rep.LinkedComponents++
+		t, reason := distroTargetFor(c.Purl, c.Version, os)
+		if reason != "" {
+			if reason != "not_distro" && reason != "no_purl" {
+				rep.Untargeted[reason]++
+			}
+			continue
+		}
+		rep.Targeted++
+		work = append(work, targeted{comp: c, target: t})
+		keys[t.fetchKey()] = true
+	}
+	rep.Packages = len(keys)
+	if len(work) == 0 {
+		s.logSummary(sbomID, rep)
+		return rep, nil
+	}
+
+	// Phase 2 — fetch, no transaction.
+	ordered := make([]distroFetchKey, 0, len(keys))
+	for k := range keys {
+		ordered = append(ordered, k)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].ecosystem != ordered[j].ecosystem {
+			return ordered[i].ecosystem < ordered[j].ecosystem
+		}
+		return ordered[i].pkg < ordered[j].pkg
+	})
+	type fetched struct {
+		data      distroData
+		fetchedAt time.Time
+	}
+	data := map[distroFetchKey]fetched{}
+	failed := map[distroFetchKey]bool{}
+	pace := s.pacer()
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	keyCh := make(chan distroFetchKey)
+	for i := 0; i < distroWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for k := range keyCh {
+				if ctx.Err() != nil {
+					mu.Lock()
+					rep.Unfetched++
+					mu.Unlock()
+					continue
+				}
+				recs, at, hit, pages, ferr := s.load(ctx, k, pace)
+				mu.Lock()
+				rep.Requests += pages
+				if hit {
+					rep.CacheHits++
+				}
+				switch {
+				case ferr != nil && scanInterruption(ctx) != nil:
+					rep.Unfetched++
+				case ferr != nil:
+					slog.Warn("distro: could not read the distro's fixed-version data; its links keep their labels",
+						"ecosystem", k.ecosystem, "package", k.pkg, "error", ferr)
+					rep.FetchFailures++
+					failed[k] = true
+				default:
+					data[k] = fetched{data: indexDistroRecords(recs), fetchedAt: at}
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, k := range ordered {
+		keyCh <- k
+	}
+	close(keyCh)
+	wg.Wait()
+	if rep.Unfetched > 0 {
+		if scanDeadlineFired(ctx) {
+			rep.DeadlineExceeded = true
+		} else {
+			rep.Cancelled = true
+		}
+	}
+
+	// Decide, per component, per link.
+	var groups [][]pendingLink
+	for _, w := range work {
+		k := w.target.fetchKey()
+		d, ok := data[k]
+		if !ok {
+			if failed[k] {
+				rep.LinksKeptForFailure += len(byComp[w.comp.ID])
+			}
+			continue
+		}
+		var g []pendingLink
+		for _, l := range byComp[w.comp.ID] {
+			dec := d.data.decide(w.target, l.CVEID)
+			if dec.verdict == verdictNone {
+				rep.NoVerdict[dec.reason]++
+				continue
+			}
+			dec.evidence.FetchedAt = d.fetchedAt.UTC()
+			raw, err := json.Marshal(dec.evidence)
+			if err != nil {
+				return rep, fmt.Errorf("distro: encode evidence: %w", err)
+			}
+			switch dec.verdict {
+			case verdictAffected:
+				rep.Affected++
+			case verdictUnfixed:
+				rep.Unfixed++
+			case verdictFixed:
+				rep.Fixed++
+			}
+			g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, method: dec.verdict.method(), evidence: raw})
+		}
+		if len(g) > 0 {
+			groups = append(groups, g)
+		}
+	}
+
+	// Phase 3 — write.
+	relabelled := 0
+	refused, _, werr := scope.writeLinks(ctx, sbomID, groups, func(txCtx context.Context, l pendingLink) error {
+		changed, err := s.store.RelabelDistro(txCtx, l.componentID, l.vulnID, l.method, l.evidence)
+		if changed {
+			relabelled++
+		}
+		return err
+	})
+	if werr != nil {
+		slog.Warn("distro: write phase failed; no relabel of this step was committed", "sbom_id", sbomID, "error", werr)
+		relabelled = 0
+	}
+	rep.RefusedWrites = refused
+	rep.Relabelled = relabelled
+	s.logSummary(sbomID, rep)
+	return rep, rep.incompleteErr()
+}
+
+// incompleteErr names every reason the step is incomplete.
+func (r DistroScanReport) incompleteErr() error {
+	var errs []error
+	if r.RefusedWrites > 0 {
+		errs = append(errs, fmt.Errorf("distro: database refused %d relabel(s): %w", r.RefusedWrites, ErrScanWriteRefused))
+	}
+	if r.DeadlineExceeded {
+		errs = append(errs, fmt.Errorf("distro: the scan deadline fired with %d of %d package(s) unread: %w",
+			r.Unfetched, r.Packages, ErrScanDeadlineExceeded))
+	}
+	if r.Cancelled {
+		errs = append(errs, fmt.Errorf("distro: the scan was cancelled with %d of %d package(s) unread: %w",
+			r.Unfetched, r.Packages, ErrScanCancelled))
+	}
+	if r.FetchFailures > 0 {
+		errs = append(errs, fmt.Errorf("distro: the fixed-version data of %d of %d package(s) could not be read; "+
+			"their %d link(s) keep their previous labels: %w", r.FetchFailures, r.Packages, r.LinksKeptForFailure,
+			ErrScanDistroDataFailed))
+	}
+	return errors.Join(errs...)
+}
+
+func (s *DistroService) logSummary(sbomID uuid.UUID, r DistroScanReport) {
+	args := []any{
+		"sbom_id", sbomID, "linked_components", r.LinkedComponents, "targeted", r.Targeted,
+		"untargeted", r.Untargeted, "packages", r.Packages, "cache_hits", r.CacheHits, "requests", r.Requests,
+		"fetch_failures", r.FetchFailures, "unfetched", r.Unfetched,
+		"affected", r.Affected, "unfixed", r.Unfixed, "fixed", r.Fixed, "no_verdict", r.NoVerdict,
+		"relabelled", r.Relabelled, "refused_writes", r.RefusedWrites,
+		"deadline_exceeded", r.DeadlineExceeded, "cancelled", r.Cancelled,
+	}
+	if r.FetchFailures > 0 || r.Unfetched > 0 || r.RefusedWrites > 0 {
+		slog.Warn("distro: step completed with incomplete coverage", args...)
+		return
+	}
+	slog.Info("distro: step completed", args...)
+}
+
+// pacer spaces the step's OSV requests by s.gap.
+func (s *DistroService) pacer() func(context.Context) error {
+	var mu sync.Mutex
+	var last time.Time
+	return func(ctx context.Context) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if wait := s.gap - time.Since(last); !last.IsZero() && wait > 0 {
+			t := time.NewTimer(wait)
+			defer t.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-t.C:
+			}
+		}
+		last = time.Now()
+		return ctx.Err()
+	}
+}
+
+// distroCachePayload is what the cache entry holds for one package.
+type distroCachePayload struct {
+	Version int            `json:"v"`
+	Records []distroRecord `json:"records"`
+}
+
+// load returns one package's reduced records: from the cache, or from OSV
+// (and then cached). It never returns a partial answer.
+func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(context.Context) error) (recs []distroRecord, fetchedAt time.Time, hit bool, pages int, err error) {
+	if e, cerr := s.cache.Get(ctx, k.ecosystem, k.pkg); cerr != nil {
+		slog.Debug("distro cache get error", "ecosystem", k.ecosystem, "package", k.pkg, "error", cerr)
+	} else if e != nil {
+		var p distroCachePayload
+		if json.Unmarshal(e.Payload, &p) == nil && p.Version == distroCachePayloadVersion && validDistroRecords(p.Records) {
+			return p.Records, e.FetchedAt, true, 0, nil
+		}
+	}
+	res, err := s.osv.QueryPackage(ctx, k.ecosystem, k.pkg, distroMaxPages, pace)
+	if err != nil {
+		return nil, time.Time{}, false, res.Pages, err
+	}
+	recs = reduceOSVRecords(res.Records, k.pkg)
+	at := s.now().UTC()
+	payload, merr := json.Marshal(distroCachePayload{Version: distroCachePayloadVersion, Records: recs})
+	if merr == nil {
+		if serr := s.cache.Set(ctx, k.ecosystem, k.pkg, cache.DistroCacheEntry{FetchedAt: at, Payload: payload}); serr != nil {
+			slog.Debug("distro cache set error", "ecosystem", k.ecosystem, "package", k.pkg, "error", serr)
+		}
+	}
+	return recs, at, false, res.Pages, nil
+}
+
+// validDistroRecords rejects a cache entry that does not look like one this
+// build wrote (the cache is shared and outlives builds).
+func validDistroRecords(recs []distroRecord) bool {
+	for _, r := range recs {
+		if strings.TrimSpace(r.ID) == "" || len(r.CVEs) == 0 || len(r.Entries) == 0 {
+			return false
+		}
+		for _, c := range r.CVEs {
+			if !isCVEID(c) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// sbomOperatingSystem returns the SBOM's own operating system when it declares
+// exactly one (Syft: type "operating-system", name "debian", version "11").
+// Several, or none: nil — a package without a distro qualifier then has no
+// release, rather than a guessed one.
+func sbomOperatingSystem(comps []model.Component) *distroOS {
+	var found *distroOS
+	for _, c := range comps {
+		if !strings.EqualFold(strings.TrimSpace(c.Type), "operating-system") {
+			continue
+		}
+		if found != nil {
+			return nil
+		}
+		found = &distroOS{id: strings.ToLower(strings.TrimSpace(c.Name)), version: strings.TrimSpace(c.Version)}
+	}
+	if found == nil || found.id == "" || found.version == "" {
+		return nil
+	}
+	return found
+}

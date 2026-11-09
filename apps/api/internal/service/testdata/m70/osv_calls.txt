@@ -1,0 +1,16 @@
+# Live OSV / Debian tracker calls recorded for M70 (2026-11-09 JST, no key,
+# from the dev host, curl 8.x, paced >= 1 s apart). Bodies are stored gzipped
+# under osv/ exactly as received (debian_tracker_openssl.json.gz is the
+# openssl subset of the tracker JSON with descriptions and per-suite
+# repository versions removed).
+# status  time     bytes     query
+200       0.58s    10958B    POST https://api.osv.dev/v1/query {"package":{"name":"openssl","ecosystem":"Debian:11"}}  (11 records: 6 DSA, 5 DLA; not stored, a subset of debian_openssl)
+200       0.29s    -         GET  https://api.osv.dev/v1/vulns/DEBIAN-CVE-2021-3449  (affected: Debian:12/13/14 only)
+200       1.89s    798964B   POST https://api.osv.dev/v1/query {"package":{"name":"openssl","ecosystem":"Debian"}}  -> osv/debian_openssl.json.gz (390 records, no next_page_token)
+200       0.47s    60171B    POST https://api.osv.dev/v1/query {"package":{"name":"openssl","ecosystem":"AlmaLinux:9"}}  -> osv/almalinux9_openssl.json.gz (17 records)
+200       1.77s    1763678B  POST https://api.osv.dev/v1/query {"package":{"name":"openssl","ecosystem":"Ubuntu:22.04:LTS"}}  -> osv/ubuntu2204_openssl.json.gz (100 records)
+200       1.25s    390069B   POST https://api.osv.dev/v1/query {"package":{"name":"glibc","ecosystem":"Debian"}}  -> osv/debian_glibc.json.gz (189 records)
+200       0.35s    2B        POST https://api.osv.dev/v1/query {"package":{"name":"linux-signed-amd64","ecosystem":"Debian"}}  -> osv/debian_linux-signed-amd64.json.gz (`{}`)
+200       6.95s    7145502B  POST https://api.osv.dev/v1/query {"package":{"name":"linux","ecosystem":"Debian"}}  (3,000 records + next_page_token; not stored)
+200       0.78s    14534338B GET  https://security-tracker.debian.org/tracker/data/json (gzip on the wire; 88 MB decoded; releases listed for openssl: bookworm, forky, sid, trixie) -> debian_tracker_openssl.json.gz (subset)
+200       -        -         GET  https://storage.googleapis.com/osv-vulnerabilities/ecosystems.txt

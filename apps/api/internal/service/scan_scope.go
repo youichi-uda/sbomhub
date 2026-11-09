@@ -197,6 +197,9 @@ type pendingLink struct {
 	componentID uuid.UUID
 	vulnID      uuid.UUID
 	method      model.MatchMethod
+	// evidence is the match_evidence JSON written with a distro label (M70,
+	// the distro step); nil for every other writer.
+	evidence []byte
 }
 
 // linkWriter is the one repository call the write phase makes per link.

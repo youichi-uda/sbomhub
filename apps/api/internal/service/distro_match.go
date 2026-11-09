@@ -1,0 +1,896 @@
+package service
+
+// Distro-aware matching (M70): which distro release a component belongs to,
+// and what the distro's own fixed-version data says about one of its CVEs.
+//
+// # The invariant (M60's, kept)
+//
+// A gap in comparison or in data costs a LABEL, never a finding. Concretely:
+//
+//   - The distro step only RELABELS links the NVD / JVN sweeps already made;
+//     it never deletes one and never adds one.
+//   - A component whose distro or release cannot be identified exactly
+//     (distroTargetFor), a version either side cannot parse, an epoch only
+//     one side states, a range shape this code does not evaluate, or no
+//     record for the CVE: no verdict, the M60 label stays.
+//   - A distro-data FETCH failure is reported (scan reason
+//     distro_data_failed), and the links of that package keep their labels;
+//     it is never read as "no fix".
+//
+// # What the data is (measured 2026-11-09, live api.osv.dev)
+//
+// OSV's distro ecosystems normalise each distro's own data into one schema:
+// Debian (DSA/DLA advisories plus DEBIAN-CVE records generated from the
+// Debian security tracker), Ubuntu (UBUNTU-CVE / USN), AlmaLinux (ALSA),
+// Rocky Linux (RLSA). A record lists, per release ecosystem ("Debian:11") and
+// package, ECOSYSTEM ranges of introduced / fixed events in the distro's own
+// version syntax.
+//
+// Two measured gaps shape the rules below:
+//
+//   - Debian 11 (bullseye) reached the end of LTS in 2026-08: the DEBIAN-CVE
+//     records and the Debian tracker's own JSON no longer list it (openssl:
+//     291 DEBIAN-CVE records, entries only for Debian:12/13/14; the tracker
+//     lists bookworm / trixie / forky / sid). Only the 11 DSA/DLA advisories
+//     issued while it was supported still name Debian:11. See
+//     laterReleaseVerdict for what can still be said soundly.
+//   - OSV omits a Debian release the tracker marks not-affected (tracker
+//     fixed_version "0"): 29 of openssl's 320 tracker CVEs have no OSV record
+//     at all. No record is no verdict, never "not affected".
+
+import (
+	"fmt"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/sbomhub/sbomhub/internal/client"
+	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/pkgversion"
+)
+
+// distroScheme is a distro's version ordering.
+type distroScheme int
+
+const (
+	schemeDpkg distroScheme = iota + 1
+	schemeRPM
+)
+
+// distroTarget is everything the distro step needs to ask about one
+// component: which data to read and which version to compare.
+type distroTarget struct {
+	// family is the distro ("debian", "ubuntu", "almalinux", "rocky").
+	family string
+	// query is the OSV ecosystem queried: "Debian" (every Debian release, so
+	// that later releases can be read for an end-of-life one), or the
+	// release itself for the other distros.
+	query string
+	// release is the OSV ecosystem of the installed release.
+	release string
+	// releaseMajor is the Debian major release number (laterReleaseVerdict).
+	releaseMajor int
+	// pkg is the OSV package name: the SOURCE package for Debian/Ubuntu,
+	// the binary package for the rpm distros.
+	pkg string
+	// version is the installed version, in the distro's syntax.
+	version string
+	scheme  distroScheme
+}
+
+// fetchKey identifies the OSV query (and its cache entry) a target needs.
+func (t distroTarget) fetchKey() distroFetchKey {
+	return distroFetchKey{ecosystem: t.query, pkg: t.pkg}
+}
+
+type distroFetchKey struct{ ecosystem, pkg string }
+
+// distroOS is the operating system the SBOM itself declares (Syft's
+// operating-system component, e.g. name "debian", version "11"). It is used
+// only when a package's purl carries no distro qualifier.
+type distroOS struct {
+	id, version string
+}
+
+// parsedPurl is the part of a package URL the distro step reads.
+type parsedPurl struct {
+	typ, namespace, name, version string
+	qualifiers                    url.Values
+}
+
+// parsePurl parses "pkg:type/namespace/name@version?qualifiers#subpath"
+// (package-url spec): type and namespace are lower-cased for deb/rpm/apk,
+// every component is percent-decoded. ok is false for anything that does not
+// have that shape.
+func parsePurl(s string) (parsedPurl, bool) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(s), "pkg:")
+	if !ok {
+		return parsedPurl{}, false
+	}
+	if i := strings.IndexByte(rest, '#'); i >= 0 {
+		rest = rest[:i]
+	}
+	var p parsedPurl
+	if i := strings.IndexByte(rest, '?'); i >= 0 {
+		q, err := url.ParseQuery(rest[i+1:])
+		if err != nil {
+			return parsedPurl{}, false
+		}
+		p.qualifiers = q
+		rest = rest[:i]
+	}
+	rest = strings.Trim(rest, "/")
+	slash := strings.LastIndexByte(rest, '/')
+	if at := strings.LastIndexByte(rest, '@'); at > slash {
+		v, err := url.PathUnescape(rest[at+1:])
+		if err != nil {
+			return parsedPurl{}, false
+		}
+		p.version = v
+		rest = rest[:at]
+	}
+	segs := strings.Split(rest, "/")
+	if len(segs) < 2 {
+		return parsedPurl{}, false
+	}
+	p.typ = strings.ToLower(segs[0])
+	for i := range segs[1:] {
+		u, err := url.PathUnescape(segs[1+i])
+		if err != nil || u == "" {
+			return parsedPurl{}, false
+		}
+		segs[1+i] = u
+	}
+	p.name = segs[len(segs)-1]
+	p.namespace = strings.ToLower(strings.Join(segs[1:len(segs)-1], "/"))
+	return p, true
+}
+
+// qualifier returns a single-valued qualifier. A qualifier given twice is
+// ambiguous and reads as absent-but-conflicting (ok=false).
+func (p parsedPurl) qualifier(k string) (string, bool) {
+	vs := p.qualifiers[k]
+	switch len(vs) {
+	case 0:
+		return "", true
+	case 1:
+		return vs[0], true
+	}
+	return "", false
+}
+
+// distroTargetFor identifies the distro release, the package and the version
+// of one component, or says why it cannot (the reason is for logs and the
+// report only). It never guesses: the release comes from the purl's distro
+// qualifier, or else from the SBOM's own single operating-system component of
+// the SAME distro; a qualifier that names another distro than the purl's
+// namespace, an unknown distro, or a version in the wrong syntax is no target.
+func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, string) {
+	p, ok := parsePurl(purl)
+	if !ok {
+		return distroTarget{}, "no_purl"
+	}
+	switch p.typ {
+	case "deb", "rpm":
+	case "apk", "alpm":
+		return distroTarget{}, "no_comparator"
+	default:
+		return distroTarget{}, "not_distro"
+	}
+	distroQ, ok := p.qualifier("distro")
+	if !ok {
+		return distroTarget{}, "ambiguous_qualifier"
+	}
+	id, rel := "", ""
+	if distroQ != "" {
+		i := strings.LastIndexByte(distroQ, '-')
+		if i <= 0 {
+			return distroTarget{}, "unknown_release"
+		}
+		id, rel = strings.ToLower(distroQ[:i]), distroQ[i+1:]
+	} else if os != nil {
+		id, rel = strings.ToLower(os.id), os.version
+	} else {
+		return distroTarget{}, "unknown_release"
+	}
+	if id != p.namespace && purlNamespaceAlias[p.namespace] != id {
+		return distroTarget{}, "distro_mismatch"
+	}
+	version := p.version
+	if version == "" {
+		version = strings.TrimSpace(compVersion)
+	}
+	if version == "" {
+		return distroTarget{}, "no_version"
+	}
+
+	t := distroTarget{family: id}
+	switch p.typ {
+	case "deb":
+		t.scheme = schemeDpkg
+		t.pkg, t.version = p.name, version
+		up, ok := p.qualifier("upstream")
+		if !ok {
+			return distroTarget{}, "ambiguous_qualifier"
+		}
+		if up != "" {
+			// Syft: "upstream=glibc" (same version as the binary) or
+			// "upstream=linux-signed-amd64@5.10.46+4" (source name@version).
+			name, ver, hasVer := strings.Cut(up, "@")
+			if name == "" || (hasVer && ver == "") {
+				return distroTarget{}, "bad_upstream"
+			}
+			t.pkg = name
+			if hasVer {
+				t.version = ver
+			}
+		}
+		if _, err := pkgversion.ParseDpkg(t.version); err != nil {
+			return distroTarget{}, "bad_version"
+		}
+		switch id {
+		case "debian":
+			major, ok := releaseMajor(rel)
+			if !ok {
+				return distroTarget{}, "unknown_release"
+			}
+			t.releaseMajor = major
+			t.release = "Debian:" + strconv.Itoa(major)
+			t.query = "Debian"
+		case "ubuntu":
+			eco, ok := ubuntuEcosystem(rel)
+			if !ok {
+				return distroTarget{}, "unknown_release"
+			}
+			t.release, t.query = eco, eco
+		default:
+			return distroTarget{}, "unsupported_distro"
+		}
+	case "rpm":
+		t.scheme = schemeRPM
+		t.pkg = p.name
+		epoch, ok := p.qualifier("epoch")
+		if !ok {
+			return distroTarget{}, "ambiguous_qualifier"
+		}
+		if epoch != "" {
+			if strings.Contains(version, ":") {
+				// Both the version and the qualifier state an epoch.
+				ev, _, _ := strings.Cut(version, ":")
+				if ev != epoch {
+					return distroTarget{}, "bad_version"
+				}
+			} else {
+				version = epoch + ":" + version
+			}
+		}
+		if _, err := pkgversion.ParseRPMEVR(version); err != nil {
+			return distroTarget{}, "bad_version"
+		}
+		t.version = version
+		major, ok := releaseMajor(rel)
+		if !ok {
+			return distroTarget{}, "unknown_release"
+		}
+		switch id {
+		case "almalinux":
+			t.release = "AlmaLinux:" + strconv.Itoa(major)
+		case "rocky":
+			t.release = "Rocky Linux:" + strconv.Itoa(major)
+		default:
+			// rhel / centos / fedora / amzn / ol / sles: OSV either has no
+			// such ecosystem or keys it by repository (Red Hat), which the
+			// SBOM does not state. No guess.
+			return distroTarget{}, "unsupported_distro"
+		}
+		t.query = t.release
+	}
+	return t, ""
+}
+
+// purlNamespaceAlias maps a purl namespace to the os-release ID Syft writes in
+// the distro qualifier when the two differ (pkg:rpm/redhat/...?distro=rhel-9.4).
+var purlNamespaceAlias = map[string]string{"redhat": "rhel"}
+
+// releaseMajor reads "11", "11.7" or "9.4" as its major number. Debian
+// codenames are accepted too (Syft writes VERSION_ID, but other tools write
+// the codename).
+func releaseMajor(rel string) (int, bool) {
+	rel = strings.ToLower(strings.TrimSpace(rel))
+	if n, ok := debianCodenames[rel]; ok {
+		return n, true
+	}
+	major, _, _ := strings.Cut(rel, ".")
+	if !isDigits(major) || len(major) > 3 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(major)
+	if err != nil || n == 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+var debianCodenames = map[string]int{
+	"buzz": 1, "rex": 1, "bo": 1, "hamm": 2, "slink": 2, "potato": 2, "woody": 3, "sarge": 3, "etch": 4,
+	"lenny": 5, "squeeze": 6, "wheezy": 7, "jessie": 8, "stretch": 9, "buster": 10, "bullseye": 11,
+	"bookworm": 12, "trixie": 13, "forky": 14, "duke": 15,
+}
+
+// ubuntuEcosystem maps "22.04" to OSV's "Ubuntu:22.04:LTS" and "23.10" to
+// "Ubuntu:23.10". Ubuntu's LTS releases are the April releases of even years
+// (14.04, 16.04, ..., 24.04). Anything not shaped YY.MM is no release.
+func ubuntuEcosystem(rel string) (string, bool) {
+	yy, mm, ok := strings.Cut(strings.TrimSpace(rel), ".")
+	if !ok || len(yy) != 2 || len(mm) != 2 || !isDigits(yy) || !isDigits(mm) {
+		return "", false
+	}
+	y, _ := strconv.Atoi(yy)
+	if mm == "04" && y%2 == 0 {
+		return "Ubuntu:" + yy + "." + mm + ":LTS", true
+	}
+	return "Ubuntu:" + yy + "." + mm, true
+}
+
+// distroRecord is the reduced, cacheable form of one OSV record: the CVEs it
+// speaks about and its entries for the queried package only.
+type distroRecord struct {
+	ID      string        `json:"id"`
+	CVEs    []string      `json:"cves"`
+	Entries []distroEntry `json:"entries"`
+}
+
+type distroEntry struct {
+	Ecosystem string            `json:"ecosystem"`
+	Ranges    []client.OSVRange `json:"ranges,omitempty"`
+	Versions  []string          `json:"versions,omitempty"`
+}
+
+// reduceOSVRecords keeps, of each non-withdrawn record, the CVE ids it is
+// about and its affected entries for pkg (exact name; OSV package names are
+// case-sensitive). The CVE ids are the record's own id when it is a CVE, its
+// aliases and its `upstream` list, and the CVE a DEBIAN-/UBUNTU-CVE id is
+// generated from. `related` is not read: it links records that are merely
+// connected.
+func reduceOSVRecords(recs []client.OSVPackageRecord, pkg string) []distroRecord {
+	var out []distroRecord
+	for _, r := range recs {
+		if strings.TrimSpace(r.Withdrawn) != "" {
+			continue
+		}
+		cves := map[string]bool{}
+		add := func(id string) {
+			id = strings.ToUpper(strings.TrimSpace(id))
+			if isCVEID(id) {
+				cves[id] = true
+			}
+		}
+		add(r.ID)
+		for _, pfx := range []string{"DEBIAN-", "UBUNTU-"} {
+			if rest, ok := strings.CutPrefix(strings.ToUpper(r.ID), pfx); ok {
+				add(rest)
+			}
+		}
+		for _, a := range r.Aliases {
+			add(a)
+		}
+		for _, u := range r.Upstream {
+			add(u)
+		}
+		if len(cves) == 0 {
+			continue
+		}
+		var entries []distroEntry
+		for _, a := range r.Affected {
+			if a.Package.Name != pkg || a.Package.Ecosystem == "" {
+				continue
+			}
+			entries = append(entries, distroEntry{Ecosystem: a.Package.Ecosystem, Ranges: a.Ranges, Versions: a.Versions})
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		d := distroRecord{ID: r.ID, Entries: entries}
+		for c := range cves {
+			d.CVEs = append(d.CVEs, c)
+		}
+		sort.Strings(d.CVEs)
+		out = append(out, d)
+	}
+	return out
+}
+
+// isCVEID: "CVE-<4 digits>-<4+ digits>".
+func isCVEID(s string) bool {
+	rest, ok := strings.CutPrefix(s, "CVE-")
+	if !ok {
+		return false
+	}
+	y, n, ok := strings.Cut(rest, "-")
+	return ok && len(y) == 4 && isDigits(y) && len(n) >= 4 && isDigits(n)
+}
+
+// distroData indexes one package's reduced records by CVE.
+type distroData struct {
+	byCVE map[string][]*distroRecord
+}
+
+func indexDistroRecords(recs []distroRecord) distroData {
+	d := distroData{byCVE: map[string][]*distroRecord{}}
+	for i := range recs {
+		for _, c := range recs[i].CVEs {
+			d.byCVE[c] = append(d.byCVE[c], &recs[i])
+		}
+	}
+	return d
+}
+
+// distroVerdict is what the data says about one (component, CVE).
+type distroVerdict int
+
+const (
+	verdictNone distroVerdict = iota
+	verdictAffected
+	verdictUnfixed
+	verdictFixed
+)
+
+func (v distroVerdict) method() model.MatchMethod {
+	switch v {
+	case verdictAffected:
+		return model.MatchDistroAffected
+	case verdictUnfixed:
+		return model.MatchDistroUnfixed
+	case verdictFixed:
+		return model.MatchDistroFixed
+	}
+	return ""
+}
+
+// distroDecision is a verdict with its evidence.
+type distroDecision struct {
+	verdict  distroVerdict
+	evidence model.DistroEvidence
+	// reason says why there is no verdict (logs / tests).
+	reason string
+}
+
+// entryState is one entry's statement about the installed version.
+type entryState int
+
+const (
+	entryUndecidable entryState = iota
+	entryAffected
+	entryFixed
+)
+
+// entryResult is the evaluation of one affected entry (or one range).
+type entryResult struct {
+	state entryState
+	// fix is, for entryAffected, the version that ends the affected range
+	// above the installed one; for entryFixed, the fixed version that closed
+	// the range at or below the installed one.
+	fix string
+	// noFix (entryAffected): the affected range has no fixed event — the
+	// distro has released no fix.
+	noFix bool
+	// fixUnknown (entryAffected): affected for certain, but which version
+	// fixes it cannot be stated (incomparable fixes, or affected only by the
+	// `versions` list).
+	fixUnknown bool
+}
+
+// decide applies the distro's data to one CVE of one component.
+func (d distroData) decide(t distroTarget, cveID string) distroDecision {
+	recs := d.byCVE[strings.ToUpper(strings.TrimSpace(cveID))]
+	if len(recs) == 0 {
+		return distroDecision{reason: "no_record"}
+	}
+	cmp := t.comparator()
+
+	var exact []entryResult
+	var exactIDs []string
+	for _, r := range recs {
+		for _, e := range r.Entries {
+			if e.Ecosystem != t.release {
+				continue
+			}
+			exact = append(exact, evalEntry(t.version, e, cmp))
+			exactIDs = appendUnique(exactIDs, r.ID)
+		}
+	}
+	ev := model.DistroEvidence{
+		Source:    model.DistroSourceOSV,
+		Basis:     model.DistroBasisRelease,
+		Release:   t.release,
+		Package:   t.pkg,
+		Installed: t.version,
+	}
+	if len(exact) > 0 {
+		return combineExact(exact, exactIDs, ev, cmp)
+	}
+	if t.family == "debian" {
+		return laterReleaseVerdict(t, recs, ev, cmp)
+	}
+	return distroDecision{reason: "release_not_listed"}
+}
+
+// combineExact combines the entries that name the installed release.
+//
+//   - Any entry with the installed version inside an affected range wins: the
+//     CVE applies. If any such range has no fix, it is distro_unfixed;
+//     otherwise distro_affected with the HIGHEST of their next fixed versions
+//     (an advisory and its regression update, DLA-3942-1 / -2, both name the
+//     same CVEs: the later fix is the one that leaves no affected range), or
+//     with no fixed version when they cannot be ordered.
+//   - Otherwise, if any entry could not be evaluated: no verdict.
+//   - Otherwise every entry closed a range at or below the installed version:
+//     distro_fixed, with the highest such fixed version as evidence.
+func combineExact(rs []entryResult, ids []string, ev model.DistroEvidence, cmp versionCmp) distroDecision {
+	affected, noFix, fixUnknown, undecidable := false, false, false, false
+	fix := ""
+	for _, r := range rs {
+		switch r.state {
+		case entryAffected:
+			affected = true
+			switch {
+			case r.noFix:
+				noFix = true
+			case r.fixUnknown:
+				fixUnknown = true
+			case fix == "":
+				fix = r.fix
+			default:
+				c, err := cmp(r.fix, fix)
+				if err != nil {
+					fixUnknown = true
+				} else if c > 0 {
+					fix = r.fix
+				}
+			}
+		case entryUndecidable:
+			undecidable = true
+		}
+	}
+	ev.Records = ids
+	switch {
+	case affected && noFix:
+		ev.Status = model.DistroStatusUnfixed
+		return distroDecision{verdict: verdictUnfixed, evidence: ev}
+	case affected:
+		ev.Status = model.DistroStatusAffected
+		if !fixUnknown {
+			ev.Fixed = fix
+		}
+		return distroDecision{verdict: verdictAffected, evidence: ev}
+	case undecidable:
+		return distroDecision{reason: "undecidable"}
+	}
+	best := ""
+	for _, r := range rs {
+		if best == "" {
+			best = r.fix
+			continue
+		}
+		c, err := cmp(r.fix, best)
+		if err != nil {
+			return distroDecision{reason: "undecidable"}
+		}
+		if c > 0 {
+			best = r.fix
+		}
+	}
+	ev.Status = model.DistroStatusFixed
+	ev.Fixed = best
+	return distroDecision{verdict: verdictFixed, evidence: ev}
+}
+
+// laterReleaseVerdict decides for a Debian release the data does not list
+// (end of life: measured, bullseye is gone from both OSV and the Debian
+// tracker since 2026-08).
+//
+// Debian's security tracker computes a release's status from the UNSTABLE
+// fixed version unless the release carries its own note: a release whose
+// package version is >= the version that fixed the CVE in unstable is fixed.
+// A release-specific note is needed only when the release's version is BELOW
+// that (a backport, or <no-dsa> / <ignored> / <postponed> to say it stays
+// unfixed), so a note can never contradict "installed >= the lineage fix".
+// The later releases' entries carry exactly that lineage fix when they have
+// no backport of their own (DEBIAN-CVE-2021-3449: Debian:12/13/14 all
+// "fixed 1.1.1k-1", although bookworm ships 3.0.x).
+//
+// So the ONLY verdict drawn here is distro_fixed, and only when there is at
+// least one later Debian release entry and EVERY later release entry closes
+// its range at or below the installed version. Anything else — no later
+// entry, one still affected or unfixed, one not evaluable — is no verdict:
+// a later release's fix above the installed version says nothing about the
+// installed release, which may have had its own lower backport. Older
+// releases' entries are never used (their backports are below the lineage).
+func laterReleaseVerdict(t distroTarget, recs []*distroRecord, ev model.DistroEvidence, cmp versionCmp) distroDecision {
+	var rs []entryResult
+	var ids, ecos []string
+	for _, r := range recs {
+		for _, e := range r.Entries {
+			n, ok := debianEcosystemMajor(e.Ecosystem)
+			if !ok || n <= t.releaseMajor {
+				continue
+			}
+			res := evalEntry(t.version, e, cmp)
+			if res.state != entryFixed {
+				return distroDecision{reason: "later_release_not_fixed_at_installed"}
+			}
+			rs = append(rs, res)
+			ids = appendUnique(ids, r.ID)
+			ecos = appendUnique(ecos, e.Ecosystem)
+		}
+	}
+	if len(rs) == 0 {
+		return distroDecision{reason: "release_not_listed"}
+	}
+	d := combineExact(rs, ids, ev, cmp)
+	if d.verdict != verdictFixed {
+		return distroDecision{reason: "undecidable"}
+	}
+	sort.Strings(ecos)
+	d.evidence.Basis = model.DistroBasisLaterReleases
+	d.evidence.Ecosystems = ecos
+	return d
+}
+
+// debianEcosystemMajor reads "Debian:12" (or "Debian:6.0") as 12 (6).
+func debianEcosystemMajor(eco string) (int, bool) {
+	rest, ok := strings.CutPrefix(eco, "Debian:")
+	if !ok {
+		return 0, false
+	}
+	major, _, _ := strings.Cut(rest, ".")
+	if !isDigits(major) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(major)
+	return n, err == nil && n > 0
+}
+
+// versionCmp compares two versions of the target's scheme.
+type versionCmp func(a, b string) (int, error)
+
+// errEpochAmbiguous: exactly one side states a non-zero epoch and the other
+// states none. dpkg and rpm both read a missing epoch as 0, and that is
+// usually right — but it is also exactly how an SBOM (or a feed) that dropped
+// the epoch looks, and the two readings give opposite answers. Undecidable.
+var errEpochAmbiguous = fmt.Errorf("%w: only one side states a non-zero epoch", pkgversion.ErrInvalidVersion)
+
+func (t distroTarget) comparator() versionCmp {
+	switch t.scheme {
+	case schemeDpkg:
+		return func(a, b string) (int, error) {
+			va, err := pkgversion.ParseDpkg(a)
+			if err != nil {
+				return 0, err
+			}
+			vb, err := pkgversion.ParseDpkg(b)
+			if err != nil {
+				return 0, err
+			}
+			if (va.Epoch > 0 && !vb.HasEpoch) || (vb.Epoch > 0 && !va.HasEpoch) {
+				return 0, errEpochAmbiguous
+			}
+			return va.Compare(vb), nil
+		}
+	case schemeRPM:
+		return func(a, b string) (int, error) {
+			ea, err := pkgversion.ParseRPMEVR(a)
+			if err != nil {
+				return 0, err
+			}
+			eb, err := pkgversion.ParseRPMEVR(b)
+			if err != nil {
+				return 0, err
+			}
+			if (ea.Epoch > 0 && !eb.HasEpoch) || (eb.Epoch > 0 && !ea.HasEpoch) {
+				return 0, errEpochAmbiguous
+			}
+			return ea.Compare(eb), nil
+		}
+	}
+	return func(string, string) (int, error) { return 0, pkgversion.ErrInvalidVersion }
+}
+
+// distroRangeEvent is one range event with its kind.
+type distroRangeEvent struct {
+	kind    string // introduced | fixed | last_affected | limit
+	version string
+	zero    bool // introduced "0": before every version
+}
+
+// evalEntry evaluates one affected entry for the installed version.
+//
+// Only ECOSYSTEM ranges are read (the distro's own version syntax). The
+// evaluation is OSV's (schema "Evaluation"): events sorted by version, the
+// installed version is affected after an `introduced` at or below it and
+// until a `fixed` at or below it. A `last_affected` or `limit` event, an
+// installed version below the first `introduced`, any version the comparator
+// refuses, or a range type other than ECOSYSTEM that is the entry's only
+// range: undecidable. An installed version listed in `versions` is affected
+// whatever the ranges say (the list is evidence of the affected side only;
+// its absence proves nothing).
+func evalEntry(installed string, e distroEntry, cmp versionCmp) entryResult {
+	listed := false
+	for _, v := range e.Versions {
+		if c, err := cmp(installed, v); err == nil && c == 0 {
+			listed = true
+			break
+		}
+	}
+	var affectedRanges []entryResult
+	var closings []string
+	undecidable := false
+	for _, r := range e.Ranges {
+		if r.Type != "ECOSYSTEM" {
+			continue
+		}
+		switch res := evalRange(installed, r.Events, cmp); res.state {
+		case entryAffected:
+			affectedRanges = append(affectedRanges, res)
+		case entryFixed:
+			closings = append(closings, res.fix)
+		default:
+			undecidable = true
+		}
+	}
+	if len(affectedRanges) > 0 {
+		out := entryResult{state: entryAffected}
+		for _, r := range affectedRanges {
+			switch {
+			case r.noFix:
+				return entryResult{state: entryAffected, noFix: true}
+			case out.fix == "":
+				out.fix = r.fix
+			default:
+				c, err := cmp(r.fix, out.fix)
+				if err != nil {
+					out.fixUnknown = true
+				} else if c > 0 {
+					out.fix = r.fix
+				}
+			}
+		}
+		if out.fixUnknown {
+			out.fix = ""
+		}
+		return out
+	}
+	if listed {
+		// Listed as affected, but no range says up to where.
+		return entryResult{state: entryAffected, fixUnknown: true}
+	}
+	if undecidable || len(closings) == 0 {
+		return entryResult{state: entryUndecidable}
+	}
+	best := closings[0]
+	for _, c := range closings[1:] {
+		o, err := cmp(c, best)
+		if err != nil {
+			return entryResult{state: entryUndecidable}
+		}
+		if o > 0 {
+			best = c
+		}
+	}
+	return entryResult{state: entryFixed, fix: best}
+}
+
+// evalRange evaluates one ECOSYSTEM range.
+func evalRange(installed string, raw []client.OSVEvent, cmp versionCmp) entryResult {
+	var evs []distroRangeEvent
+	for _, e := range raw {
+		n := 0
+		var ev distroRangeEvent
+		if e.Introduced != "" {
+			n++
+			ev = distroRangeEvent{kind: "introduced", version: e.Introduced, zero: e.Introduced == "0"}
+		}
+		if e.Fixed != "" {
+			n++
+			ev = distroRangeEvent{kind: "fixed", version: e.Fixed}
+		}
+		if e.LastAffected != "" {
+			n++
+			ev = distroRangeEvent{kind: "last_affected", version: e.LastAffected}
+		}
+		if e.Limit != "" {
+			n++
+			ev = distroRangeEvent{kind: "limit", version: e.Limit}
+		}
+		if n != 1 {
+			return entryResult{} // an event must carry exactly one field
+		}
+		if ev.kind == "last_affected" || ev.kind == "limit" {
+			return entryResult{}
+		}
+		evs = append(evs, ev)
+	}
+	if len(evs) == 0 {
+		return entryResult{}
+	}
+	// Sort by version; "0" sorts first. A comparison error anywhere makes the
+	// range undecidable.
+	var sortErr error
+	less := func(a, b distroRangeEvent) int {
+		switch {
+		case a.zero && b.zero:
+			return 0
+		case a.zero:
+			return -1
+		case b.zero:
+			return 1
+		}
+		c, err := cmp(a.version, b.version)
+		if err != nil && sortErr == nil {
+			sortErr = err
+		}
+		return c
+	}
+	sort.SliceStable(evs, func(i, j int) bool { return less(evs[i], evs[j]) < 0 })
+	if sortErr != nil {
+		return entryResult{}
+	}
+	affected, everIntroduced := false, false
+	closing := ""
+	for _, ev := range evs {
+		var c int
+		if ev.zero {
+			c = 1 // installed > "0"
+		} else {
+			var err error
+			c, err = cmp(installed, ev.version)
+			if err != nil {
+				return entryResult{}
+			}
+		}
+		if c < 0 {
+			continue // event above the installed version
+		}
+		switch ev.kind {
+		case "introduced":
+			affected, everIntroduced = true, true
+		case "fixed":
+			if affected {
+				closing = ev.version
+			}
+			affected = false
+		}
+	}
+	if affected {
+		// The lowest fixed event above the installed version, if any.
+		for _, ev := range evs {
+			if ev.kind != "fixed" {
+				continue
+			}
+			c, err := cmp(installed, ev.version)
+			if err != nil {
+				return entryResult{}
+			}
+			if c < 0 {
+				return entryResult{state: entryAffected, fix: ev.version}
+			}
+		}
+		return entryResult{state: entryAffected, noFix: true}
+	}
+	if !everIntroduced || closing == "" {
+		// Below the first introduced, or closed by something other than a
+		// fix we saw: not a "fixed" statement.
+		return entryResult{}
+	}
+	return entryResult{state: entryFixed, fix: closing}
+}
+
+func appendUnique(s []string, v string) []string {
+	for _, x := range s {
+		if x == v {
+			return s
+		}
+	}
+	return append(s, v)
+}
