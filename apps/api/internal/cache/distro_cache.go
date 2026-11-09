@@ -55,7 +55,24 @@ func NewDistroCache(client *redis.Client) *DistroCache {
 type DistroCacheEntry struct {
 	FetchedAt time.Time       `json:"fetched_at"`
 	Payload   json.RawMessage `json:"payload"`
+	// DataModified is the data's own revision (fixed-width UTC RFC 3339,
+	// sorts as text). Set never replaces an entry of a newer revision.
+	DataModified string `json:"data_modified"`
 }
+
+// distroSetIfNotNewer writes ARGV[1] unless the stored entry carries a newer
+// data_modified than ARGV[2]: two scans that fetched at nearly the same time
+// cannot leave the older answer cached (Codex M70 R8 High-4).
+var distroSetIfNotNewer = redis.NewScript(`
+local cur = redis.call('GET', KEYS[1])
+if cur then
+  local ok, obj = pcall(cjson.decode, cur)
+  if ok and type(obj) == 'table' and type(obj['data_modified']) == 'string' and obj['data_modified'] > ARGV[2] then
+    return 0
+  end
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
+return 1`)
 
 // DistroCacheKey is the Redis key of (source, ecosystem, name). source is the
 // data source's endpoint (SBOMHUB_OSV_URL): two deployments pointed at
@@ -106,7 +123,8 @@ func (c *DistroCache) Set(ctx context.Context, source, ecosystem, name string, e
 	}
 	ctx, cancel := opContext(ctx)
 	defer cancel()
-	if err := c.client.Set(ctx, DistroCacheKey(source, ecosystem, name), data, c.ttl).Err(); err != nil {
+	if err := distroSetIfNotNewer.Run(ctx, c.client, []string{DistroCacheKey(source, ecosystem, name)},
+		data, e.DataModified, c.ttl.Milliseconds()).Err(); err != nil {
 		return fmt.Errorf("redis set error: %w", err)
 	}
 	return nil

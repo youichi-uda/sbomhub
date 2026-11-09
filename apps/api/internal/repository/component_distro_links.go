@@ -46,6 +46,13 @@ func (r *ComponentRepository) ListSbomLinks(ctx context.Context, sbomID uuid.UUI
 	return out, rows.Err()
 }
 
+// relabelDistroFreshness keeps a same-method refresh from replacing evidence
+// of a NEWER data revision with an older one (two overlapping scans whose
+// fetches straddled an OSV update; Codex M70 R8 High-4). data_modified is
+// fixed-width UTC RFC 3339, so text order is time order; a missing one is
+// the oldest.
+const relabelDistroFreshness = `COALESCE(cv.match_evidence->>'data_modified', '') <= COALESCE($4::jsonb->>'data_modified', '')`
+
 // ErrNotDistroMethod is returned before any statement when RelabelDistro is
 // handed a method that is not a distro label.
 var ErrNotDistroMethod = errors.New("relabel: not a distro match method")
@@ -81,7 +88,8 @@ func (r *ComponentRepository) RelabelDistro(ctx context.Context, componentID, vu
 		   AND (cv.match_method IS NULL
 		        OR cv.match_method = ANY($5)
 		        OR (cv.match_method = $3
-		            AND (cv.match_evidence - 'fetched_at') IS DISTINCT FROM ($4::jsonb - 'fetched_at')))`,
+		            AND (cv.match_evidence - 'fetched_at') IS DISTINCT FROM ($4::jsonb - 'fetched_at')
+		            AND `+relabelDistroFreshness+`))`,
 		componentID, vulnID, string(method), string(evidence), pq.Array(model.WeakerMatchMethods(method)))
 	if err != nil {
 		return false, err

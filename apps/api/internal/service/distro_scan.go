@@ -72,8 +72,9 @@ const (
 	// ~7 MB per 3,000-record page.
 	distroMaxBytesPerPackage = 96 << 20
 	// distroCachePayloadVersion is bumped with the distroRecord format
-	// (2: Releases / Packages, Codex M70 R2; 3: Ubuntu binaries, R4).
-	distroCachePayloadVersion = 3
+	// (2: Releases / Packages, Codex M70 R2; 3: Ubuntu binaries, R4;
+	// 4: record modified, R8).
+	distroCachePayloadVersion = 4
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -196,6 +197,9 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 		t, reason := distroTargetFor(c.Purl, c.Version, os)
 		if reason == "" && !cpeVersionsAgree(c.CPEs, c.Version) {
 			reason = "cpe_version_conflict"
+		}
+		if reason == "" && !purlNameAgrees(c.Purl, c.Name) {
+			reason = "name_mismatch"
 		}
 		if reason != "" {
 			if reason != "not_distro" && reason != "no_purl" {
@@ -489,7 +493,8 @@ func (s *DistroService) load(ctx context.Context, k distroFetchKey, pace func(co
 	at := s.now().UTC()
 	payload, merr := json.Marshal(distroCachePayload{Version: distroCachePayloadVersion, Records: recs})
 	if merr == nil {
-		if serr := s.cache.Set(ctx, s.source, k.ecosystem, k.pkg, cache.DistroCacheEntry{FetchedAt: at, Payload: payload}); serr != nil {
+		if serr := s.cache.Set(ctx, s.source, k.ecosystem, k.pkg, cache.DistroCacheEntry{FetchedAt: at, Payload: payload,
+			DataModified: indexDistroRecords(recs).revision}); serr != nil {
 			slog.Debug("distro cache set error", "ecosystem", k.ecosystem, "package", k.pkg, "error", serr)
 		}
 	}

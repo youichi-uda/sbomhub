@@ -400,3 +400,56 @@ func TestM70DistroLoad_CacheHitTakesASlot(t *testing.T) {
 		t.Errorf("a cache hit proceeded without a slot: hit=%v err=%v", hit, err)
 	}
 }
+
+// Codex M70 R8 High-4: neither the database nor the cache lets older data
+// replace newer data.
+func TestM70DistroFreshness_DBAndCache(t *testing.T) {
+	e := m70Seed(t, "m70fresh")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	write := func(ev string) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, func(txCtx context.Context) error {
+			_, err := e.compRepo.RelabelDistro(txCtx, e.openssl, e.v0286, model.MatchDistroAffected, []byte(ev))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"source":"osv","fixed":"v3","data_modified":"2026-11-09T00:00:00.000000000Z"}`)
+	write(`{"source":"osv","fixed":"v2","data_modified":"2026-11-08T00:00:00.000000000Z"}`)
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.evidence.Fixed != "v3" {
+		t.Errorf("older evidence replaced newer: %+v", r)
+	}
+	write(`{"source":"osv","fixed":"v4","data_modified":"2026-11-10T00:00:00.000000000Z"}`)
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.evidence.Fixed != "v4" {
+		t.Errorf("newer evidence not written: %+v", r)
+	}
+
+	url := os.Getenv("REDIS_URL")
+	if url == "" {
+		t.Skip("REDIS_URL not set")
+	}
+	opt, err := redis.ParseURL(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { _ = rdb.Close() })
+	c := cache.NewDistroCache(rdb)
+	key := cache.DistroCacheKey("test-fresh", "Debian", "p")
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
+	now := time.Now()
+	set := func(dm, payload string) {
+		t.Helper()
+		if err := c.Set(context.Background(), "test-fresh", "Debian", "p", cache.DistroCacheEntry{FetchedAt: now, DataModified: dm, Payload: []byte(payload)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set("2026-11-09T00:00:00.000000000Z", `"new"`)
+	set("2026-11-08T00:00:00.000000000Z", `"old"`)
+	got, err := c.Get(context.Background(), "test-fresh", "Debian", "p")
+	if err != nil || got == nil || string(got.Payload) != `"new"` {
+		t.Errorf("cache = %+v, %v; want the newer payload", got, err)
+	}
+}

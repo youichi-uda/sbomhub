@@ -44,6 +44,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sbomhub/sbomhub/internal/client"
 	"github.com/sbomhub/sbomhub/internal/model"
@@ -371,6 +372,32 @@ var debianCodenames = map[string]int{
 	"bookworm": 12, "trixie": 13, "forky": 14, "duke": 15,
 }
 
+// noncanonicalFor reports an ecosystem spelling that could denote the
+// target's distro but is not canonical: empty, a case variant of the
+// installed release, or (Debian) any "debian..." form debianEcosystemMajor
+// does not accept.
+func noncanonicalFor(t distroTarget, eco string) bool {
+	if strings.TrimSpace(eco) == "" || eco != strings.TrimSpace(eco) {
+		return true
+	}
+	if eco != t.release && strings.EqualFold(eco, t.release) {
+		return true
+	}
+	if t.family == "debian" && strings.HasPrefix(strings.ToLower(eco), "debian") {
+		_, ok := debianEcosystemMajor(eco)
+		return !ok
+	}
+	return false
+}
+
+// purlNameAgrees: the component's name is the purl's package name (the
+// binary the NVD link was made for). Codex M70 R8 High-3.
+func purlNameAgrees(purl, compName string) bool {
+	p, ok := parsePurl(purl)
+	name := strings.TrimSpace(compName)
+	return ok && name != "" && p.name == name
+}
+
 // cpeVersionsAgree reports whether every concrete version the component's
 // CPE names state equals the component's version. M60 matches NVD on a CPE's
 // own version when it states one (cpeCandidates), so a CPE that states
@@ -382,7 +409,15 @@ func cpeVersionsAgree(cpes []string, compVersion string) bool {
 	want := strings.ToLower(strings.TrimSpace(compVersion))
 	for _, raw := range cpes {
 		n, ok := parseCPE(raw)
-		if !ok || !cpeConcrete(n.Version) {
+		if !ok {
+			continue
+		}
+		if cpeConcrete(n.Update) {
+			// A pinned update names the release version-update, which M60
+			// queried; not the component's version (Codex M70 R8 High-2).
+			return false
+		}
+		if !cpeConcrete(n.Version) {
 			continue
 		}
 		if strings.TrimPrefix(n.Version, cpeLiteralMark) != want {
@@ -426,6 +461,18 @@ type distroRecord struct {
 	// an advisory look single-entry (Codex M70 R2 High-1).
 	Releases int `json:"releases"`
 	Packages int `json:"packages"`
+	// Modified is the record's OSV `modified`, normalised (normaliseModified).
+	Modified string `json:"modified,omitempty"`
+}
+
+// normaliseModified renders an OSV timestamp as fixed-width UTC RFC 3339 with
+// nanoseconds, so that revisions compare as text; "" if it does not parse.
+func normaliseModified(s string) string {
+	ts, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(s))
+	if err != nil {
+		return ""
+	}
+	return ts.UTC().Format("2006-01-02T15:04:05.000000000Z")
 }
 
 type distroEntry struct {
@@ -516,9 +563,11 @@ func reduceOSVRecords(recs []client.OSVPackageRecord, pkg string) []distroRecord
 		for _, a := range r.Affected {
 			releases[a.Package.Ecosystem] = true
 			packages[a.Package.Name] = true
-			if a.Package.Name != pkg || a.Package.Ecosystem == "" {
+			if a.Package.Name != pkg {
 				continue
 			}
+			// An entry with an empty ecosystem is kept: decide treats it as
+			// a blocker, never as nothing (Codex M70 R8 High-1).
 			bins, listed := entryBinaries(a.EcosystemSpecific)
 			entries = append(entries, distroEntry{Ecosystem: a.Package.Ecosystem, Ranges: a.Ranges, Versions: a.Versions,
 				Binaries: bins, BinariesListed: listed})
@@ -526,7 +575,8 @@ func reduceOSVRecords(recs []client.OSVPackageRecord, pkg string) []distroRecord
 		if len(entries) == 0 {
 			continue
 		}
-		d := distroRecord{ID: r.ID, Entries: entries, Releases: len(releases), Packages: len(packages)}
+		d := distroRecord{ID: r.ID, Entries: entries, Releases: len(releases), Packages: len(packages),
+			Modified: normaliseModified(r.Modified)}
 		for c := range cves {
 			d.CVEs = append(d.CVEs, c)
 		}
@@ -549,6 +599,9 @@ func isCVEID(s string) bool {
 // distroData indexes one package's reduced records by CVE.
 type distroData struct {
 	byCVE map[string][]*distroRecord
+	// revision is the newest record `modified` of the package (normalised):
+	// the data snapshot the decisions rest on.
+	revision string
 	// cveRecordReleases are the release ecosystems named by at least one
 	// CVE-specific record (DEBIAN-CVE-* / UBUNTU-CVE-*) of the package:
 	// the releases the CVE-level data still covers. A Debian release absent
@@ -560,6 +613,9 @@ func indexDistroRecords(recs []distroRecord) distroData {
 	d := distroData{byCVE: map[string][]*distroRecord{}, cveRecordReleases: map[string]bool{}}
 	for i := range recs {
 		r := &recs[i]
+		if m := normaliseModified(r.Modified); m > d.revision {
+			d.revision = m
+		}
 		for _, c := range r.CVEs {
 			d.byCVE[c] = append(d.byCVE[c], r)
 		}
@@ -674,6 +730,17 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 	}
 	cmp := t.comparator()
 
+	// Any entry spelled non-canonically (or with no ecosystem) could be a
+	// statement about the installed release this code would not see: no
+	// verdict (Codex M70 R8 High-1).
+	for _, r := range recs {
+		for _, e := range r.Entries {
+			if noncanonicalFor(t, e.Ecosystem) {
+				return distroDecision{reason: "noncanonical_ecosystem"}
+			}
+		}
+	}
+
 	var cveRecs []*distroRecord
 	cveRecordNamesRelease := false
 	for _, r := range recs {
@@ -728,11 +795,12 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 		}
 	}
 	ev := model.DistroEvidence{
-		Source:    model.DistroSourceOSV,
-		Basis:     model.DistroBasisRelease,
-		Release:   t.release,
-		Package:   t.pkg,
-		Installed: t.version,
+		Source:       model.DistroSourceOSV,
+		Basis:        model.DistroBasisRelease,
+		Release:      t.release,
+		Package:      t.pkg,
+		Installed:    t.version,
+		DataModified: d.revision,
 	}
 	if len(exact) > 0 {
 		dec := combineExact(exact, exactIDs, ev, cmp)
@@ -753,6 +821,16 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 			}
 			if !ok {
 				dec.evidence.Fixed = ""
+			}
+		}
+		if dec.verdict == verdictFixed && dec.evidence.Fixed != "" {
+			// Same for the version a "fixed" verdict names (Codex M70 R8
+			// Medium-5).
+			for _, e := range usable {
+				if !outsideAffectedSet(dec.evidence.Fixed, e, cmp) {
+					dec.evidence.Fixed = ""
+					break
+				}
 			}
 		}
 		return dec
@@ -872,7 +950,7 @@ func laterReleaseVerdict(t distroTarget, recs []*distroRecord, ev model.DistroEv
 	var ids, ecos []string
 	for _, r := range recs {
 		for _, e := range r.Entries {
-			if !strings.HasPrefix(e.Ecosystem, "Debian") {
+			if !strings.HasPrefix(strings.ToLower(e.Ecosystem), "debian") {
 				continue
 			}
 			n, ok := debianEcosystemMajor(e.Ecosystem)

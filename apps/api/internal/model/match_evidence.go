@@ -41,6 +41,10 @@ type DistroEvidence struct {
 	Records []string `json:"records"`
 	// FetchedAt is when the distro data was fetched from the source.
 	FetchedAt time.Time `json:"fetched_at"`
+	// DataModified is the data's own revision: the newest `modified` of the
+	// package's OSV records, as fixed-width UTC RFC 3339 (sorts as text). A
+	// relabel never replaces evidence of a newer revision with an older one.
+	DataModified string `json:"data_modified,omitempty"`
 }
 
 // Distro evidence vocabulary.
