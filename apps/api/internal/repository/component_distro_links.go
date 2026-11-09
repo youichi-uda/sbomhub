@@ -322,23 +322,62 @@ func (r *ComponentRepository) ClearDistroWithdrawn(ctx context.Context, componen
 		                           THEN cv.match_evidence->>'prior_method' END,
 		       match_evidence = jsonb_build_object('wm_source', ($3::jsonb->>'source_id'), 'wm_rev', `+withdrawnWMRev+`,
 		           'wm_by_source', `+carriedWM+` || jsonb_build_object($3::jsonb->>'source_id', `+withdrawnWMRev+`),
-		           'withdrawn_by_source', `+carriedTombstones+` || jsonb_build_object($3::jsonb->>'source_id',
+		           'withdrawn_by_source', `+mergedTombstones+`)
+		 WHERE `+withdrawnRowGuard,
+		componentID, vulnID, string(p))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// mergedTombstones: the stored tombstones with $3's added for its source.
+const mergedTombstones = carriedTombstones + ` || jsonb_build_object($3::jsonb->>'source_id',
 		               (CASE WHEN jsonb_typeof(cv.match_evidence->'withdrawn_by_source'->($3::jsonb->>'source_id')) = 'object'
 		                     THEN cv.match_evidence->'withdrawn_by_source'->($3::jsonb->>'source_id') ELSE '{}'::jsonb END)
-		               || ($3::jsonb->'tombstones')))
-		 WHERE cv.component_id = $1
+		               || ($3::jsonb->'tombstones'))`
+
+// withdrawnRowGuard: the row still rests on exactly the evidence the
+// withdrawal was resolved against ($3: source_id, records, tombstones,
+// wm_rev), under the tenant GUC.
+var withdrawnRowGuard = `cv.component_id = $1
 		   AND cv.vulnerability_id = $2
 		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
-		   AND cv.match_method IN (`+distroLabels+`)
+		   AND cv.match_method IN (` + distroLabels + `)
 		   AND jsonb_typeof($3::jsonb->'records') = 'array'
 		   AND jsonb_typeof($3::jsonb->'tombstones') = 'object'
 		   AND ($3::jsonb->>'source_id') IS NOT NULL
 		   AND jsonb_array_length($3::jsonb->'records') > 0
 		   AND cv.match_evidence->>'source_id' IS NOT DISTINCT FROM ($3::jsonb->>'source_id')
 		   AND cv.match_evidence->'records' = $3::jsonb->'records'
-		   AND `+storedRevFor("$3")+` = COALESCE($3::jsonb->>'wm_rev', '')
-		   AND COALESCE($3::jsonb->>'wm_rev', '') <> ''`,
-		componentID, vulnID, string(p))
+		   AND ` + storedRevFor("$3") + ` = COALESCE($3::jsonb->>'wm_rev', '')
+		   AND COALESCE($3::jsonb->>'wm_rev', '') <> ''`
+
+// ReplaceDistroWithdrawn sets the current verdict on a link whose stored
+// label rests on records that were withdrawn or edited out (p, as for
+// ClearDistroWithdrawn), whatever the rank (Codex M70 R37 High-1): the rank
+// rule keeps a label against WEAKER evidence, not against its own evidence
+// being gone. The guard is ClearDistroWithdrawn's; the watermark becomes the
+// newer of the one read and the data's, and the tombstones are merged.
+func (r *ComponentRepository) ReplaceDistroWithdrawn(ctx context.Context, componentID, vulnID uuid.UUID, method model.MatchMethod, evidence, p []byte) (bool, error) {
+	if !method.IsDistro() {
+		return false, fmt.Errorf("%w: %q", ErrNotDistroMethod, string(method))
+	}
+	if len(evidence) == 0 || len(p) == 0 {
+		return false, fmt.Errorf("withdrawn replace: needs the evidence and what it replaces")
+	}
+	res, err := r.q(ctx).ExecContext(ctx, `
+		UPDATE component_vulnerabilities cv
+		   SET match_method = $4,
+		       match_evidence = $5::jsonb || jsonb_build_object(
+		           'prior_method', cv.match_evidence->'prior_method',
+		           'wm_source', ($3::jsonb->>'source_id'), 'wm_rev', `+withdrawnWMRev+`,
+		           'wm_by_source', `+carriedWM+` || jsonb_build_object($3::jsonb->>'source_id', `+withdrawnWMRev+`),
+		           'withdrawn_by_source', `+mergedTombstones+`)
+		 WHERE `+withdrawnRowGuard+`
+		   AND ($5::jsonb->>'source_id') IS NOT DISTINCT FROM ($3::jsonb->>'source_id')`,
+		componentID, vulnID, string(p), string(method), string(evidence))
 	if err != nil {
 		return false, err
 	}

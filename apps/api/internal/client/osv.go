@@ -123,6 +123,7 @@ type OSVPackage struct {
 // OSVRange represents version range information
 type OSVRange struct {
 	Type   string     `json:"type"`
+	Repo   string     `json:"repo,omitempty"`
 	Events []OSVEvent `json:"events"`
 }
 

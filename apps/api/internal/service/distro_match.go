@@ -226,7 +226,16 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 	} else {
 		return distroTarget{}, "unknown_release"
 	}
-	if id != p.namespace && purlNamespaceAlias[p.namespace] != id {
+	// "rocky-linux" is the same family as "rocky" in both the namespace and
+	// the distro qualifier (Codex M70 R37 Medium-3).
+	ns := p.namespace
+	if id == "rocky-linux" {
+		id = "rocky"
+	}
+	if ns == "rocky-linux" {
+		ns = "rocky"
+	}
+	if id != ns && purlNamespaceAlias[ns] != id {
 		return distroTarget{}, "distro_mismatch"
 	}
 	// Identity is compared as stored: surrounding whitespace (any Unicode

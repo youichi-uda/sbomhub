@@ -369,6 +369,34 @@ func rpmDistroAgrees(ecosystem string, quals map[string]string) error {
 	return fmt.Errorf("distro=%s is not a %s release", distro, family)
 }
 
+// validateRangeSchema checks the OSV range requirements (Codex M70 R37
+// Medium-2): a known type, a repo for GIT, at least one introduced event,
+// and never both fixed and last_affected.
+func validateRangeSchema(r OSVRange) error {
+	switch r.Type {
+	case "ECOSYSTEM", "SEMVER":
+	case "GIT":
+		if r.Repo == "" {
+			return fmt.Errorf("GIT range without a repo")
+		}
+	default:
+		return fmt.Errorf("unknown range type %q", r.Type)
+	}
+	introduced, fixed, last := false, false, false
+	for _, e := range r.Events {
+		introduced = introduced || e.Introduced != ""
+		fixed = fixed || e.Fixed != ""
+		last = last || e.LastAffected != ""
+	}
+	if !introduced {
+		return fmt.Errorf("no introduced event")
+	}
+	if fixed && last {
+		return fmt.Errorf("both fixed and last_affected events")
+	}
+	return nil
+}
+
 // validateUbuntuBinaries checks Ubuntu's ecosystem_specific.binaries, when
 // present: a list of objects each with a non-empty, bounded binary_name
 // (Codex M70 R27 Medium-4: a malformed list must fail, not read as absent).
@@ -602,8 +630,11 @@ func validateAffected(a OSVAffected) error {
 			}
 		}
 		for i, r := range a.Ranges {
-			if r.Type != "GIT" || len(r.Events) == 0 {
+			if r.Type != "GIT" {
 				return fmt.Errorf("package-less entry range %d is not a GIT range", i)
+			}
+			if err := validateRangeSchema(r); err != nil {
+				return fmt.Errorf("package-less entry range %d: %w", i, err)
 			}
 		}
 		return nil
@@ -628,6 +659,9 @@ func validateAffected(a OSVAffected) error {
 	for i, r := range a.Ranges {
 		if strings.TrimSpace(r.Type) == "" || len(r.Events) == 0 {
 			return fmt.Errorf("range %d without a type or events", i)
+		}
+		if err := validateRangeSchema(r); err != nil {
+			return fmt.Errorf("range %d: %w", i, err)
 		}
 		for j, e := range r.Events {
 			n := 0

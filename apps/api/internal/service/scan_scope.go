@@ -209,6 +209,10 @@ type pendingLink struct {
 	withdrawnClear bool
 	// wasDistro (M70): the link was read under a distro label.
 	wasDistro bool
+	// replace (M70): with a distro method, the stored label's records were
+	// all withdrawn / edited out; the verdict replaces it whatever the rank
+	// (ReplaceDistroWithdrawn; this is its guard and tombstones).
+	replace []byte
 }
 
 // linkWriter is the one repository call the write phase makes per link.

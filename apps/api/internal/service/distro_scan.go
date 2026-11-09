@@ -87,8 +87,8 @@ const (
 	// binaries validated (R27); 14: purl distro / arch qualifiers (R31);
 	// 15: rpm distro qualifier, strict subpath (R32); 16: every returned
 	// record id (R34); 17: Ubuntu stream qualifiers, arch-qualified rpm
-	// refused (R35)).
-	distroCachePayloadVersion = 17
+	// refused (R35); 18: OSV range schema (R37)).
+	distroCachePayloadVersion = 18
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -240,6 +240,7 @@ func watermark(d distroData) []byte {
 type distroLinkStore interface {
 	SettleDistroNoVerdictOutcome(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (changed, stillDistro bool, err error)
 	ClearDistroWithdrawn(ctx context.Context, componentID, vulnID uuid.UUID, p []byte) (bool, error)
+	ReplaceDistroWithdrawn(ctx context.Context, componentID, vulnID uuid.UUID, method model.MatchMethod, evidence, p []byte) (bool, error)
 	ListScanTargetsBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error)
 	ListSbomLinks(ctx context.Context, sbomID uuid.UUID) ([]repository.SbomLink, error)
 	RelabelDistro(ctx context.Context, componentID, vulnID uuid.UUID, method model.MatchMethod, evidence []byte) (bool, error)
@@ -405,6 +406,9 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 		switch {
 		case l.withdrawnClear:
 			changed, err = s.store.ClearDistroWithdrawn(txCtx, l.componentID, l.vulnID, l.evidence)
+		case l.replace != nil:
+			changed, err = s.store.ReplaceDistroWithdrawn(txCtx, l.componentID, l.vulnID, l.method, l.evidence, l.replace)
+			stillDistro = true
 		case l.noVerdict:
 			changed, stillDistro, err = s.store.SettleDistroNoVerdictOutcome(txCtx, l.componentID, l.vulnID, l.evidence)
 		default:
@@ -627,6 +631,14 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 				}
 				continue
 			}
+			// A label resting on records now absent: resolved even though the
+			// data gives a verdict, since the rank rule would otherwise keep a
+			// stronger label whose own evidence is gone (Codex M70 R37 High-1).
+			rp, failed := d.withdrawnClear(l, lookup)
+			if failed {
+				counts.LookupFailures++
+				continue // unknown: the row is kept, the failure reported
+			}
 			switch dec.verdict {
 			case verdictAffected:
 				counts.Affected++
@@ -635,7 +647,8 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 			case verdictFixed:
 				counts.Fixed++
 			}
-			g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, method: dec.verdict.method(), evidence: raw})
+			g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, method: dec.verdict.method(), evidence: raw,
+				replace: rp, wasDistro: model.MatchMethod(l.Method).IsDistro()})
 		}
 		if len(g) > 0 {
 			groups = append(groups, g)

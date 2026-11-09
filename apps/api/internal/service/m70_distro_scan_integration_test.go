@@ -1057,3 +1057,51 @@ func TestM70PromotePriorMethod_SkipsLockedRows(t *testing.T) {
 		t.Errorf("promotion waited %v for a locked row", d)
 	}
 }
+
+// Codex M70 R37 High-1: ReplaceDistroWithdrawn sets the current verdict over
+// a stronger label whose records were withdrawn, only on the exact row read.
+func TestM70ReplaceDistroWithdrawn(t *testing.T) {
+	e := m70Seed(t, "m70replwd")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const rev = "2026-11-05T00:00:00.000000000Z"
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"S","fixed":"a","records":["A","B"],"data_modified":"`+rev+`"}`))
+		return err
+	})
+	fixedEv := []byte(`{"source":"osv","source_id":"S","status":"fixed","fixed":"b","records":["B"],"data_modified":"2026-11-01T00:00:00.000000000Z"}`)
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.ReplaceDistroWithdrawn(c, e.openssl, e.v0286, model.MatchDistroFixed, fixedEv,
+			[]byte(`{"source_id":"S","records":["A"],"tombstones":{"A":"`+rev+`"},"wm_rev":"`+rev+`","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		if changed {
+			t.Error("replaced with the wrong record list")
+		}
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.ReplaceDistroWithdrawn(c, e.openssl, e.v0286, model.MatchDistroFixed, fixedEv,
+			[]byte(`{"source_id":"S","records":["A","B"],"tombstones":{"A":"2026-11-06T00:00:00.000000000Z"},"wm_rev":"`+rev+`","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		if !changed {
+			t.Error("exact withdrawn replace refused")
+		}
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_fixed" || r.evidence.Fixed != "b" {
+		t.Errorf("%+v", r)
+	}
+	var prior, wm, tomb string
+	if err := e.migDB.QueryRow(`SELECT COALESCE(match_evidence->>'prior_method',''), match_evidence->'wm_by_source'->>'S', match_evidence->'withdrawn_by_source'->'S'->>'A'
+		FROM component_vulnerabilities WHERE component_id = $1 AND vulnerability_id = $2`, e.openssl, e.v0286).Scan(&prior, &wm, &tomb); err != nil {
+		t.Fatal(err)
+	}
+	if prior != "nvd_cpe_unverified" || wm != rev || tomb != "2026-11-06T00:00:00.000000000Z" {
+		t.Errorf("prior=%q wm=%q tomb=%q", prior, wm, tomb)
+	}
+}
