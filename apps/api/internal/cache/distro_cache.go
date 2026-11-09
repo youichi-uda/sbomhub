@@ -75,18 +75,15 @@ func (c *DistroCache) Get(ctx context.Context, source, ecosystem, name string) (
 	}
 	ctx, cancel := opContext(ctx)
 	defer cancel()
-	key := DistroCacheKey(source, ecosystem, name)
-	if n, err := c.client.StrLen(ctx, key).Result(); err != nil {
-		return nil, fmt.Errorf("redis strlen error: %w", err)
-	} else if n == 0 || n > DistroCacheMaxBytes {
-		return nil, nil
+	// One bounded read (Codex M70 R4 Medium-4): GETRANGE returns at most
+	// DistroCacheMaxBytes+1 bytes whatever the stored value is, and a value
+	// longer than the bound is a miss.
+	data, err := c.client.GetRange(ctx, DistroCacheKey(source, ecosystem, name), 0, DistroCacheMaxBytes).Bytes()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("redis getrange error: %w", err)
 	}
-	data, err := c.client.Get(ctx, key).Bytes()
-	if err == redis.Nil {
+	if len(data) == 0 || len(data) > DistroCacheMaxBytes {
 		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("redis get error: %w", err)
 	}
 	var e DistroCacheEntry
 	if err := json.Unmarshal(data, &e); err != nil || e.FetchedAt.IsZero() || len(e.Payload) == 0 {
@@ -103,6 +100,9 @@ func (c *DistroCache) Set(ctx context.Context, source, ecosystem, name string, e
 	data, err := json.Marshal(e)
 	if err != nil {
 		return fmt.Errorf("failed to marshal distro cache entry: %w", err)
+	}
+	if len(data) > DistroCacheMaxBytes {
+		return fmt.Errorf("distro cache entry of %d bytes exceeds %d", len(data), DistroCacheMaxBytes)
 	}
 	ctx, cancel := opContext(ctx)
 	defer cancel()

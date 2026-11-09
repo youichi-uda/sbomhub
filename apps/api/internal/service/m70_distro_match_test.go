@@ -70,6 +70,10 @@ func TestM70DistroTarget(t *testing.T) {
 			if reason != c.reason {
 				t.Fatalf("reason = %q, want %q (target %+v)", reason, c.reason, got)
 			}
+			if c.reason == "" && got.binary == "" {
+				t.Errorf("no binary name in %+v", got)
+			}
+			got.binary = "" // checked above; the table states the rest
 			if c.reason == "" && got != c.want {
 				t.Errorf("target = %+v\nwant     %+v", got, c.want)
 			}
@@ -221,7 +225,12 @@ func entry(eco string, events ...string) distroEntry {
 
 func TestM70Decide(t *testing.T) {
 	deb11 := distroTarget{family: "debian", query: "Debian", release: "Debian:11", releaseMajor: 11, pkg: "openssl", version: "1.1.1k-1", scheme: schemeDpkg}
-	ubu := distroTarget{family: "ubuntu", query: "Ubuntu:22.04:LTS", release: "Ubuntu:22.04:LTS", pkg: "openssl", version: "3.0.2-0ubuntu1.10", scheme: schemeDpkg}
+	ubu := distroTarget{family: "ubuntu", query: "Ubuntu:22.04:LTS", release: "Ubuntu:22.04:LTS", pkg: "openssl", binary: "openssl", version: "3.0.2-0ubuntu1.10", scheme: schemeDpkg}
+	ubuEntry := func(eco string, events ...string) distroEntry {
+		e := entry(eco, events...)
+		e.Binaries, e.BinariesListed = []string{"libssl3", "openssl"}, true
+		return e
+	}
 	cve := []string{"CVE-2021-3711"}
 	for _, c := range []struct {
 		name     string
@@ -298,7 +307,7 @@ func TestM70Decide(t *testing.T) {
 			recs:   []distroRecord{rec("UBUNTU-CVE-2021-3711", cve, entry("Ubuntu:24.04:LTS", "i", "0", "f", "1.0-1"))},
 			reason: "release_not_listed"},
 		{name: "Ubuntu release fixed", t: ubu,
-			recs:    []distroRecord{rec("UBUNTU-CVE-2021-3711", cve, entry("Ubuntu:22.04:LTS", "i", "0", "f", "3.0.2-0ubuntu1.6"))},
+			recs:    []distroRecord{rec("UBUNTU-CVE-2021-3711", cve, ubuEntry("Ubuntu:22.04:LTS", "i", "0", "f", "3.0.2-0ubuntu1.6"))},
 			verdict: verdictFixed, basis: "release", fixed: "3.0.2-0ubuntu1.6", records: "UBUNTU-CVE-2021-3711"},
 		{name: "no record for the CVE", t: deb11, recs: []distroRecord{rec("DSA-9", []string{"CVE-2099-0001"}, entry("Debian:11", "i", "0"))},
 			reason: "no_record"},

@@ -72,8 +72,8 @@ const (
 	// ~7 MB per 3,000-record page.
 	distroMaxBytesPerPackage = 96 << 20
 	// distroCachePayloadVersion is bumped with the distroRecord format
-	// (2: Releases / Packages, Codex M70 R2).
-	distroCachePayloadVersion = 2
+	// (2: Releases / Packages, Codex M70 R2; 3: Ubuntu binaries, R4).
+	distroCachePayloadVersion = 3
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -272,17 +272,17 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 	}
 	close(keyCh)
 	wg.Wait()
-	if rep.Unfetched > 0 {
-		if scanDeadlineFired(ctx) {
-			rep.DeadlineExceeded = true
-		} else {
-			rep.Cancelled = true
-		}
-	}
+	rep.noteInterruption(ctx)
 
 	// Decide, per component, per link.
 	var groups [][]pendingLink
 	for _, w := range work {
+		if ctx.Err() != nil {
+			// Ended while deciding: what is decided is written, and the
+			// step reports the interruption (Codex M70 R4 Medium-5).
+			rep.noteInterruption(ctx)
+			break
+		}
 		k := w.target.fetchKey()
 		d, ok := data[k]
 		if !ok {
@@ -335,6 +335,18 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 	rep.Relabelled = relabelled
 	s.logSummary(sbomID, rep)
 	return rep, rep.incompleteErr()
+}
+
+// noteInterruption records that the scan's context has ended (deadline or
+// cancellation), whatever phase noticed it.
+func (r *DistroScanReport) noteInterruption(ctx context.Context) {
+	switch cause := scanInterruption(ctx); {
+	case cause == nil:
+	case errors.Is(cause, ErrScanDeadlineExceeded):
+		r.DeadlineExceeded = true
+	default:
+		r.Cancelled = true
+	}
 }
 
 // incompleteErr names every reason the step is incomplete.

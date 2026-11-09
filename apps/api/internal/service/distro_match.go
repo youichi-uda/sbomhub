@@ -74,6 +74,8 @@ type distroTarget struct {
 	// pkg is the OSV package name: the SOURCE package for Debian/Ubuntu,
 	// the binary package for the rpm distros.
 	pkg string
+	// binary is the installed (binary) package name, the purl's name.
+	binary string
 	// version is the installed version, in the distro's syntax.
 	version string
 	scheme  distroScheme
@@ -223,7 +225,13 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 		if mismatch(pkgversion.CompareDpkg, version, compVersion) {
 			return distroTarget{}, "version_mismatch"
 		}
-		t.pkg, t.version = p.name, version
+		// Without an `upstream` qualifier the source package is taken to be
+		// the binary's own name: dpkg omits the Source field exactly when
+		// the two are equal, and Syft derives `upstream` from that field.
+		// (Codex M70 R4 High-2, declined for Debian — its data names no
+		// binaries to check against; for Ubuntu every entry is checked
+		// against its own binaries list, see decide.)
+		t.pkg, t.binary, t.version = p.name, p.name, version
 		up, ok := p.qualifier("upstream")
 		if !ok {
 			return distroTarget{}, "ambiguous_qualifier"
@@ -266,7 +274,7 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 		}
 	case "rpm":
 		t.scheme = schemeRPM
-		t.pkg = p.name
+		t.pkg, t.binary = p.name, p.name
 		epoch, ok := p.qualifier("epoch")
 		if !ok {
 			return distroTarget{}, "ambiguous_qualifier"
@@ -384,6 +392,49 @@ type distroEntry struct {
 	Ecosystem string            `json:"ecosystem"`
 	Ranges    []client.OSVRange `json:"ranges,omitempty"`
 	Versions  []string          `json:"versions,omitempty"`
+	// Binaries are the binary packages the entry applies to, when the data
+	// says (Ubuntu: ecosystem_specific.binaries); BinariesListed tells an
+	// empty list from an absent one.
+	Binaries       []string `json:"binaries,omitempty"`
+	BinariesListed bool     `json:"binaries_listed,omitempty"`
+}
+
+// entryBinaries reads Ubuntu's ecosystem_specific.binaries[].binary_name.
+// ok is false when the field is absent or not of that shape.
+func entryBinaries(es map[string]interface{}) ([]string, bool) {
+	raw, present := es["binaries"]
+	if !present {
+		return nil, false
+	}
+	list, isList := raw.([]interface{})
+	if !isList {
+		return nil, false
+	}
+	var out []string
+	for _, item := range list {
+		m, isMap := item.(map[string]interface{})
+		if !isMap {
+			return nil, false
+		}
+		name, isStr := m["binary_name"].(string)
+		if !isStr || name == "" {
+			return nil, false
+		}
+		out = append(out, name)
+	}
+	return out, true
+}
+
+func (e distroEntry) namesBinary(b string) bool {
+	if !e.BinariesListed {
+		return false
+	}
+	for _, x := range e.Binaries {
+		if x == b {
+			return true
+		}
+	}
+	return false
 }
 
 // reduceOSVRecords keeps, of each non-withdrawn record, the CVE ids it is
@@ -428,7 +479,9 @@ func reduceOSVRecords(recs []client.OSVPackageRecord, pkg string) []distroRecord
 			if a.Package.Name != pkg || a.Package.Ecosystem == "" {
 				continue
 			}
-			entries = append(entries, distroEntry{Ecosystem: a.Package.Ecosystem, Ranges: a.Ranges, Versions: a.Versions})
+			bins, listed := entryBinaries(a.EcosystemSpecific)
+			entries = append(entries, distroEntry{Ecosystem: a.Package.Ecosystem, Ranges: a.Ranges, Versions: a.Versions,
+				Binaries: bins, BinariesListed: listed})
 		}
 		if len(entries) == 0 {
 			continue
@@ -603,6 +656,13 @@ func (d distroData) decide(t distroTarget, cveID string) distroDecision {
 				continue
 			}
 			sawExact = true
+			if t.family == "ubuntu" && !e.namesBinary(t.binary) {
+				// Ubuntu lists the binaries each entry applies to; another
+				// binary of the same source is not vouched for (Codex M70 R4
+				// High-3), nor is any binary when the list is absent.
+				excluded = true
+				continue
+			}
 			switch {
 			case r.isCVERecord():
 			case t.family == "ubuntu" && len(cveRecs) > 0:
@@ -796,14 +856,21 @@ func debianEcosystemMajor(eco string) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	// The whole suffix: "12", or "6.0" / "3.1" (Codex M70 R3 High-3).
-	major, minor, hasMinor := strings.Cut(rest, ".")
-	if !isDigits(major) || (hasMinor && !isDigits(minor)) {
+	// Canonical forms only (Codex M70 R3 High-3, R4 High-1): "N" with no
+	// leading zero, or one of OSV's historical names.
+	if n, ok := debianHistoricalEcosystems[rest]; ok {
+		return n, true
+	}
+	major := rest
+	if !isDigits(major) || major[0] == '0' || len(major) > 3 {
 		return 0, false
 	}
 	n, err := strconv.Atoi(major)
 	return n, err == nil && n > 0
 }
+
+// debianHistoricalEcosystems are the dotted Debian ecosystem names OSV uses.
+var debianHistoricalEcosystems = map[string]int{"3.0": 3, "3.1": 3, "4.0": 4, "5.0": 5, "6.0": 6}
 
 // versionCmp compares two versions of the target's scheme.
 type versionCmp func(a, b string) (int, error)
