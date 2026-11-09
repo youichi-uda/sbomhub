@@ -486,3 +486,49 @@ func TestM70DistroFreshness_DBAndCache(t *testing.T) {
 		t.Errorf("cache = %+v, %v; want the newer payload", got, err)
 	}
 }
+
+// Codex M70 R12 High-1: a stale distro label is cleared back to the method
+// the link had before the distro step — only with data of the same endpoint
+// that is at least as new.
+func TestM70ClearDistro_RestoresPriorMethod(t *testing.T) {
+	e := m70Seed(t, "m70clear")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ev := `{"source":"osv","source_url":"https://a/v1","data_modified":"2026-11-05T00:00:00.000000000Z"}`
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed, []byte(ev))
+		return err
+	})
+	run(func(c context.Context) error { // fixed -> affected keeps the ORIGINAL prior method
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected, []byte(ev))
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_affected" {
+		t.Fatalf("%+v", r)
+	}
+	for _, g := range []string{
+		`{"source_url":"https://b/v1","data_modified":"2026-11-09T00:00:00.000000000Z"}`, // another endpoint
+		`{"source_url":"https://a/v1","data_modified":"2026-11-01T00:00:00.000000000Z"}`, // older data
+	} {
+		run(func(c context.Context) error {
+			changed, err := e.compRepo.ClearDistro(c, e.openssl, e.v0286, []byte(g))
+			if changed {
+				t.Errorf("cleared with guard %s", g)
+			}
+			return err
+		})
+	}
+	run(func(c context.Context) error {
+		_, err := e.compRepo.ClearDistro(c, e.openssl, e.v0286, []byte(`{"source_url":"https://a/v1","data_modified":"2026-11-06T00:00:00.000000000Z"}`))
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "nvd_cpe_unverified" || r.hasEv {
+		t.Errorf("after clear: %+v, want nvd_cpe_unverified with no evidence", r)
+	}
+}

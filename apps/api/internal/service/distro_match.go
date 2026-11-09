@@ -711,12 +711,16 @@ func indexDistroRecords(recs []distroRecord) distroData {
 // UBUNTU-CVE-<id>, or an id that is itself a CVE) is generated for, or "".
 // The suffix must be a canonical CVE id (Codex M70 R9 High-3).
 func (r *distroRecord) recordCVE() string {
+	// Exactly one of three forms (Codex M70 R12 High-3): "CVE-…",
+	// "DEBIAN-CVE-…", "UBUNTU-CVE-…".
 	id := strings.ToUpper(strings.TrimSpace(r.ID))
-	for _, pfx := range []string{"DEBIAN-", "UBUNTU-"} {
-		id = strings.TrimPrefix(id, pfx)
-	}
 	if isCVEID(id) {
 		return id
+	}
+	for _, pfx := range []string{"DEBIAN-", "UBUNTU-"} {
+		if rest, ok := strings.CutPrefix(id, pfx); ok && isCVEID(rest) {
+			return rest
+		}
 	}
 	return ""
 }

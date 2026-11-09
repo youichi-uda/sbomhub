@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -73,12 +74,20 @@ const (
 	distroMaxBytesPerPackage = 96 << 20
 	// distroCachePayloadVersion is bumped with the distroRecord format
 	// (2: Releases / Packages, Codex M70 R2; 3: Ubuntu binaries, R4;
-	// 4: record modified, R8).
-	distroCachePayloadVersion = 4
+	// 4: record modified, R8; 5: records validated as since R11, R12).
+	distroCachePayloadVersion = 5
 )
 
 // distroLinkStore is the repository surface the step uses.
+// clearEvidence is what a clear is guarded by: the endpoint and revision of
+// the data that no longer supports the label.
+func clearEvidence(d distroData) []byte {
+	b, _ := json.Marshal(model.DistroEvidence{Source: model.DistroSourceOSV, SourceURL: d.source, DataModified: d.revision})
+	return b
+}
+
 type distroLinkStore interface {
+	ClearDistro(ctx context.Context, componentID, vulnID uuid.UUID, guard []byte) (bool, error)
 	ListScanTargetsBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error)
 	ListSbomLinks(ctx context.Context, sbomID uuid.UUID) ([]repository.SbomLink, error)
 	RelabelDistro(ctx context.Context, componentID, vulnID uuid.UUID, method model.MatchMethod, evidence []byte) (bool, error)
@@ -138,6 +147,9 @@ type DistroScanReport struct {
 	// Verdicts by label, and links with no verdict (by reason).
 	Affected, Unfixed, Fixed int
 	NoVerdict                map[string]int
+	// Cleared: links whose stored distro label the current data no longer
+	// supports, queued to go back to their earlier method.
+	Cleared int
 	// LinksKeptForFailure: links of a package whose data failed.
 	LinksKeptForFailure int
 	// Relabelled: relabel statements that changed a row (a group later
@@ -226,7 +238,13 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 	// Phase 3 — write.
 	relabelled := 0
 	refused, _, werr := scope.writeLinks(ctx, sbomID, groups, func(txCtx context.Context, l pendingLink) error {
-		changed, err := s.store.RelabelDistro(txCtx, l.componentID, l.vulnID, l.method, l.evidence)
+		var changed bool
+		var err error
+		if l.clear {
+			changed, err = s.store.ClearDistro(txCtx, l.componentID, l.vulnID, l.evidence)
+		} else {
+			changed, err = s.store.RelabelDistro(txCtx, l.componentID, l.vulnID, l.method, l.evidence)
+		}
 		if changed {
 			relabelled++
 		}
@@ -316,6 +334,7 @@ func (s *DistroService) fetchAndDecide(ctx context.Context, work []distroWork, b
 				default:
 					groups = append(groups, g...)
 					rep.Affected += counts.Affected
+					rep.Cleared += counts.Cleared
 					rep.Unfixed += counts.Unfixed
 					rep.Fixed += counts.Fixed
 					for r, n := range counts.NoVerdict {
@@ -354,6 +373,15 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 			dec := d.decide(w.target, l.CVEID)
 			if dec.verdict == verdictNone {
 				counts.NoVerdict[dec.reason]++
+				if model.MatchMethod(l.Method).IsDistro() {
+					// The complete, current data no longer supports the
+					// stored distro label: clear it back to the method it
+					// had before (Codex M70 R12 High-1). The write is
+					// guarded by endpoint and revision like a relabel.
+					g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, clear: true,
+						evidence: clearEvidence(d)})
+					counts.Cleared++
+				}
 				continue
 			}
 			dec.evidence.FetchedAt = fetchedAt.UTC()
@@ -418,7 +446,7 @@ func (s *DistroService) logSummary(sbomID uuid.UUID, r DistroScanReport) {
 		"untargeted", r.Untargeted, "packages", r.Packages, "cache_hits", r.CacheHits, "requests", r.Requests,
 		"fetch_failures", r.FetchFailures, "unfetched", r.Unfetched,
 		"affected", r.Affected, "unfixed", r.Unfixed, "fixed", r.Fixed, "no_verdict", r.NoVerdict,
-		"relabelled", r.Relabelled, "refused_writes", r.RefusedWrites,
+		"cleared", r.Cleared, "relabelled", r.Relabelled, "refused_writes", r.RefusedWrites,
 		"deadline_exceeded", r.DeadlineExceeded, "cancelled", r.Cancelled,
 	}
 	if r.FetchFailures > 0 || r.Unfetched > 0 || r.RefusedWrites > 0 {
@@ -454,12 +482,20 @@ func (s *DistroService) pacer() func(context.Context) error {
 // multiply the per-query memory bound (Codex M70 R2 High-3).
 var distroQuerySlots = make(chan struct{}, 2)
 
-// distroSource is the cache identity of an OSV endpoint.
+// distroSource is the identity of an OSV endpoint, used in cache keys and
+// shown in evidence (source_url). It is scheme://host[:port]/path only: no
+// credentials, query or fragment ever reach a tenant through the API
+// (Codex M70 R12 High-4).
 func distroSource(osvBaseURL string) string {
-	if strings.TrimSpace(osvBaseURL) == "" {
-		return client.DefaultOSVBaseURL
+	raw := strings.TrimSpace(osvBaseURL)
+	if raw == "" {
+		raw = client.DefaultOSVBaseURL
 	}
-	return strings.TrimRight(strings.TrimSpace(osvBaseURL), "/")
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "configured-endpoint"
+	}
+	return u.Scheme + "://" + u.Host + strings.TrimRight(u.EscapedPath(), "/")
 }
 
 // distroCachePayload is what the cache entry holds for one package.
@@ -550,7 +586,8 @@ func (s *DistroService) loadSlotted(ctx context.Context, k distroFetchKey, pace 
 // build wrote (the cache is shared and outlives builds).
 func validDistroRecords(recs []distroRecord) bool {
 	for _, r := range recs {
-		if strings.TrimSpace(r.ID) == "" || len(r.CVEs) == 0 || len(r.Entries) == 0 || r.Releases < 1 || r.Packages < 1 {
+		if strings.TrimSpace(r.ID) == "" || len(r.CVEs) == 0 || len(r.Entries) == 0 || r.Releases < 1 || r.Packages < 1 ||
+			r.Modified == "" || normaliseModified(r.Modified) != r.Modified {
 			return false
 		}
 		for _, c := range r.CVEs {

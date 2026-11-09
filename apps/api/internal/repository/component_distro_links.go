@@ -46,6 +46,39 @@ func (r *ComponentRepository) ListSbomLinks(ctx context.Context, sbomID uuid.UUI
 	return out, rows.Err()
 }
 
+// ClearDistro takes a distro label the current data no longer supports back
+// to the method the link had before the distro step (evidence prior_method;
+// NULL = unknown when there was none) and drops the evidence. It is guarded
+// like a relabel: only a distro label, only with data of the same endpoint
+// that is at least as new (guard: {"source_url", "data_modified"}), only for
+// a component visible under the tenant GUC. It reports whether a row
+// changed.
+func (r *ComponentRepository) ClearDistro(ctx context.Context, componentID, vulnID uuid.UUID, guard []byte) (bool, error) {
+	if len(guard) == 0 {
+		return false, fmt.Errorf("clear: needs the data's endpoint and revision")
+	}
+	res, err := r.q(ctx).ExecContext(ctx, `
+		UPDATE component_vulnerabilities cv
+		   SET match_method = CASE WHEN cv.match_evidence->>'prior_method' IN (`+priorMethodVocabulary+`)
+		                           THEN cv.match_evidence->>'prior_method' END,
+		       match_evidence = NULL
+		 WHERE cv.component_id = $1
+		   AND cv.vulnerability_id = $2
+		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
+		   AND cv.match_method IN ('distro_affected', 'distro_unfixed', 'distro_fixed')
+		   AND (cv.match_evidence->>'source_url') IS NOT DISTINCT FROM ($3::jsonb->>'source_url')
+		   AND COALESCE(cv.match_evidence->>'data_modified', '') <= COALESCE($3::jsonb->>'data_modified', '')`,
+		componentID, vulnID, string(guard))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// priorMethodVocabulary: the non-distro methods a clear may restore.
+const priorMethodVocabulary = `'nvd_cpe', 'nvd_cpe_distro', 'nvd_cpe_unverified', 'nvd_keyword', 'jvn_keyword', 'cve_sync_keyword'`
+
 // relabelDistroFreshness keeps any write over a distro label — a refresh of
 // the same label or an upgrade to a stronger one — from replacing evidence
 // of a NEWER data revision with an older one (two overlapping scans whose
@@ -87,14 +120,21 @@ func (r *ComponentRepository) RelabelDistro(ctx context.Context, componentID, vu
 	}
 	res, err := r.q(ctx).ExecContext(ctx, `
 		UPDATE component_vulnerabilities cv
-		   SET match_method = $3, match_evidence = $4::jsonb
+		   SET match_method = $3,
+		       -- prior_method: the method before the FIRST distro label,
+		       -- carried across distro relabels, so a clear can restore it
+		       -- (Codex M70 R12 High-1).
+		       match_evidence = $4::jsonb || jsonb_build_object('prior_method',
+		           CASE WHEN cv.match_method IN ('distro_affected', 'distro_unfixed', 'distro_fixed')
+		                THEN cv.match_evidence->'prior_method'
+		                ELSE to_jsonb(cv.match_method) END)
 		 WHERE cv.component_id = $1
 		   AND cv.vulnerability_id = $2
 		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
 		   AND (cv.match_method IS NULL
 		        OR cv.match_method = ANY($5)
 		        OR (cv.match_method = $3
-		            AND (cv.match_evidence - 'fetched_at') IS DISTINCT FROM ($4::jsonb - 'fetched_at')))
+		            AND (cv.match_evidence - 'fetched_at' - 'prior_method') IS DISTINCT FROM ($4::jsonb - 'fetched_at')))
 		   AND (COALESCE(cv.match_method, '') NOT IN ('distro_affected', 'distro_unfixed', 'distro_fixed')
 		        OR `+relabelDistroFreshness+`)`,
 		componentID, vulnID, string(method), string(evidence), pq.Array(model.WeakerMatchMethods(method)))
