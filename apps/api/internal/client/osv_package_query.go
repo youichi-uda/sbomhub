@@ -297,6 +297,12 @@ func purlQualifiersAgree(ecosystem, typ string, quals map[string]string) error {
 		if a, ok := quals["arch"]; ok {
 			return fmt.Errorf("arch=%s: architecture-qualified rpm entries are not supported", a)
 		}
+		// The epoch qualifier is not carried into the range comparison, so
+		// an entry stating one could be read under the wrong epoch (Codex
+		// M70 R50 High-1): refused until it is.
+		if e, ok := quals["epoch"]; ok {
+			return fmt.Errorf("epoch=%s: epoch-qualified rpm entries are not supported", e)
+		}
 		return rpmDistroAgrees(ecosystem, quals)
 	}
 	if typ != "deb" {

@@ -31,3 +31,10 @@ func TestM70R49_RPMDistroSuffix(t *testing.T) {
 		}
 	}
 }
+
+// Codex M70 R50 High-1: an epoch-qualified rpm affected entry is refused.
+func TestM70R50_RPMEpochQualifier(t *testing.T) {
+	if err := r32Query(t, "AlmaLinux:9", "pkg:rpm/almalinux/p?epoch=1"); err == nil {
+		t.Error("epoch-qualified rpm entry accepted")
+	}
+}
