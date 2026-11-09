@@ -71,17 +71,18 @@ func TestM70R30_MultiPageConsistency(t *testing.T) {
 // what was written, per savepoint group, and only for released groups.
 func TestM70R30_ClearedCountsOnlyRealClears(t *testing.T) {
 	var tl writeTally
-	settle := pendingLink{noVerdict: true, wasDistro: true}
-	tl.note(settle, true, true)                        // watermark merged, label kept
-	tl.note(settle, true, false)                       // label cleared
-	tl.note(pendingLink{noVerdict: true}, true, false) // a non-distro link's watermark
-	tl.note(pendingLink{method: "distro_fixed"}, true, true)
-	tl.note(settle, false, false) // nothing changed
+	tl.note(true, true, true)   // watermark merged, label kept
+	tl.note(true, true, false)  // label cleared
+	tl.note(false, true, false) // a non-distro link's watermark
+	tl.note(false, true, true)  // a relabel
+	tl.note(true, false, false) // nothing changed
+	tl.curSkipped++
 	tl.groupDone(true)
-	tl.note(settle, true, false)
+	tl.note(true, true, false)
+	tl.curSkipped++
 	tl.groupDone(false) // rolled back
-	if tl.relabelled != 4 || tl.cleared != 1 {
-		t.Errorf("relabelled=%d cleared=%d, want 4 / 1", tl.relabelled, tl.cleared)
+	if tl.relabelled != 4 || tl.cleared != 1 || tl.skipped != 1 {
+		t.Errorf("relabelled=%d cleared=%d skipped=%d, want 4 / 1 / 1", tl.relabelled, tl.cleared, tl.skipped)
 	}
 }
 

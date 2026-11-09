@@ -207,7 +207,8 @@ type pendingLink struct {
 	// withdrawnClear (M70): the label's evidence records were all withdrawn;
 	// evidence then holds {source_id, records, wm_rev} (ClearDistroWithdrawn).
 	withdrawnClear bool
-	// wasDistro (M70): the link was read under a distro label.
+	// wasDistro (M70): the link was read under a distro label (the write
+	// counts clears from the row as locked, not from this).
 	wasDistro bool
 	// replace (M70): with a distro method, the stored label's records were
 	// all withdrawn / edited out; the verdict replaces it whatever the rank

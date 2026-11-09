@@ -384,3 +384,23 @@ func (r *ComponentRepository) ReplaceDistroWithdrawn(ctx context.Context, compon
 	n, err := res.RowsAffected()
 	return n == 1, err
 }
+
+// LockDistroLink takes the link's row lock WITHOUT waiting (Codex M70 R39
+// High-1): the distro writer locks each row this way before its write, so it
+// never waits on a row another transaction holds (the CVE sync, an NVD sweep)
+// and cannot be part of a lock cycle; a row it cannot lock now is left for
+// the next scan. It returns the row's method as locked (for counting what the
+// write then changed); ok is false when the row is locked elsewhere or gone.
+func (r *ComponentRepository) LockDistroLink(ctx context.Context, componentID, vulnID uuid.UUID) (method string, ok bool, err error) {
+	err = r.q(ctx).QueryRowContext(ctx, `
+		SELECT COALESCE(cv.match_method, '')
+		  FROM component_vulnerabilities cv
+		 WHERE cv.component_id = $1
+		   AND cv.vulnerability_id = $2
+		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
+		   FOR UPDATE OF cv SKIP LOCKED`, componentID, vulnID).Scan(&method)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return method, err == nil, err
+}

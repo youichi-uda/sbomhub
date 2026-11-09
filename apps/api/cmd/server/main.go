@@ -700,7 +700,7 @@ func main() {
 	// M70: the distro step of every scan relabels a distro package's links
 	// from the distro's own fixed-version data (OSV, SBOMHUB_OSV_URL), cached
 	// in Redis like the NVD answers. Offline mode makes it a no-op.
-	distroService := service.NewDistroService(componentRepo, cfg.OSVURL, cache.NewDistroCache(rdb), cfg.Offline)
+	distroService := service.NewDistroServiceWithSourceID(componentRepo, cfg.OSVURL, cfg.OSVSourceID, cache.NewDistroCache(rdb), cfg.Offline)
 	statsService := service.NewStatsService(statsRepo)
 	vexService := service.NewVEXService(vexRepo, vulnRepo)
 	licensePolicyService := service.NewLicensePolicyService(licensePolicyRepo, componentRepo, sbomRepo)

@@ -51,6 +51,13 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 
 **スキャン期限。** 既定値 30 分は、計測した中で最も遅いスキャンのおよそ 2 倍です: `NVD_API_KEY` なしで Linux kernel を含む SBOM を cold cache でスキャンすると、NVD への 68 request で 14 分 24 秒かかりました (live NVD、2026-11-08)。API キーなしでは NVD への request が 1 件 6 秒に制限されるため、30 分に入る NVD request は 300 件未満です。component 1 件あたり keyword 経路で 1 request、CPE 経路で通常 1〜5 request かかる (UPGRADE §13.5) ので、distinct な component がおよそ 100〜250 を超える SBOM は `NVD_API_KEY` (1 件 0.7 秒) を設定するか期限を延ばさないと時間内に終わりません。期限に達すると、それまでに得た検出結果は commit され、スキャンは `failed` と報告されます — `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` が `"reasons": ["deadline_exceeded"]` を返し、定期スキャンのログは `scan failed (deadline_exceeded)` になります — また、完全な回答としては何も cache されません。API は期限を名指しする `WARN` を出力します。NVD / JVN の応答を待つ間に DB のトランザクションは保持しないため、期限を長くしても接続やロックは消費しません。
 
+### OSV (ディストリビューション別の照合)
+
+| 変数 | 既定値 | 説明 |
+|------|--------|------|
+| `SBOMHUB_OSV_URL` | (空 = `https://api.osv.dev/v1`) | OSV API の base URL。スキャンは NVD / JVN の後、Debian / Ubuntu / AlmaLinux / Rocky Linux のパッケージの link を OSV にあるディストリビューション自身の修正版から再ラベルします (`distro_affected` / `distro_fixed`)。link の追加・削除はしません。mirror の URL は path の接頭辞と query (資格情報など) を含めてよく、どちらも保持されます。`SBOMHUB_OFFLINE=true` のときは通信しません。 |
+| `SBOMHUB_OSV_SOURCE_ID` | (空) | `SBOMHUB_OSV_URL` の背後のデータセットの固定名。ラベルとその版の順序は source ごとに保持され、既定では URL そのもの (資格情報を含む) が source なので、mirror の資格情報を入れ替えると新しい source となり、旧 source が書いたラベルを新 source の判定では消せません。資格情報の変更をまたいで同じ source とするには名前 (任意の文字列、例: `corp-osv-mirror`) を設定してください。別の名前は本当に別のデータセットにだけ使ってください。 |
+
 ### LLM プロバイダ (AI 機能・BYOK)
 
 AI VEX トリアージ / CRA 報告書ドラフト / 経産省自己評価プリフィルなどの AI 機能は **完全 BYOK (Bring Your Own Key)** です。バンドルされた鍵はありません。下記いずれか 1 プロバイダを設定すれば AI 機能が有効化されます。未設定の場合は AI 機能が graceful に無効化され、手動 VEX / 手動 CRA 報告 / 手動自己評価などの従来機能はそのまま動作します。

@@ -1118,3 +1118,35 @@ func TestM70DistroLabelNeedsEvidence(t *testing.T) {
 		t.Error("LinkComponent accepted a distro method")
 	}
 }
+
+// Codex M70 R39 High-1: the distro writer never waits on a row another
+// transaction holds; the row is left for the next scan and counted.
+func TestM70LockDistroLink_NoWait(t *testing.T) {
+	e := m70Seed(t, "m70nowait")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	holder, err := e.migDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.Exec(`SELECT 1 FROM component_vulnerabilities WHERE component_id = $1 AND vulnerability_id = $2 FOR UPDATE`, e.openssl, e.v0286); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if err := scope.writeTx(ctx, e.sbom, func(c context.Context) error {
+		if _, ok, err := e.compRepo.LockDistroLink(c, e.openssl, e.v0286); err != nil || ok {
+			t.Errorf("locked a held row: ok=%v err=%v", ok, err)
+		}
+		m, ok, err := e.compRepo.LockDistroLink(c, e.openssl, e.v3449)
+		if err != nil || !ok || m != "nvd_cpe_unverified" {
+			t.Errorf("free row: %q ok=%v err=%v", m, ok, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(started); d > 2*time.Second {
+		t.Errorf("waited %v", d)
+	}
+}

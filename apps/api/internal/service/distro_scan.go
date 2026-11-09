@@ -241,6 +241,7 @@ type distroLinkStore interface {
 	SettleDistroNoVerdictOutcome(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (changed, stillDistro bool, err error)
 	ClearDistroWithdrawn(ctx context.Context, componentID, vulnID uuid.UUID, p []byte) (bool, error)
 	ReplaceDistroWithdrawn(ctx context.Context, componentID, vulnID uuid.UUID, method model.MatchMethod, evidence, p []byte) (bool, error)
+	LockDistroLink(ctx context.Context, componentID, vulnID uuid.UUID) (method string, ok bool, err error)
 	ListScanTargetsBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error)
 	ListSbomLinks(ctx context.Context, sbomID uuid.UUID) ([]repository.SbomLink, error)
 	RelabelDistro(ctx context.Context, componentID, vulnID uuid.UUID, method model.MatchMethod, evidence []byte) (bool, error)
@@ -271,11 +272,25 @@ type DistroService struct {
 // NewDistroService builds the step. osvBaseURL "" is OSV's public API;
 // offline (SBOMHUB_OFFLINE) disables every request.
 func NewDistroService(cr *repository.ComponentRepository, osvBaseURL string, distroCache *cache.DistroCache, offline bool) *DistroService {
+	return NewDistroServiceWithSourceID(cr, osvBaseURL, "", distroCache, offline)
+}
+
+// NewDistroServiceWithSourceID is NewDistroService with an operator-chosen
+// stable identity for the data source (SBOMHUB_OSV_SOURCE_ID, Codex M70 R39
+// Medium-2): by default the identity is the endpoint URL with its
+// credentials, so rotating a mirror credential makes a new source whose
+// checks cannot clear the old one's labels; naming the dataset keeps it.
+func NewDistroServiceWithSourceID(cr *repository.ComponentRepository, osvBaseURL, sourceName string, distroCache *cache.DistroCache, offline bool) *DistroService {
+	id := distroSourceID(osvBaseURL)
+	if n := strings.TrimSpace(sourceName); n != "" {
+		sum := sha256.Sum256([]byte("osv-named\x00" + n))
+		id = hex.EncodeToString(sum[:16])
+	}
 	return &DistroService{
 		store:    cr,
 		osv:      client.NewOSVClient().WithBaseURL(osvBaseURL).WithOffline(offline),
 		source:   distroSource(osvBaseURL),
-		sourceID: distroSourceID(osvBaseURL),
+		sourceID: id,
 		cache:    distroCache,
 		offline:  offline,
 		gap:      distroRequestGap,
@@ -310,6 +325,9 @@ type DistroScanReport struct {
 	// LookupFailures: record lookups by id (withdrawal checks) that failed;
 	// reported as distro_data_failed.
 	LookupFailures int
+	// LockedSkipped: links another transaction held at write time, left for
+	// the next scan (Codex M70 R39 High-1).
+	LockedSkipped int
 	// LinksKeptForFailure: links of a package whose data failed.
 	LinksKeptForFailure int
 	// Relabelled: relabel statements that changed a row (a group later
@@ -401,8 +419,17 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 	sortPendingGroups(groups)
 	var tally writeTally
 	refused, _, werr := scope.writeLinksReporting(ctx, sbomID, groups, func(txCtx context.Context, l pendingLink) error {
+		// The row is locked first, without waiting (Codex M70 R39 High-1);
+		// its method as locked is what a clear is counted against (L-3).
+		before, locked, err := s.store.LockDistroLink(txCtx, l.componentID, l.vulnID)
+		if err != nil {
+			return err
+		}
+		if !locked {
+			tally.curSkipped++
+			return nil
+		}
 		var changed, stillDistro bool
-		var err error
 		switch {
 		case l.withdrawnClear:
 			changed, err = s.store.ClearDistroWithdrawn(txCtx, l.componentID, l.vulnID, l.evidence)
@@ -416,7 +443,7 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 			stillDistro = true
 		}
 		if err == nil {
-			tally.note(l, changed, stillDistro)
+			tally.note(model.MatchMethod(before).IsDistro(), changed, stillDistro)
 		}
 		return err
 	}, tally.groupDone)
@@ -427,6 +454,11 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 	rep.RefusedWrites = refused
 	rep.Relabelled = tally.relabelled
 	rep.Cleared = tally.cleared
+	rep.LockedSkipped = tally.skipped
+	if tally.skipped > 0 {
+		slog.Warn("distro: links locked by another transaction were left for the next scan",
+			"sbom_id", sbomID, "links", tally.skipped)
+	}
 	s.logSummary(sbomID, rep)
 	return rep, rep.incompleteErr()
 }
@@ -435,19 +467,19 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 // group's counts are published only when its savepoint is released (and
 // discarded by the caller if the transaction then fails).
 type writeTally struct {
-	relabelled, cleared int // published
-	curR, curC          int // the current group's
+	relabelled, cleared, skipped int // published
+	curR, curC, curSkipped       int // the current group's
 }
 
-// note records one successful write: changed rows count as relabelled;
-// a settlement of a link read under a distro label that no longer carries
-// one cleared it.
-func (t *writeTally) note(l pendingLink, changed, stillDistro bool) {
+// note records one successful write: a changed row counts as relabelled; a
+// row that carried a distro label when locked and no longer does was
+// cleared (Codex M70 R39 Low-3: from the locked row, not the read phase).
+func (t *writeTally) note(wasDistro, changed, stillDistro bool) {
 	if !changed {
 		return
 	}
 	t.curR++
-	if (l.noVerdict || l.withdrawnClear) && l.wasDistro && !stillDistro {
+	if wasDistro && !stillDistro {
 		t.curC++
 	}
 }
@@ -456,8 +488,9 @@ func (t *writeTally) groupDone(released bool) {
 	if released {
 		t.relabelled += t.curR
 		t.cleared += t.curC
+		t.skipped += t.curSkipped
 	}
-	t.curR, t.curC = 0, 0
+	t.curR, t.curC, t.curSkipped = 0, 0, 0
 }
 
 // sortPendingGroups orders the groups by component id and each group's
@@ -702,6 +735,7 @@ func (s *DistroService) logSummary(sbomID uuid.UUID, r DistroScanReport) {
 		"fetch_failures", r.FetchFailures, "unfetched", r.Unfetched,
 		"affected", r.Affected, "unfixed", r.Unfixed, "fixed", r.Fixed, "no_verdict", r.NoVerdict,
 		"cleared", r.Cleared, "relabelled", r.Relabelled, "refused_writes", r.RefusedWrites,
+		"lookup_failures", r.LookupFailures, "locked_skipped", r.LockedSkipped,
 		"deadline_exceeded", r.DeadlineExceeded, "cancelled", r.Cancelled,
 	}
 	if r.FetchFailures > 0 || r.Unfetched > 0 || r.RefusedWrites > 0 {

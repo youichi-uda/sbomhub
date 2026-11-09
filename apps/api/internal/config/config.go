@@ -36,6 +36,9 @@ type Config struct {
 	EOLURL  string // endoflife.date
 	JVNURL  string // JVN / MyJVN
 	OSVURL  string // OSV.dev
+	// OSVSourceID (M70, SBOMHUB_OSV_SOURCE_ID): a stable name for the OSV
+	// dataset behind OSVURL; empty = the URL itself (credentials included).
+	OSVSourceID string
 
 	// Offline / air-gapped mode (M40, SBOMHUB_OFFLINE). When true, every external
 	// vulnerability data-source sync (EPSS, KEV, NVD, EOL, JVN, OSV, IPA) skips
@@ -235,13 +238,14 @@ func Load() *Config {
 		// External data-source URL overrides + offline mode (M40). Defaults are
 		// empty so each service falls back to its own built-in const (single
 		// source of truth for the default URL — not duplicated here).
-		EPSSURL: getEnv("SBOMHUB_EPSS_URL", ""),
-		KEVURL:  getEnv("SBOMHUB_KEV_URL", ""),
-		NVDURL:  getEnv("SBOMHUB_NVD_URL", ""),
-		EOLURL:  getEnv("SBOMHUB_EOL_URL", ""),
-		JVNURL:  getEnv("SBOMHUB_JVN_URL", ""),
-		OSVURL:  getEnv("SBOMHUB_OSV_URL", ""),
-		Offline: getEnvBool("SBOMHUB_OFFLINE", false),
+		EPSSURL:     getEnv("SBOMHUB_EPSS_URL", ""),
+		KEVURL:      getEnv("SBOMHUB_KEV_URL", ""),
+		NVDURL:      getEnv("SBOMHUB_NVD_URL", ""),
+		EOLURL:      getEnv("SBOMHUB_EOL_URL", ""),
+		JVNURL:      getEnv("SBOMHUB_JVN_URL", ""),
+		OSVURL:      getEnv("SBOMHUB_OSV_URL", ""),
+		OSVSourceID: getEnv("SBOMHUB_OSV_SOURCE_ID", ""),
+		Offline:     getEnvBool("SBOMHUB_OFFLINE", false),
 
 		NVDReconcileIntervalRaw: getEnv("SBOMHUB_NVD_RECONCILE_INTERVAL", ""),
 		ScanDeadlineRaw:         getEnv("SBOMHUB_SCAN_DEADLINE", ""),

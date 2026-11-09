@@ -51,6 +51,13 @@ A full re-read is ~300 NVD requests and ~2.4 GB (measured 2026-11-08), takes rou
 
 **Scan deadline.** The default (30 minutes) is about twice the slowest scan measured: a cold scan, without `NVD_API_KEY`, of an SBOM holding a Linux kernel took 68 NVD requests and 14 min 24 s (live NVD, 2026-11-08). Without a key every NVD request is paced at 6 s, so 30 minutes holds fewer than 300 NVD requests; a component costs one request on the keyword path and typically 1-5 on the CPE path (UPGRADE §13.5), so an SBOM beyond roughly 100-250 distinct components cannot finish in time without `NVD_API_KEY` (0.7 s per request) or a longer deadline. When the deadline fires, findings already obtained are committed, the scan is reported `failed` — `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` returns `"reasons": ["deadline_exceeded"]`, the scheduled scan's log reads `scan failed (deadline_exceeded)` — and nothing is cached as a complete answer. The API logs a `WARN` naming the deadline. No database transaction is held while a scan waits on NVD or JVN, so a long deadline costs no connection or locks.
 
+### OSV (Distro-Aware Matching)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SBOMHUB_OSV_URL` | (empty = `https://api.osv.dev/v1`) | OSV API base URL. After the NVD / JVN steps, a scan relabels the links of Debian / Ubuntu / AlmaLinux / Rocky Linux packages from the distribution's own fixed versions in OSV (`distro_affected` / `distro_fixed`); it never adds or removes a link. A mirror URL may carry a path prefix and a query (for example a credential); both are kept. No request is made when `SBOMHUB_OFFLINE=true`. |
+| `SBOMHUB_OSV_SOURCE_ID` | (empty) | A stable name for the dataset behind `SBOMHUB_OSV_URL`. Labels and their revision order are kept per source; by default the source is the URL itself, credentials included, so rotating a mirror credential starts a new source whose checks do not clear labels the old one wrote. Set a name (any text, for example `corp-osv-mirror`) to keep one identity across credential changes. Use a different name only for a genuinely different dataset. |
+
 ### LLM Provider (AI Features, BYOK)
 
 AI features (AI VEX triage, CRA report drafting, METI self-assessment prefill, etc.) are **BYOK (Bring Your Own Key) only**. SBOMHub OSS ships zero bundled LLM keys. Configure exactly one provider below to enable AI features. If unset, AI features are gracefully disabled and the rest of the product (SBOM management, manual VEX, manual CRA reports, manual METI self-assessment) continues to work.
