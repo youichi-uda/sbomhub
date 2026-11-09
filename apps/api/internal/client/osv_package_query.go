@@ -189,7 +189,11 @@ func parseStrictPurl(purl string) (segs []string, quals map[string]string, err e
 	quals = map[string]string{}
 	if i := strings.IndexByte(rest, '#'); i >= 0 {
 		// Not trimmed (Codex M70 R32 Low-5): a leading / trailing / doubled
-		// slash is an empty segment.
+		// slash is an empty segment. Qualifiers come BEFORE the subpath: a raw
+		// "?" after "#" is a misplaced delimiter (Codex M70 R38 Low-3).
+		if strings.Contains(rest[i+1:], "?") {
+			return nil, nil, fmt.Errorf("a '?' inside the subpath")
+		}
 		for _, seg := range strings.Split(rest[i+1:], "/") {
 			if v, err := neturl.PathUnescape(seg); err != nil || v == "" || v == "." || v == ".." || strings.Contains(v, "/") {
 				return nil, nil, fmt.Errorf("bad subpath")

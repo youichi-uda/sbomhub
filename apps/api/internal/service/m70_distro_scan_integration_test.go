@@ -1105,3 +1105,16 @@ func TestM70ReplaceDistroWithdrawn(t *testing.T) {
 		t.Errorf("prior=%q wm=%q tomb=%q", prior, wm, tomb)
 	}
 }
+
+// Codex M70 R38 Medium-1: a distro label without its evidence object is
+// refused by the database, and the generic linker never writes one.
+func TestM70DistroLabelNeedsEvidence(t *testing.T) {
+	e := m70Seed(t, "m70needev")
+	if _, err := e.migDB.Exec(`UPDATE component_vulnerabilities SET match_method = 'distro_affected', match_evidence = NULL
+		WHERE component_id = $1 AND vulnerability_id = $2`, e.openssl, e.v0286); err == nil {
+		t.Error("a distro label without evidence was stored")
+	}
+	if err := repository.NewVulnerabilityRepository(e.appDB).LinkComponent(context.Background(), e.openssl, e.v0286, model.MatchDistroAffected); err == nil {
+		t.Error("LinkComponent accepted a distro method")
+	}
+}

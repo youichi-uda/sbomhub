@@ -17,7 +17,7 @@ func TestMatchMethodVocabularyMatchesMigration070(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(raw)
-	i := strings.Index(body, "CHECK (match_method IS NULL OR match_method IN (")
+	i := strings.Index(body, "CHECK ((match_method IS NULL OR match_method IN (")
 	if i < 0 {
 		t.Fatal("CHECK not found in 070")
 	}

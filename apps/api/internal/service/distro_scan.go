@@ -877,6 +877,7 @@ func (s *DistroService) loadFetch(ctx context.Context, k distroFetchKey, pace fu
 		if walks >= distroConsistencyWalks {
 			return distroLoad{}, false, pages, fmt.Errorf("distro: %s %q changed while its %d pages were read, %d times", k.ecosystem, k.pkg, pages, walks-1)
 		}
+		l = distroLoad{} // only the fingerprint is kept between walks (Codex M70 R38 Medium-2)
 		next, nfp, npages, nerr := walk()
 		pages += npages
 		if nerr != nil {

@@ -59,7 +59,13 @@ ALTER TABLE component_vulnerabilities DROP CONSTRAINT IF EXISTS component_vulner
 
 ALTER TABLE component_vulnerabilities
     ADD CONSTRAINT component_vulnerabilities_match_method_check
-    CHECK (match_method IS NULL OR match_method IN (
+    CHECK ((match_method IS NULL OR match_method IN (
         'nvd_cpe', 'nvd_cpe_distro', 'nvd_cpe_unverified', 'nvd_keyword', 'jvn_keyword', 'cve_sync_keyword',
         'distro_affected', 'distro_unfixed', 'distro_fixed'
-    )) NOT VALID;
+    ))
+    -- a distro label always carries its evidence object (Codex M70 R38
+    -- Medium-1): never a bare high-confidence label
+    AND (match_method IS NULL
+         OR match_method NOT IN ('distro_affected', 'distro_unfixed', 'distro_fixed')
+         -- COALESCE: jsonb_typeof(NULL) is NULL, which a CHECK would pass
+         OR COALESCE(jsonb_typeof(match_evidence) = 'object', false))) NOT VALID;
