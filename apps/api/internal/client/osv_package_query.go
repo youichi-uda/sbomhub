@@ -263,6 +263,23 @@ var (
 		"24.10": "oracular", "25.04": "plucky", "25.10": "questing", "26.04": "resolute", "26.10": "stonking"}
 )
 
+// ReleaseCodename returns the codename of a Debian ("12") or Ubuntu
+// ("22.04") release, and whether the release is known here. A release not
+// known cannot have its purl qualifiers checked, so the distro step gives
+// components on it no verdict (Codex M70 R44 Medium-2) rather than fail
+// every query of the family when a new release appears.
+func ReleaseCodename(family, release string) (string, bool) {
+	switch family {
+	case "debian":
+		n, ok := debianCodenames[release]
+		return n, ok
+	case "ubuntu":
+		n, ok := ubuntuCodenames[release]
+		return n, ok
+	}
+	return "", false
+}
+
 // purlQualifiersAgree: on a Debian / Ubuntu entry, an arch qualifier names
 // the source package, and a distro qualifier names the entry's release (its
 // codename is one "/" part of Ubuntu Pro streams such as "esm-apps/xenial"
@@ -296,8 +313,13 @@ func purlQualifiersAgree(ecosystem, typ string, quals map[string]string) error {
 		if len(parts) == 2 {
 			release = parts[1]
 		}
-		if r, ok := strings.CutPrefix(distro, "debian-"); ok && r == release {
-			return nil
+		if r, ok := strings.CutPrefix(distro, "debian-"); ok {
+			if r == release {
+				return nil
+			}
+			// "debian-N" names release N: anything else contradicts the
+			// ecosystem (Codex M70 R44 Medium-2).
+			return fmt.Errorf("distro=%s does not name %s", distro, ecosystem)
 		}
 	case "Ubuntu":
 		table = ubuntuCodenames

@@ -91,6 +91,8 @@ if cur then
   end
 end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
+-- the fence lives at least as long as the payload it fences
+redis.call('PEXPIRE', KEYS[2], ARGV[3])
 return 1`)
 
 // DistroCacheKey is the Redis key of (source, ecosystem, name). source is the
@@ -137,7 +139,12 @@ func (c *DistroCache) Get(ctx context.Context, source, ecosystem, name string) (
 	// other data (a withdrawal lowers the revision): then it is a miss and
 	// the package is read again (Codex M70 R43 High-1).
 	lg, err := c.client.Get(ctx, distroLatestGenKey(key)).Result()
-	if err != nil && err != redis.Nil {
+	if err == redis.Nil {
+		// No fence (evicted, or expired): whether a later fetch saw other
+		// data is unknown, so it is a miss (Codex M70 R44 High-1).
+		return nil, nil
+	}
+	if err != nil {
 		return nil, fmt.Errorf("redis get error: %w", err)
 	}
 	if lg > e.Generation {

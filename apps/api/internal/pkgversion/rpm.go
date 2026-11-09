@@ -122,7 +122,7 @@ func splitRun(s string, in func(byte) bool) (run, rest string) {
 
 // RPMEVR is a parsed rpm [epoch:]version-release.
 type RPMEVR struct {
-	Epoch int
+	Epoch uint64 // rpm's epoch is uint32 (Codex M70 R44 Low-3: never through int)
 	// HasEpoch: the epoch was stated. rpm compares a missing epoch as 0; the
 	// flag lets a caller notice an SBOM that may have dropped it.
 	HasEpoch bool
@@ -156,7 +156,7 @@ func ParseRPMEVR(s string) (RPMEVR, error) {
 		if err != nil || n > maxRPMEpoch {
 			return RPMEVR{}, fmt.Errorf("%w: %q epoch out of range", ErrInvalidVersion, s)
 		}
-		e.Epoch, e.HasEpoch = int(n), true
+		e.Epoch, e.HasEpoch = n, true
 		rest = s[i+1:]
 	}
 	i := strings.LastIndexByte(rest, '-')
@@ -199,7 +199,7 @@ func (a RPMEVR) Compare(b RPMEVR) int {
 // String renders the EVR.
 func (a RPMEVR) String() string {
 	if a.HasEpoch {
-		return strconv.Itoa(a.Epoch) + ":" + a.Version + "-" + a.Release
+		return strconv.FormatUint(a.Epoch, 10) + ":" + a.Version + "-" + a.Release
 	}
 	return a.Version + "-" + a.Release
 }

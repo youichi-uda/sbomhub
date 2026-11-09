@@ -1245,3 +1245,36 @@ func TestM70DistroLoad_NewerObservationBeatsOlderCachedRevision(t *testing.T) {
 		t.Errorf("hit=%v queries=%d err=%v; the superseded entry must not be served", hit, queries, err)
 	}
 }
+
+// Codex M70 R44 High-1: without its generation fence an entry is a miss.
+func TestM70DistroCache_MissingFenceIsAMiss(t *testing.T) {
+	url := os.Getenv("REDIS_URL")
+	if url == "" {
+		t.Skip("REDIS_URL not set")
+	}
+	opt, err := redis.ParseURL(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { _ = rdb.Close() })
+	c := cache.NewDistroCache(rdb)
+	key := cache.DistroCacheKey("test-fence", "Debian", "p")
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key, key+":lg").Err() })
+	if _, err := c.Set(context.Background(), "test-fence", "Debian", "p", cache.DistroCacheEntry{FetchedAt: time.Now(),
+		Generation: "00000000000000000005", DataModified: "2026-11-09T00:00:00.000000000Z", Payload: []byte(`"x"`)}); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := c.Get(context.Background(), "test-fence", "Debian", "p"); e == nil {
+		t.Fatal("fresh entry not served")
+	}
+	ttlP, _ := rdb.PTTL(context.Background(), key).Result()
+	ttlF, _ := rdb.PTTL(context.Background(), key+":lg").Result()
+	if ttlF < ttlP-time.Second {
+		t.Errorf("fence ttl %v shorter than payload %v", ttlF, ttlP)
+	}
+	_ = rdb.Del(context.Background(), key+":lg").Err()
+	if e, err := c.Get(context.Background(), "test-fence", "Debian", "p"); e != nil || err != nil {
+		t.Errorf("entry without fence served: %+v %v", e, err)
+	}
+}

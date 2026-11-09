@@ -157,7 +157,7 @@ func TestCompareRPMEVR(t *testing.T) {
 func TestParseRPMEVR(t *testing.T) {
 	for _, c := range []struct {
 		in       string
-		epoch    int
+		epoch    uint64
 		hasEpoch bool
 		v, r     string
 	}{

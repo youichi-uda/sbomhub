@@ -311,6 +311,11 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 				// High-2), and they ended long before this data existed.
 				return distroTarget{}, "unknown_release"
 			}
+			if _, known := client.ReleaseCodename("debian", strconv.Itoa(major)); !known {
+				// Its purl qualifiers cannot be checked (Codex M70 R44
+				// Medium-2): no verdict until the release is known here.
+				return distroTarget{}, "unknown_release"
+			}
 			t.releaseMajor = major
 			t.release = "Debian:" + strconv.Itoa(major)
 			t.query = "Debian"
@@ -318,6 +323,9 @@ func distroTargetFor(purl, compVersion string, os *distroOS) (distroTarget, stri
 			eco, ok := ubuntuEcosystem(rel)
 			if !ok {
 				return distroTarget{}, "unknown_release"
+			}
+			if _, known := client.ReleaseCodename("ubuntu", strings.Split(eco, ":")[1]); !known {
+				return distroTarget{}, "unknown_release" // Codex M70 R44 Medium-2
 			}
 			if ubuntuProBuild(t.version) || ubuntuProBuild(version) {
 				// Both the source version compared and the binary's own
