@@ -1087,15 +1087,13 @@ func cachedNVDVulns(entry *cache.VulnCacheEntry, name, version string) ([]model.
 			usable = false
 			break
 		}
-		// M67 (Codex R1, High): a scored entry with no CVSS version was
-		// written by a pre-M67 build, whose score did not go through
-		// cvss.Select. Every NVD score from M67 on carries its version, so
-		// this is exactly the legacy entry; re-fetch it rather than create a
-		// catalogue row no later scan would repair (Create is ON CONFLICT
-		// DO NOTHING).
-		if cv.CVSSScore != nil && cv.CVSSVersion == nil {
-			slog.Debug("discarding cached NVD record written before M67 (no CVSS version)",
-				"component", name, "version", version, "cve", cv.CVEID)
+		// M67 (Codex R1, High): an entry stamped with an older CVSS rule
+		// (0 = written before M67) holds scores cvss.Select never chose.
+		// Re-fetch it rather than create a catalogue row no later scan would
+		// repair (Create is ON CONFLICT DO NOTHING).
+		if entry.CVSSRule != cache.CVSSRuleCurrent {
+			slog.Debug("discarding cached NVD record written under an older CVSS rule",
+				"component", name, "version", version, "cve_rule", entry.CVSSRule)
 			usable = false
 			break
 		}

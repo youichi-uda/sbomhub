@@ -69,24 +69,36 @@ func TestM67JVN_DuplicateCVEUsesTheVersionRule(t *testing.T) {
 	}
 }
 
-// TestM67NVDCache_PreM67ScoredEntryIsRefetched (Codex M67 R1, High). A Redis
-// entry written by a pre-M67 build carries a score chosen by the old scanner
-// rule and no cvss_version. Serving it would let the scanner create a
-// catalogue row that never went through cvss.Select — and Create's ON
-// CONFLICT DO NOTHING means no later scan repairs it. Such an entry is
-// treated as unusable, so the lookup goes to NVD exactly as on a miss.
-func TestM67NVDCache_PreM67ScoredEntryIsRefetched(t *testing.T) {
+// TestM67NVDCache_PreM67EntryIsRefetched (Codex M67 R1, High). A Redis entry
+// written by a pre-M67 build carries scores chosen by the old scanner rule.
+// Serving it would let the scanner create a catalogue row that never went
+// through cvss.Select — and Create's ON CONFLICT DO NOTHING means no later
+// scan repairs it. Entries are stamped with the CVSS rule revision by
+// NVDCache.Set; an unstamped (pre-M67) entry is unusable, so the lookup goes
+// to NVD exactly as on a miss.
+//
+// The stamp is per ENTRY, not inferred from a missing per-CVE version: the
+// CPE path (M60) writes entries whose CachedVuln carries no version, and
+// rejecting those disabled its cache outright
+// (TestM60NVDCache_SecondLookupIsServedFromCache went red on the first cut).
+func TestM67NVDCache_PreM67EntryIsRefetched(t *testing.T) {
 	score := 4.0
 	v31 := "3.1"
 	legacy := &cache.VulnCacheEntry{Vulnerabilities: []cache.CachedVuln{
-		{CVEID: "CVE-2026-0001", Severity: "MEDIUM", CVSSScore: &score},
+		{CVEID: "CVE-2026-0001", Severity: "MEDIUM", CVSSScore: &score, CVSSVersion: &v31},
 	}}
 	if _, usable := cachedNVDVulns(legacy, "x", "1"); usable {
-		t.Error("a scored pre-M67 cache entry (no cvss_version) was served")
+		t.Error("a pre-M67 cache entry (no CVSS rule stamp) was served")
 	}
-	current := &cache.VulnCacheEntry{Vulnerabilities: []cache.CachedVuln{
+	cpeShape := &cache.VulnCacheEntry{CVSSRule: cache.CVSSRuleCurrent, Vulnerabilities: []cache.CachedVuln{
+		{CVEID: "CVE-2026-0001", Severity: "MEDIUM", CVSSScore: &score},
+	}}
+	if _, usable := cachedNVDVulns(cpeShape, "x", "1"); !usable {
+		t.Error("a current entry without per-CVE versions (the CPE path's shape) was refused")
+	}
+	current := &cache.VulnCacheEntry{CVSSRule: cache.CVSSRuleCurrent, Vulnerabilities: []cache.CachedVuln{
 		{CVEID: "CVE-2026-0001", Severity: "MEDIUM", CVSSScore: &score, CVSSVersion: &v31},
-		{CVEID: "CVE-2026-0002", Severity: "UNKNOWN"}, // unscored: no version by design
+		{CVEID: "CVE-2026-0002", Severity: "UNKNOWN"},
 	}}
 	got, usable := cachedNVDVulns(current, "x", "1")
 	if !usable || len(got) != 2 || got[0].CVSSVersion == nil || *got[0].CVSSVersion != "3.1" {

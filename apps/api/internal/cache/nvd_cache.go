@@ -54,7 +54,16 @@ const (
 type VulnCacheEntry struct {
 	Vulnerabilities []CachedVuln `json:"vulnerabilities"`
 	CachedAt        time.Time    `json:"cached_at"`
+	// CVSSRule is the CVSS selection rule revision the entry's scores were
+	// chosen under (M67). Set always stamps CVSSRuleCurrent; an entry written
+	// by an older build decodes with 0 and the scanner re-fetches it rather
+	// than create a catalogue row from a score internal/cvss never chose.
+	CVSSRule int `json:"cvss_rule,omitempty"`
 }
+
+// CVSSRuleCurrent is the revision of internal/cvss.Select's rule. Bump it when
+// that rule changes so cached scores chosen by the previous one are re-fetched.
+const CVSSRuleCurrent = 1
 
 // CachedVuln represents a cached vulnerability.
 //
@@ -68,10 +77,11 @@ type CachedVuln struct {
 	Description string   `json:"description"`
 	Severity    string   `json:"severity"`
 	CVSSScore   *float64 `json:"cvss_score,omitempty"`
-	// CVSSVersion is the version CVSSScore was taken from (M67). Entries
-	// cached before M67 decode with it nil; they expire within NVDCacheTTL,
-	// and a row created from one is re-derived by the CVE sync, because the
-	// scanner never dates the rows it creates (source_modified_at NULL).
+	// CVSSVersion is the version CVSSScore was taken from (M67); nil when
+	// unscored, and also on entries the CPE path writes (it does not carry
+	// it yet — a row created from one stores no version and is re-derived by
+	// the CVE sync, since the scanner never dates the rows it creates).
+	// Pre-M67 entries are refused by VulnCacheEntry.CVSSRule, not by this.
 	CVSSVersion *string    `json:"cvss_version,omitempty"`
 	PublishedAt *time.Time `json:"published_at,omitempty"`
 }
@@ -151,6 +161,7 @@ func (c *NVDCache) Set(ctx context.Context, name, version string, vulns []Cached
 	entry := VulnCacheEntry{
 		Vulnerabilities: vulns,
 		CachedAt:        time.Now(),
+		CVSSRule:        CVSSRuleCurrent,
 	}
 
 	data, err := json.Marshal(entry)
