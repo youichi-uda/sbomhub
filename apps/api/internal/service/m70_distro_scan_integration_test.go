@@ -14,8 +14,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -649,7 +652,8 @@ func TestM70DistroCache_RevisionBeforeGeneration(t *testing.T) {
 	t.Cleanup(func() { _ = rdb.Close() })
 	c := cache.NewDistroCache(rdb)
 	key := cache.DistroCacheKey("test-rev", "Debian", "p")
-	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key, key+":lg").Err() })
+	_ = rdb.Del(context.Background(), key, key+":lg").Err()
 	set := func(gen, dm, payload string) {
 		t.Helper()
 		if _, err := c.Set(context.Background(), "test-rev", "Debian", "p", cache.DistroCacheEntry{FetchedAt: time.Now(),
@@ -667,8 +671,15 @@ func TestM70DistroCache_RevisionBeforeGeneration(t *testing.T) {
 	}
 	set("00000000000000000001", "2026-11-09T00:00:00.000000000Z", `"R2"`)
 	set("00000000000000000002", "2026-11-08T00:00:00.000000000Z", `"R1-later-fetch"`) // later fetch, older data
-	if got := get(); got != `"R2"` {
-		t.Errorf("older revision replaced newer: %s", got)
+	// The payload kept is still the higher revision, but a later fetch
+	// completed with other data: it is no longer served (Codex M70 R43
+	// High-1), so the package is read again.
+	raw, _ := rdb.Get(context.Background(), key).Result()
+	if !strings.Contains(raw, `"R2"`) {
+		t.Errorf("older revision replaced newer: %s", raw)
+	}
+	if e, err := c.Get(context.Background(), "test-rev", "Debian", "p"); err != nil || e != nil {
+		t.Errorf("superseded entry served: %+v %v", e, err)
 	}
 	set("00000000000000000003", "2026-11-09T00:00:00.000000000Z", `"R2-again"`) // same revision, later fetch
 	if got := get(); got != `"R2-again"` {
@@ -1188,5 +1199,49 @@ func TestM70RelabelDistro_SameSourceNewerReplaces(t *testing.T) {
 	})
 	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_fixed" || r.evidence.Fixed != "newer" {
 		t.Errorf("%+v", r)
+	}
+}
+
+// Codex M70 R43 High-1: a pre-withdrawal answer cached by an OLDER fetch is
+// not used once a newer fetch completed with the record gone: that fetch
+// uses its own answer, and later loads read the package again.
+func TestM70DistroLoad_NewerObservationBeatsOlderCachedRevision(t *testing.T) {
+	url := os.Getenv("REDIS_URL")
+	if url == "" {
+		t.Skip("REDIS_URL not set")
+	}
+	opt, err := redis.ParseURL(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { _ = rdb.Close() })
+	queries := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		queries++
+		_, _ = io.WriteString(w, `{}`) // the record is gone
+	}))
+	t.Cleanup(srv.Close)
+	dc := cache.NewDistroCache(rdb)
+	s := NewDistroService(nil, srv.URL, dc, false)
+	s.gap = 0
+	key := cache.DistroCacheKey(s.sourceID, "Debian", "p")
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key, key+":lg").Err() })
+	_ = rdb.Del(context.Background(), key, key+":lg").Err()
+	old := distroCachePayload{Version: distroCachePayloadVersion, Records: []distroRecord{{ID: "DSA-OLD", CVEs: []string{"CVE-2021-0001"},
+		Releases: 1, Packages: 1, Modified: normaliseModified("2026-11-08T00:00:00Z"), Entries: []distroEntry{entry("Debian:11", "i", "0", "f", "0.9-1")}}}, IDs: []string{"DSA-OLD"}}
+	raw, _ := json.Marshal(old)
+	if _, err := dc.Set(context.Background(), s.sourceID, "Debian", "p", cache.DistroCacheEntry{FetchedAt: time.Now(),
+		Payload: raw, DataModified: "2026-11-08T00:00:00.000000000Z", Generation: "00000000000000000001"}); err != nil {
+		t.Fatal(err)
+	}
+	pace := func(context.Context) error { return nil }
+	k := distroFetchKey{ecosystem: "Debian", pkg: "p"}
+	l, _, _, err := s.loadFetch(context.Background(), k, pace)
+	if err != nil || len(l.recs) != 0 {
+		t.Fatalf("newer fetch: %d records, err=%v; want its own empty answer", len(l.recs), err)
+	}
+	if _, hit, _, err := s.load(context.Background(), k, pace); err != nil || hit || queries != 2 {
+		t.Errorf("hit=%v queries=%d err=%v; the superseded entry must not be served", hit, queries, err)
 	}
 }

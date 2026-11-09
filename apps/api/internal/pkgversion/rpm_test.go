@@ -174,7 +174,7 @@ func TestParseRPMEVR(t *testing.T) {
 	}
 	for _, s := range []string{
 		"", " ", "1.0", // no release
-		"1:1.0", ":1.0-1", "a:1.0-1", "-1:1.0-1", "2147483648:1.0-1", "99999999999999999999:1.0-1",
+		"1:1.0", ":1.0-1", "a:1.0-1", "-1:1.0-1", "4294967296:1.0-1", "99999999999999999999:1.0-1", // rpm epochs are uint32 (Codex M70 R43 Low-2)
 		"1.0-", "-1", "1:-1", // empty version / release
 		"1.0 0-1", "1.0-1 2", "1.0-1:2", "1.0é-1", "1.0-1\x7f",
 	} {
@@ -195,5 +195,17 @@ func TestRPMEVRString(t *testing.T) {
 		if err != nil || e.String() != s {
 			t.Errorf("String(%q) = %q (%v)", s, e.String(), err)
 		}
+	}
+}
+
+// Codex M70 R43 Low-2: rpm epochs above INT32_MAX up to UINT32_MAX are valid.
+func TestParseRPMEVR_Uint32Epoch(t *testing.T) {
+	for _, s := range []string{"2147483648:1.0-1", "4294967295:1.0-1"} {
+		if _, err := ParseRPMEVR(s); err != nil {
+			t.Errorf("%s: %v", s, err)
+		}
+	}
+	if c, err := CompareRPMEVR("4294967295:1.0-1", "2147483648:9.0-1"); err != nil || c <= 0 {
+		t.Errorf("compare = %d, %v", c, err)
 	}
 }

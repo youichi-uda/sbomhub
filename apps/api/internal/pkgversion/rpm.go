@@ -136,6 +136,10 @@ type RPMEVR struct {
 // error; so is an EVR without a release, because comparing a full EVR
 // against a release-less one has no single answer (rpm's dependency
 // comparison treats a missing release as matching any).
+// maxRPMEpoch: rpm keeps the epoch as an unsigned 32-bit value (Codex M70
+// R43 Low-2), unlike dpkg's signed INT_MAX.
+const maxRPMEpoch = 1<<32 - 1
+
 func ParseRPMEVR(s string) (RPMEVR, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -149,7 +153,7 @@ func ParseRPMEVR(s string) (RPMEVR, error) {
 			return RPMEVR{}, fmt.Errorf("%w: %q has a bad epoch", ErrInvalidVersion, s)
 		}
 		n, err := strconv.ParseUint(ep, 10, 64)
-		if err != nil || n > maxEpoch {
+		if err != nil || n > maxRPMEpoch {
 			return RPMEVR{}, fmt.Errorf("%w: %q epoch out of range", ErrInvalidVersion, s)
 		}
 		e.Epoch, e.HasEpoch = int(n), true

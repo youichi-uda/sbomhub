@@ -833,7 +833,10 @@ type distroCachePayload struct {
 
 // distroLoad is one package's data as loaded.
 type distroLoad struct {
-	recs []distroRecord
+	// generation: the cache generation of the fetch this came from ("" when
+	// unknown).
+	generation string
+	recs       []distroRecord
 	// ids: every record id the query returned, including records the
 	// reduction dropped (no CVE identity, withdrawn, other packages only):
 	// a record in the answer is not absent from it (Codex M70 R34 High-1).
@@ -880,7 +883,7 @@ func (s *DistroService) cachedLoad(ctx context.Context, k distroFetchKey) (distr
 		!validRecordIDs(p.IDs, p.Records) || !notFuture(e.DataModified) {
 		return distroLoad{}, false
 	}
-	return distroLoad{recs: p.Records, ids: p.IDs, fetchedAt: e.FetchedAt, revision: e.DataModified}, true
+	return distroLoad{recs: p.Records, ids: p.IDs, fetchedAt: e.FetchedAt, revision: e.DataModified, generation: e.Generation}, true
 }
 
 // loadFetch fetches k from OSV and offers the answer to the cache. When the
@@ -940,6 +943,7 @@ func (s *DistroService) loadFetch(ctx context.Context, k distroFetchKey, pace fu
 		}
 	}
 	l.fetchedAt = s.now().UTC()
+	l.generation = generation
 	payload, merr := json.Marshal(distroCachePayload{Version: distroCachePayloadVersion, Records: l.recs, IDs: l.ids})
 	if merr == nil && generation != "" {
 		// No generation (Redis unreachable when the fetch started): not
@@ -951,11 +955,16 @@ func (s *DistroService) loadFetch(ctx context.Context, k distroFetchKey, pace fu
 		case serr != nil:
 			slog.Debug("distro cache set error", "ecosystem", k.ecosystem, "package", k.pkg, "error", serr)
 		case !won:
-			winner, ok := s.cachedLoad(ctx, k)
-			if !ok || winner.revision < l.revision {
-				return distroLoad{}, false, pages, fmt.Errorf("distro: a newer cached answer for %s %q exists but could not be read", k.ecosystem, k.pkg)
+			// The entry kept is served only while no later fetch completed
+			// (Cache.Get): a winner that reads back started after this fetch
+			// and saw the source at least as new (Codex M70 R21 High-1);
+			// otherwise this fetch IS the newest complete observation and is
+			// used as it is, even when its revision is lower (a withdrawal:
+			// Codex M70 R43 High-1).
+			if winner, ok := s.cachedLoad(ctx, k); ok && winner.generation > generation {
+				return winner, false, pages, nil
 			}
-			return winner, false, pages, nil
+			return l, false, pages, nil
 		}
 	}
 	return l, false, pages, nil

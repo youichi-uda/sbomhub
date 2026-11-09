@@ -72,6 +72,12 @@ type DistroCacheEntry struct {
 // lagging replica) never replaces newer data; generation only breaks ties
 // (Codex M70 R16 High-2). Both are fixed-width strings ("" is the lowest).
 var distroSetIfNotNewer = redis.NewScript(`
+-- KEYS[2]: the newest generation any COMPLETED fetch of this package
+-- started at, whatever its revision (Codex M70 R43 High-1).
+local lg = redis.call('GET', KEYS[2])
+if (not lg) or ARGV[2] > lg then
+  redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
+end
 local cur = redis.call('GET', KEYS[1])
 if cur then
   local ok, obj = pcall(cjson.decode, cur)
@@ -95,7 +101,14 @@ func DistroCacheKey(source, ecosystem, name string) string {
 	source = strings.TrimRight(strings.TrimSpace(source), "/")
 	sum := sha256.Sum256([]byte(strconv.Itoa(len(source)) + ":" + source +
 		strconv.Itoa(len(ecosystem)) + ":" + ecosystem + name))
-	return DistroCachePrefix + hex.EncodeToString(sum[:])
+	// A hash tag keeps the entry and its latest-generation key in one slot.
+	return DistroCachePrefix + "{" + hex.EncodeToString(sum[:]) + "}"
+}
+
+// distroLatestGenKey holds the newest completed fetch generation of the
+// package keyed by entryKey.
+func distroLatestGenKey(entryKey string) string {
+	return entryKey + ":lg"
 }
 
 // Get returns the entry, or (nil, nil) on a miss or an undecodable entry.
@@ -108,7 +121,8 @@ func (c *DistroCache) Get(ctx context.Context, source, ecosystem, name string) (
 	// One bounded read (Codex M70 R4 Medium-4): GETRANGE returns at most
 	// DistroCacheMaxBytes+1 bytes whatever the stored value is, and a value
 	// longer than the bound is a miss.
-	data, err := c.client.GetRange(ctx, DistroCacheKey(source, ecosystem, name), 0, DistroCacheMaxBytes).Bytes()
+	key := DistroCacheKey(source, ecosystem, name)
+	data, err := c.client.GetRange(ctx, key, 0, DistroCacheMaxBytes).Bytes()
 	if err != nil && err != redis.Nil {
 		return nil, fmt.Errorf("redis getrange error: %w", err)
 	}
@@ -117,6 +131,16 @@ func (c *DistroCache) Get(ctx context.Context, source, ecosystem, name string) (
 	}
 	var e DistroCacheEntry
 	if err := json.Unmarshal(data, &e); err != nil || e.FetchedAt.IsZero() || len(e.Payload) == 0 {
+		return nil, nil
+	}
+	// Kept by revision, but superseded when a LATER fetch completed with
+	// other data (a withdrawal lowers the revision): then it is a miss and
+	// the package is read again (Codex M70 R43 High-1).
+	lg, err := c.client.Get(ctx, distroLatestGenKey(key)).Result()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("redis get error: %w", err)
+	}
+	if lg > e.Generation {
 		return nil, nil
 	}
 	return &e, nil
@@ -156,7 +180,8 @@ func (c *DistroCache) Set(ctx context.Context, source, ecosystem, name string, e
 	}
 	ctx, cancel := opContext(ctx)
 	defer cancel()
-	n, err := distroSetIfNotNewer.Run(ctx, c.client, []string{DistroCacheKey(source, ecosystem, name)},
+	key := DistroCacheKey(source, ecosystem, name)
+	n, err := distroSetIfNotNewer.Run(ctx, c.client, []string{key, distroLatestGenKey(key)},
 		data, e.Generation, c.ttl.Milliseconds(), e.DataModified).Int()
 	if err != nil {
 		return false, fmt.Errorf("redis set error: %w", err)
