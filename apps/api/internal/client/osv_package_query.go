@@ -269,6 +269,20 @@ func validatePackageRecords(raw []byte, q OSVPackage) error {
 const MaxOSVFieldBytes = 256
 
 func validateAffected(a OSVAffected) error {
+	if a.Package.Name == "" && a.Package.Ecosystem == "" && a.Package.Purl == "" {
+		// OSV's package-less entry for supplementary GIT ranges (Codex M70
+		// R23 Medium-4): valid only with GIT ranges, and ignored by the
+		// distro step (it matches the queried package only).
+		if len(a.Ranges) == 0 || len(a.Versions) > 0 {
+			return fmt.Errorf("package-less entry without GIT ranges")
+		}
+		for i, r := range a.Ranges {
+			if r.Type != "GIT" || len(r.Events) == 0 {
+				return fmt.Errorf("package-less entry range %d is not a GIT range", i)
+			}
+		}
+		return nil
+	}
 	if a.Package.Purl != "" {
 		if err := purlAgrees(a.Package); err != nil {
 			return err
@@ -367,15 +381,34 @@ func purlAgrees(p OSVPackage) error {
 	if err != nil || name != p.Name {
 		return fmt.Errorf("package purl %q does not name %q", p.Purl, p.Name)
 	}
-	want := ""
+	want, ns := "", []string(nil)
 	switch {
-	case strings.HasPrefix(p.Ecosystem, "Debian"), strings.HasPrefix(p.Ecosystem, "Ubuntu"):
-		want = "deb"
-	case strings.HasPrefix(p.Ecosystem, "AlmaLinux"), strings.HasPrefix(p.Ecosystem, "Rocky Linux"):
-		want = "rpm"
+	case strings.HasPrefix(p.Ecosystem, "Debian"):
+		want, ns = "deb", []string{"debian"}
+	case strings.HasPrefix(p.Ecosystem, "Ubuntu"):
+		want, ns = "deb", []string{"ubuntu"}
+	case strings.HasPrefix(p.Ecosystem, "AlmaLinux"):
+		want, ns = "rpm", []string{"almalinux"}
+	case strings.HasPrefix(p.Ecosystem, "Rocky Linux"):
+		want, ns = "rpm", []string{"rocky", "rocky-linux"}
 	}
 	if want != "" && typ != want {
 		return fmt.Errorf("package purl %q is not a %s package", p.Purl, want)
+	}
+	// The namespace is the distro (vendor) of the ecosystem (Codex M70 R23
+	// High-3).
+	if ns != nil {
+		got := ""
+		if len(segs) == 3 {
+			got = strings.ToLower(segs[1])
+		}
+		okNS := false
+		for _, n := range ns {
+			okNS = okNS || got == n
+		}
+		if !okNS {
+			return fmt.Errorf("package purl %q does not name the %s distro", p.Purl, p.Ecosystem)
+		}
 	}
 	return nil
 }
@@ -485,7 +518,9 @@ func (c *OSVClient) queryPackagePage(ctx context.Context, q osvPackageQueryReque
 		}
 		var tok string
 		if raw, ok := env["next_page_token"]; ok {
-			if err := json.Unmarshal(raw, &tok); err != nil {
+			// A JSON string, when present (null would read as "last page";
+			// Codex M70 R23 High-2).
+			if !bytes.HasPrefix(bytes.TrimSpace(raw), []byte(`"`)) || json.Unmarshal(raw, &tok) != nil {
 				return page, n, fmt.Errorf("osv: package query response has a bad next_page_token")
 			}
 		}

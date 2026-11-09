@@ -658,6 +658,9 @@ func reduceOSVRecords(recs []client.OSVPackageRecord, pkg string) []distroRecord
 		var entries []distroEntry
 		releases, packages := map[string]bool{}, map[string]bool{}
 		for _, a := range r.Affected {
+			if a.Package.Name == "" && a.Package.Ecosystem == "" {
+				continue // a package-less GIT entry: about no package
+			}
 			releases[a.Package.Ecosystem] = true
 			packages[a.Package.Name] = true
 			if a.Package.Name != pkg {

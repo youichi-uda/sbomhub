@@ -81,8 +81,9 @@ const (
 	// R15; 8: empty continuation pages refused (R16) and canonical identity
 	// strings (R18); 9: canonical record identities, exact CVE matching (R19);
 	// 10: unique record ids, OSV id character set (R21); 11: affected purl
-	// agreement and field length bounds (R22)).
-	distroCachePayloadVersion = 11
+	// agreement and field length bounds (R22); 12: purl namespace,
+	// package-less GIT entries (R23)).
+	distroCachePayloadVersion = 12
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -414,10 +415,17 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 					return groups, counts, fmt.Errorf("distro: encode evidence: %w", err)
 				}
 				if len(b) > maxEvidenceBytes {
-					counts.NoVerdict["evidence_too_large"]++
-					continue
+					// Too large to store: settled as no verdict, which still
+					// clears a stale label and advances the watermark (Codex
+					// M70 R23 High-1).
+					b = nil
 				}
 				raw, memo[mk] = b, b
+			}
+			if raw == nil {
+				counts.NoVerdict["evidence_too_large"]++
+				g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: wm})
+				continue
 			}
 			switch dec.verdict {
 			case verdictAffected:
