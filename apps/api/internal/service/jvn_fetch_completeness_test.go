@@ -1430,8 +1430,10 @@ func TestM55JVN_ZeroCountPageMayNotSmuggleEntries(t *testing.T) {
 }
 
 // TestM55JVN_DuplicateCVEKeepsTheMoreSevere pins that when two JVNDB advisories
-// cite the same CVE, the assessment that survives is the more severe one
-// (Codex M55 R3, High).
+// cite the same CVE and their assessments are of the SAME (here: unrecorded)
+// CVSS version, the more severe one survives (Codex M55 R3, High). Since M67
+// the version decides first; that ordering is pinned by
+// TestM67JVN_DuplicateCVEUsesTheVersionRule.
 //
 // Only one catalogue row can exist per CVE. Keeping whichever advisory happened
 // to arrive first meant a critical score could be discarded in favour of a low
@@ -1453,9 +1455,11 @@ func TestM55JVN_DuplicateCVEKeepsTheMoreSevere(t *testing.T) {
 	if !jvnMoreSevere(mk(&low, "LOW"), mk(nil, "UNKNOWN")) {
 		t.Error("a scored advisory did not displace an unscored one")
 	}
-	// The severity LABEL outranks the raw score, because CVSS v2 and v3
-	// numbers are not comparable (Codex M55 R4, High): a v2 HIGH of 10.0
-	// must not displace a v3.1 CRITICAL of 9.8.
+	// At equal version rank the severity LABEL outranks the raw score
+	// (Codex M55 R4, High): a HIGH of 10.0 must not displace a CRITICAL of
+	// 9.8. mk records no version, so both sides rank equally here; the
+	// cross-version case (v3.1 CRITICAL vs v2 HIGH) is decided by version
+	// and is pinned with real versions in TestM67JVN_DuplicateCVEUsesTheVersionRule.
 	v2high := 10.0
 	v3crit := 9.8
 	if jvnMoreSevere(mk(&v2high, "HIGH"), mk(&v3crit, "CRITICAL")) {

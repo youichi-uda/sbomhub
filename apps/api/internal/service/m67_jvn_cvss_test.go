@@ -69,6 +69,13 @@ func TestM67JVN_DuplicateCVEUsesTheVersionRule(t *testing.T) {
 	if jvnMoreSevere(b, a) {
 		t.Error("a v2 advisory displaced a v3.0 one")
 	}
+	// The M55 R4 case with real versions: v3.1 CRITICAL 9.8 vs v2 HIGH 10.0.
+	v31crit, v2high := 9.8, 10.0
+	c := model.Vulnerability{CVEID: "CVE-2026-0001", CVSSScore: &v31crit, Severity: "CRITICAL", CVSSVersion: v("3.1")}
+	d := model.Vulnerability{CVEID: "CVE-2026-0001", CVSSScore: &v2high, Severity: "HIGH", CVSSVersion: v("2.0")}
+	if !jvnMoreSevere(c, d) || jvnMoreSevere(d, c) {
+		t.Error("a v2 HIGH/10.0 displaced, or was not displaced by, a v3.1 CRITICAL/9.8")
+	}
 }
 
 // TestM67NVDCache_PreM67EntryIsRefetched (Codex M67 R1, High). A Redis entry

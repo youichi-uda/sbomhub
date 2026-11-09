@@ -1239,8 +1239,12 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 	// break, and to discard ParseFloat's error. An advisory carrying a v3.0
 	// LOW before a v3.1 CRITICAL was therefore stored as LOW, and one whose
 	// first score was malformed was stored as 0.0 — in both cases while the
-	// same item explicitly stated a critical assessment. Take the most
-	// severe entry instead, and skip entries whose score will not parse.
+	// same item explicitly stated a critical assessment. M55 took the most
+	// severe entry across all versions; since M67 the VERSION decides first
+	// (v3.1 > v3.0 > v4.0 > v2, the rule every catalogue writer shares —
+	// v3.0 MEDIUM beside v2 HIGH is stored MEDIUM), and the most severe entry
+	// only within that version. Entries whose score will not parse still
+	// contribute their stated severity. See jvnWorstCVSS.
 	cvssScore, severity, cvssVersion := jvnWorstCVSS(item.CVSS)
 	if severity == "" {
 		severity = "UNKNOWN"

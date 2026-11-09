@@ -31,9 +31,15 @@
 --   whose upstream lastModified is not newer than the stored
 --   source_modified_at, so on its own it would never re-derive a row the old
 --   sync already dated: the M58 re-read offers exactly that timestamp again.
---   A row with a score and NULL cvss_version is recognisably pre-069 (every
---   NVD writer from here on records a version), and UpdateMetadata re-derives
---   it ONCE at an equal timestamp; see the guard's comment.
+--   A DATED row (source_modified_at set) with a score and NULL cvss_version
+--   is recognisably pre-069: every writer that dates a row from here on (the
+--   CVE sync, the catalogue re-read) records the version. UpdateMetadata
+--   re-derives such a row ONCE at an equal timestamp; see the guard's comment.
+--   Scored rows without a version are also created after 069 by the scanner
+--   from a CPE-path cache hit (that cache does not carry the version yet), but
+--   scanner rows are UNDATED, so the ordinary "stored NULL timestamp is
+--   writable" rule refreshes them and the exception is never what reaches
+--   them.
 --
 -- Mixed binaries (Codex M67 R1, High):
 --   A pre-069 binary running against this schema refreshes cvss_score /
@@ -82,4 +88,4 @@ ALTER TABLE vulnerabilities
     NOT VALID;
 
 COMMENT ON COLUMN vulnerabilities.cvss_version IS
-    'M67: the CVSS version (''3.1'', ''3.0'', ''4.0'', ''2.0'') of the assessment cvss_score and severity were derived from, chosen by internal/cvss.Select: v3.1 > v3.0 > v4.0 > v2, NVD Primary over Secondary within a version. Global non-tenant attribute. NULL: unscored, an unrecognised feed version (JVN), or written before 069. A row with a score and NULL cvss_version is pre-069 and is re-derived once by repository.UpdateMetadata at an equal upstream timestamp, so the CVE sync and the monthly catalogue re-read converge it without a backfill.';
+    'M67: the CVSS version (''3.1'', ''3.0'', ''4.0'', ''2.0'') of the assessment cvss_score and severity were derived from, chosen by internal/cvss.Select: v3.1 > v3.0 > v4.0 > v2, NVD Primary over Secondary within a version. Global non-tenant attribute. NULL: unscored, an unrecognised feed version (JVN), a scanner row created from a CPE-path cache hit (undated, refreshed by the next CVE sync), or written before 069. A dated row with a score and NULL cvss_version is pre-069 and is re-derived once by repository.UpdateMetadata at an equal upstream timestamp, so the CVE sync and the monthly catalogue re-read converge it without a backfill.';
