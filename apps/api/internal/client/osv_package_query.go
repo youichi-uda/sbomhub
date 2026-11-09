@@ -85,7 +85,11 @@ func (c *OSVClient) GetRecordState(ctx context.Context, id string) (OSVRecordSta
 	if !canonicalOSVID(id) {
 		return none, fmt.Errorf("osv: %q is not an OSV id", id)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/vulns/"+neturl.PathEscape(id), nil)
+	u, err := c.endpoint("/vulns/" + id) // canonical: no "/" (escaped by String)
+	if err != nil {
+		return none, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return none, err
 	}
@@ -728,6 +732,25 @@ func purlAgrees(p OSVPackage) error {
 
 // canonicalOSVID: OSV's id character set, [A-Za-z0-9:_.-]+ (Codex M70 R21
 // High-3).
+// endpoint joins path onto the configured base URL's PATH, keeping its
+// query (a mirror's credential) and refusing a fragment (Codex M70 R34
+// Medium-2: plain concatenation put the path inside the query).
+func (c *OSVClient) endpoint(path string) (string, error) {
+	u, err := neturl.Parse(c.baseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.Fragment != "" || strings.Contains(c.baseURL, "#") {
+		return "", fmt.Errorf("osv: base URL is not a plain absolute URL")
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + path
+	u.RawPath = ""
+	if u.RawQuery == "" {
+		u.ForceQuery = false
+	}
+	return u.String(), nil
+}
+
+// CanonicalOSVID reports whether s is a canonical OSV record id.
+func CanonicalOSVID(s string) bool { return canonicalOSVID(s) }
+
 func canonicalOSVID(s string) bool {
 	if s == "" || len(s) > MaxOSVFieldBytes {
 		return false
@@ -782,7 +805,11 @@ func (c *OSVClient) queryPackagePage(ctx context.Context, q osvPackageQueryReque
 	if err != nil {
 		return page, 0, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/query", bytes.NewReader(body))
+	u, err := c.endpoint("/query")
+	if err != nil {
+		return page, 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
 		return page, 0, err
 	}

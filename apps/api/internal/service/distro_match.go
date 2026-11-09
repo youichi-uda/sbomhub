@@ -115,6 +115,13 @@ func parsePurl(s string) (parsedPurl, bool) {
 		return parsedPurl{}, false
 	}
 	if i := strings.IndexByte(rest, '#'); i >= 0 {
+		// A subpath must be well formed even though it is not used (Codex
+		// M70 R34 Low-3): no empty, ".", ".." or slash-decoding segment.
+		for _, seg := range strings.Split(rest[i+1:], "/") {
+			if v, err := url.PathUnescape(seg); err != nil || v == "" || v == "." || v == ".." || strings.Contains(v, "/") {
+				return parsedPurl{}, false
+			}
+		}
 		rest = rest[:i]
 	}
 	var p parsedPurl

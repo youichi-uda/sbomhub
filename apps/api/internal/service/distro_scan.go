@@ -85,8 +85,9 @@ const (
 	// agreement and field length bounds (R22); 12: purl namespace,
 	// package-less GIT entries (R23); 13: strict affected purl, Ubuntu
 	// binaries validated (R27); 14: purl distro / arch qualifiers (R31);
-	// 15: rpm distro qualifier, strict subpath (R32)).
-	distroCachePayloadVersion = 15
+	// 15: rpm distro qualifier, strict subpath (R32); 16: every returned
+	// record id (R34)).
+	distroCachePayloadVersion = 16
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -759,11 +760,18 @@ func distroSource(osvBaseURL string) string {
 type distroCachePayload struct {
 	Version int            `json:"v"`
 	Records []distroRecord `json:"records"`
+	// IDs: every record id the query returned, reduced away or not (Codex
+	// M70 R34 High-1).
+	IDs []string `json:"ids"`
 }
 
 // distroLoad is one package's data as loaded.
 type distroLoad struct {
-	recs      []distroRecord
+	recs []distroRecord
+	// ids: every record id the query returned, including records the
+	// reduction dropped (no CVE identity, withdrawn, other packages only):
+	// a record in the answer is not absent from it (Codex M70 R34 High-1).
+	ids       []string
 	fetchedAt time.Time
 	// revision is the data's snapshot revision (rawRevision of the query).
 	revision string
@@ -772,6 +780,9 @@ type distroLoad struct {
 // data indexes the records under the load's revision.
 func (l distroLoad) data() distroData {
 	d := indexDistroRecords(l.recs)
+	for _, id := range l.ids {
+		d.ids[id] = true
+	}
 	if l.revision > d.revision {
 		d.revision = l.revision
 	}
@@ -800,10 +811,10 @@ func (s *DistroService) cachedLoad(ctx context.Context, k distroFetchKey) (distr
 	}
 	var p distroCachePayload
 	if json.Unmarshal(e.Payload, &p) != nil || p.Version != distroCachePayloadVersion || !validDistroRecords(p.Records) ||
-		!notFuture(e.DataModified) {
+		!validRecordIDs(p.IDs, p.Records) || !notFuture(e.DataModified) {
 		return distroLoad{}, false
 	}
-	return distroLoad{recs: p.Records, fetchedAt: e.FetchedAt, revision: e.DataModified}, true
+	return distroLoad{recs: p.Records, ids: p.IDs, fetchedAt: e.FetchedAt, revision: e.DataModified}, true
 }
 
 // loadFetch fetches k from OSV and offers the answer to the cache. When the
@@ -828,6 +839,7 @@ func (s *DistroService) loadFetch(ctx context.Context, k distroFetchKey, pace fu
 				}
 				for _, r := range page {
 					fp[r.ID] = r.Modified + "|" + r.Withdrawn
+					w.ids = append(w.ids, r.ID)
 				}
 				return nil
 			})
@@ -861,7 +873,7 @@ func (s *DistroService) loadFetch(ctx context.Context, k distroFetchKey, pace fu
 		}
 	}
 	l.fetchedAt = s.now().UTC()
-	payload, merr := json.Marshal(distroCachePayload{Version: distroCachePayloadVersion, Records: l.recs})
+	payload, merr := json.Marshal(distroCachePayload{Version: distroCachePayloadVersion, Records: l.recs, IDs: l.ids})
 	if merr == nil && generation != "" {
 		// No generation (Redis unreachable when the fetch started): not
 		// cached, since its order against other writes is unknown (Codex
@@ -904,6 +916,24 @@ func (s *DistroService) loadSlotted(ctx context.Context, k distroFetchKey, pace 
 		return hit, pages, err
 	}
 	return hit, pages, use(l)
+}
+
+// validRecordIDs: the cached id list is unique, bounded, canonical, and
+// covers every cached record.
+func validRecordIDs(ids []string, recs []distroRecord) bool {
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if seen[id] || !client.CanonicalOSVID(id) {
+			return false
+		}
+		seen[id] = true
+	}
+	for _, r := range recs {
+		if !seen[r.ID] {
+			return false
+		}
+	}
+	return true
 }
 
 // validDistroRecords rejects a cache entry that does not look like one this

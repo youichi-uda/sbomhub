@@ -741,7 +741,7 @@ func TestM70DistroLoad_LoserUsesTheWinner(t *testing.T) {
 	// A winner with a NEWER revision is already cached, as if another scan
 	// stored it while this one was fetching.
 	winner := distroCachePayload{Version: distroCachePayloadVersion, Records: []distroRecord{{ID: "DSA-WIN", CVEs: []string{"CVE-2021-0001"},
-		Releases: 1, Packages: 1, Modified: normaliseModified("2026-11-08T00:00:00Z"), Entries: []distroEntry{entry("Debian:11", "i", "0", "f", "9.9-1")}}}}
+		Releases: 1, Packages: 1, Modified: normaliseModified("2026-11-08T00:00:00Z"), Entries: []distroEntry{entry("Debian:11", "i", "0", "f", "9.9-1")}}}, IDs: []string{"DSA-WIN"}}
 	raw, _ := json.Marshal(winner)
 	if _, err := dc.Set(context.Background(), s.sourceID, "Debian", "openssl", cache.DistroCacheEntry{FetchedAt: time.Now(),
 		Payload: raw, DataModified: "2026-11-08T12:00:00.000000000Z", Generation: "99999999999999999999"}); err != nil {
