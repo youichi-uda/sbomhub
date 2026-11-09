@@ -75,3 +75,37 @@ func TestM70R32_EditedOutRecord(t *testing.T) {
 func r32Link(labelRev string) repository.SbomLink {
 	return repository.SbomLink{Method: "distro_fixed", Records: []string{"DSA-1"}, WMSource: "S", WMRev: labelRev, LabelSource: "S", LabelRev: labelRev}
 }
+
+// Codex M70 R33 High-2 / Medium-3 / Medium-4.
+func TestM70R33_ArchPartialLookupBinaryName(t *testing.T) {
+	if err := r32Query(t, "AlmaLinux:9", "pkg:rpm/almalinux/p?arch=aarch64"); err == nil {
+		t.Error("an aarch64 rpm entry accepted")
+	}
+	for _, a := range []string{"src", "noarch"} {
+		if err := r32Query(t, "AlmaLinux:9", "pkg:rpm/almalinux/p?arch="+a); err != nil {
+			t.Errorf("arch=%s refused: %v", a, err)
+		}
+	}
+	for _, body := range []string{
+		`{"id":"R","modified":"2026-11-01T00:00:00Z"}`,
+		`{"id":"R","modified":"2026-11-01T00:00:00Z","affected":null}`,
+		`{"id":"R","modified":"2026-11-01T00:00:00Z","affected":[{}]}`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }))
+		_, err := client.NewOSVClient().WithBaseURL(srv.URL).GetRecordState(context.Background(), "R")
+		srv.Close()
+		if err == nil {
+			t.Errorf("partial record accepted: %s", body)
+		}
+	}
+	withdrawn := `{"id":"R","modified":"2026-11-01T00:00:00Z","withdrawn":"2026-11-01T00:00:00Z"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, withdrawn) }))
+	defer srv.Close()
+	if _, err := client.NewOSVClient().WithBaseURL(srv.URL).GetRecordState(context.Background(), "R"); err != nil {
+		t.Errorf("withdrawn record without affected refused: %v", err)
+	}
+	rec := `{"id":"USN-9-1","modified":"2026-11-01T00:00:00Z","affected":[{"package":{"name":"p","ecosystem":"Ubuntu:22.04:LTS"},"ecosystem_specific":{"binaries":[{"binary_name":" p"}]}}]}`
+	if err := r27UbuntuQuery(t, `{"vulns":[`+rec+`]}`); err == nil {
+		t.Error("a binary_name with whitespace accepted")
+	}
+}

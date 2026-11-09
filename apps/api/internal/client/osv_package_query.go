@@ -106,15 +106,27 @@ func (c *OSVClient) GetRecordState(ctx context.Context, id string) (OSVRecordSta
 		return none, fmt.Errorf("osv: read record: bad body")
 	}
 	var r struct {
-		ID        string `json:"id"`
-		Modified  string `json:"modified"`
-		Withdrawn string `json:"withdrawn"`
-		Affected  []struct {
-			Package *OSVPackage `json:"package"`
-		} `json:"affected"`
+		ID        string          `json:"id"`
+		Modified  string          `json:"modified"`
+		Withdrawn string          `json:"withdrawn"`
+		Affected  json.RawMessage `json:"affected"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil || r.ID != id {
 		return none, fmt.Errorf("osv: record %q: not the record asked for", id)
+	}
+	// An active record must carry a well-formed affected array, every
+	// element validated as in a package query (Codex M70 R33 Medium-3): a
+	// partial answer must not read as "no longer names the package".
+	var affected []OSVAffected
+	if r.Withdrawn == "" {
+		if !bytes.HasPrefix(bytes.TrimSpace(r.Affected), []byte("[")) || json.Unmarshal(r.Affected, &affected) != nil {
+			return none, fmt.Errorf("osv: record %q has no affected array", id)
+		}
+		for i, a := range affected {
+			if err := validateAffected(a); err != nil {
+				return none, fmt.Errorf("osv: record %q affected[%d]: %w", id, i, err)
+			}
+		}
 	}
 	if r.Modified == "" { // required by the schema (Codex M70 R31 Medium-3)
 		return none, fmt.Errorf("osv: record %q has no modified time", id)
@@ -130,12 +142,9 @@ func (c *OSVClient) GetRecordState(ctx context.Context, id string) (OSVRecordSta
 		}
 	}
 	st := OSVRecordState{Modified: r.Modified, Withdrawn: r.Withdrawn}
-	for i, a := range r.Affected {
-		if a.Package == nil {
+	for _, a := range affected {
+		if a.Package.Name == "" && a.Package.Ecosystem == "" {
 			continue // a package-less (GIT) entry
-		}
-		if !canonicalToken(a.Package.Name) || !canonicalEcosystem(a.Package.Ecosystem) {
-			return none, fmt.Errorf("osv: record %q affected[%d]: package not canonical", id, i)
 		}
 		st.Packages = append(st.Packages, OSVPackage{Name: a.Package.Name, Ecosystem: a.Package.Ecosystem})
 	}
@@ -247,6 +256,12 @@ var (
 // or "trusty/esm").
 func purlQualifiersAgree(ecosystem, typ string, quals map[string]string) error {
 	if typ == "rpm" {
+		// An architecture-specific rpm entry is not a statement about the
+		// component's architecture, which is not compared (Codex M70 R33
+		// High-2): refused until it is.
+		if a, ok := quals["arch"]; ok && a != "src" && a != "noarch" {
+			return fmt.Errorf("arch=%s: architecture-specific rpm entries are not supported", a)
+		}
 		return rpmDistroAgrees(ecosystem, quals)
 	}
 	if typ != "deb" {
@@ -359,7 +374,7 @@ func validateUbuntuBinaries(es map[string]interface{}) error {
 			return fmt.Errorf("ecosystem_specific.binaries[%d] is not an object", i)
 		}
 		name, ok := m["binary_name"].(string)
-		if !ok || name == "" || len(name) > MaxOSVFieldBytes {
+		if !ok || name == "" || len(name) > MaxOSVFieldBytes || !canonicalToken(name) { // R33 Medium-4
 			return fmt.Errorf("ecosystem_specific.binaries[%d] has no usable binary_name", i)
 		}
 	}
