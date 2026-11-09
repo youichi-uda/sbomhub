@@ -26,7 +26,7 @@ func TestM70R27_StrictAffectedPurl(t *testing.T) {
 			t.Errorf("%s accepted", purl)
 		}
 	}
-	for _, purl := range []string{"pkg:deb/debian/p", "pkg:deb/debian/p?arch=source", "pkg:deb/Debian/p@1.0-1?arch=source&distro=bullseye"} {
+	for _, purl := range []string{"pkg:deb/debian/p", "pkg:deb/debian/p?arch=source", "pkg:deb/Debian/p?arch=source&distro=bullseye"} // unversioned: a versioned Debian purl is refused (R52) {
 		rec := `{"id":"DSA-9","modified":"2026-11-01T00:00:00Z","affected":[{"package":{"name":"p","ecosystem":"Debian:11","purl":"` + purl + `"}}]}`
 		if err := r15Query(t, `{"vulns":[`+rec+`]}`); err != nil {
 			t.Errorf("%s refused: %v", purl, err)
