@@ -697,6 +697,10 @@ func main() {
 
 	nvdService := service.NewNVDServiceWithCache(vulnRepo, componentRepo, cfg.NVDAPIKey, nvdCache, cfg.NVDURL, cfg.Offline)
 	jvnService := service.NewJVNService(vulnRepo, componentRepo, cfg.JVNURL, cfg.Offline)
+	// M70: the distro step of every scan relabels a distro package's links
+	// from the distro's own fixed-version data (OSV, SBOMHUB_OSV_URL), cached
+	// in Redis like the NVD answers. Offline mode makes it a no-op.
+	distroService := service.NewDistroService(componentRepo, cfg.OSVURL, cache.NewDistroCache(rdb), cfg.Offline)
 	statsService := service.NewStatsService(statsRepo)
 	vexService := service.NewVEXService(vexRepo, vulnRepo)
 	licensePolicyService := service.NewLicensePolicyService(licensePolicyRepo, componentRepo, sbomRepo)
@@ -889,7 +893,8 @@ func main() {
 	// or-nothing the moment a threshold trips.
 	sbomHandler := handler.NewSbomHandler(db, sbomService, nvdService, jvnService, scanTracker).
 		WithDiffWebhook(projectDiffService, projectDiffWebhookService, auditRepo).
-		WithScanDeadline(scanDeadline)
+		WithScanDeadline(scanDeadline).
+		WithDistroScanner(distroService)
 	sbomDiffHandler := handler.NewSbomDiffHandler(sbomDiffService)
 	// M10-6 (#74) — see projectDiffService comment above. M11-4 (#79)
 	// extends with AI summary + CSV/PDF export wired through the same
@@ -913,7 +918,8 @@ func main() {
 	// M62: the manual scan reports through the same tracker as the upload
 	// scan, under the same deadline.
 	vulnHandler := handler.NewVulnerabilityHandler(db, sbomService, nvdService, jvnService).
-		WithScanTracking(scanTracker, scanDeadline)
+		WithScanTracking(scanTracker, scanDeadline).
+		WithDistroScanner(distroService)
 	statsHandler := handler.NewStatsHandler(statsService)
 	// auditRepo is wired for the M27-A (#132 / F381) cross-project VEX
 	// apply endpoint's vex_statement_reused_cross_project domain audit row
@@ -2241,7 +2247,8 @@ func main() {
 	// Vulnerability scan job - runs hourly to scan components against NVD
 	// Uses NVDService with Redis cache for efficient API usage
 	vulnScanJob := scheduler.NewVulnerabilityScanJobFull(db, nvdService, notificationService).
-		WithScanDeadline(scanDeadline)
+		WithScanDeadline(scanDeadline).
+		WithDistroScanner(distroService)
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()

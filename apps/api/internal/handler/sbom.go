@@ -131,11 +131,23 @@ type SbomHandler struct {
 	// scanDeadline is the overall deadline of one post-upload scan
 	// (SBOMHUB_SCAN_DEADLINE, M62); 0 means service.DefaultScanDeadline.
 	scanDeadline time.Duration
+
+	// distroService (M70) is the distro step, run after the NVD and JVN
+	// sweeps; nil skips it.
+	distroService componentScanner
 }
 
 // WithScanDeadline sets the overall scan deadline (M62).
 func (h *SbomHandler) WithScanDeadline(d time.Duration) *SbomHandler {
 	h.scanDeadline = d
+	return h
+}
+
+// WithDistroScanner adds the distro step (M70) after the NVD and JVN sweeps.
+func (h *SbomHandler) WithDistroScanner(d *service.DistroService) *SbomHandler {
+	if d != nil { // typed-nil guard, as in NewVulnerabilityHandler
+		h.distroService = d
+	}
 	return h
 }
 
@@ -593,6 +605,7 @@ func (h *SbomHandler) runScanRun(ctx context.Context, sbomID, tenantID uuid.UUID
 	out := runSBOMScan(ctx, h.db, tenantID, sbomID, h.scanDeadline, []scanStep{
 		{source: "nvd", scanner: h.nvdService, okMsg: "Auto NVD scan completed"},
 		{source: "jvn", scanner: h.jvnService, okMsg: "Auto JVN scan completed"},
+		{source: "distro", scanner: h.distroService, okMsg: "Auto distro relabel completed"},
 	})
 	recordScanOutcome(h.scanTracker, sbomID, gen, out)
 }
