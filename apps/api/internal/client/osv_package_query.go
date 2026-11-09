@@ -112,6 +112,9 @@ func (c *OSVClient) GetRecordState(ctx context.Context, id string) (modified, wi
 	if err := json.Unmarshal(raw, &r); err != nil || r.ID != id {
 		return "", "", fmt.Errorf("osv: record %q: not the record asked for", id)
 	}
+	if r.Modified == "" { // required by the schema (Codex M70 R31 Medium-3)
+		return "", "", fmt.Errorf("osv: record %q has no modified time", id)
+	}
 	latest := time.Now().Add(maxOSVTimestampSkew)
 	for _, ts := range []string{r.Modified, r.Withdrawn} {
 		if ts == "" {
@@ -132,15 +135,16 @@ func (c *OSVClient) GetRecordState(ctx context.Context, id string) (modified, wi
 // and non-empty values, no empty subpath segment. It returns the decoded
 // path segments, type lower-cased, namespaces lower-cased (deb / rpm
 // namespaces are case-insensitive vendors), the name as is.
-func parseStrictPurl(purl string) ([]string, error) {
+func parseStrictPurl(purl string) (segs []string, quals map[string]string, err error) {
 	rest, ok := strings.CutPrefix(purl, "pkg:")
 	if !ok {
-		return nil, fmt.Errorf("not a purl")
+		return nil, nil, fmt.Errorf("not a purl")
 	}
+	quals = map[string]string{}
 	if i := strings.IndexByte(rest, '#'); i >= 0 {
 		for _, seg := range strings.Split(strings.Trim(rest[i+1:], "/"), "/") {
 			if v, err := neturl.PathUnescape(seg); err != nil || v == "" || v == "." || v == ".." {
-				return nil, fmt.Errorf("bad subpath")
+				return nil, nil, fmt.Errorf("bad subpath")
 			}
 		}
 		rest = rest[:i]
@@ -150,42 +154,118 @@ func parseStrictPurl(purl string) ([]string, error) {
 		for _, kv := range strings.Split(rest[i+1:], "&") {
 			k, v, ok := strings.Cut(kv, "=")
 			if !ok || k == "" || k != strings.ToLower(k) || seen[k] {
-				return nil, fmt.Errorf("bad qualifier %q", kv)
+				return nil, nil, fmt.Errorf("bad qualifier %q", kv)
 			}
 			seen[k] = true
 			for _, c := range k {
 				if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '.' && c != '-' && c != '_' {
-					return nil, fmt.Errorf("bad qualifier key %q", k)
+					return nil, nil, fmt.Errorf("bad qualifier key %q", k)
 				}
 			}
-			if dv, err := neturl.PathUnescape(v); err != nil || dv == "" {
-				return nil, fmt.Errorf("bad qualifier value for %q", k)
+			dv, err := neturl.PathUnescape(v)
+			if err != nil || dv == "" {
+				return nil, nil, fmt.Errorf("bad qualifier value for %q", k)
 			}
+			quals[k] = dv
 		}
 		rest = rest[:i]
 	}
 	if i := strings.LastIndexByte(rest, '@'); i >= 0 && !strings.Contains(rest[i:], "/") {
 		if v, err := neturl.PathUnescape(rest[i+1:]); err != nil || v == "" {
-			return nil, fmt.Errorf("empty or malformed version")
+			return nil, nil, fmt.Errorf("empty or malformed version")
 		}
 		rest = rest[:i]
 	}
 	raw := strings.Split(rest, "/")
 	if len(raw) < 2 {
-		return nil, fmt.Errorf("no name")
+		return nil, nil, fmt.Errorf("no name")
 	}
 	out := make([]string, len(raw))
 	for i, seg := range raw {
 		v, err := neturl.PathUnescape(seg)
 		if err != nil || v == "" {
-			return nil, fmt.Errorf("bad path segment %d", i)
+			return nil, nil, fmt.Errorf("bad path segment %d", i)
 		}
 		if i < len(raw)-1 {
 			v = strings.ToLower(v)
 		}
 		out[i] = v
 	}
-	return out, nil
+	return out, quals, nil
+}
+
+// Release codenames, for checking a purl's distro qualifier against the
+// entry's ecosystem (Codex M70 R31 High-2). A release missing here (a new
+// one) is accepted with any codename that is not another known release's.
+var (
+	debianCodenames = map[string]string{"3.0": "woody", "3.1": "sarge", "4.0": "etch", "5.0": "lenny", "6.0": "squeeze",
+		"7": "wheezy", "8": "jessie", "9": "stretch", "10": "buster", "11": "bullseye", "12": "bookworm", "13": "trixie",
+		"14": "forky", "15": "duke"}
+	ubuntuCodenames = map[string]string{"12.04": "precise", "14.04": "trusty", "16.04": "xenial", "18.04": "bionic",
+		"20.04": "focal", "22.04": "jammy", "22.10": "kinetic", "23.04": "lunar", "23.10": "mantic", "24.04": "noble",
+		"24.10": "oracular", "25.04": "plucky", "25.10": "questing", "26.04": "resolute", "26.10": "stonking"}
+)
+
+// purlQualifiersAgree: on a Debian / Ubuntu entry, an arch qualifier names
+// the source package, and a distro qualifier names the entry's release (its
+// codename is one "/" part of Ubuntu Pro streams such as "esm-apps/xenial"
+// or "trusty/esm").
+func purlQualifiersAgree(ecosystem, typ string, quals map[string]string) error {
+	if typ != "deb" {
+		return nil
+	}
+	if a, ok := quals["arch"]; ok && a != "source" {
+		return fmt.Errorf("arch=%s: not the source package", a)
+	}
+	distro, ok := quals["distro"]
+	if !ok {
+		return nil
+	}
+	parts := strings.Split(ecosystem, ":")
+	var table map[string]string
+	release := ""
+	switch parts[0] {
+	case "Debian":
+		table = debianCodenames
+		if len(parts) == 2 {
+			release = parts[1]
+		}
+		if r, ok := strings.CutPrefix(distro, "debian-"); ok && r == release {
+			return nil
+		}
+	case "Ubuntu":
+		table = ubuntuCodenames
+		for _, p := range parts[1:] {
+			if len(p) == 5 && p[2] == '.' {
+				release = p
+			}
+		}
+	default:
+		return nil
+	}
+	// Ubuntu Pro streams carry the codename as one "/" part
+	// ("esm-apps/xenial", "trusty/esm"); Debian's is the codename alone.
+	words := []string{distro}
+	if parts[0] == "Ubuntu" {
+		words = strings.Split(distro, "/")
+	}
+	want, known := table[release]
+	named := false
+	for _, w := range words {
+		if known && w == want {
+			named = true
+			continue
+		}
+		for r, name := range table {
+			if name == w && r != release {
+				return fmt.Errorf("distro=%s names release %s, not %s", distro, r, ecosystem)
+			}
+		}
+	}
+	if known && !named {
+		return fmt.Errorf("distro=%s does not name %s (%s)", distro, ecosystem, want)
+	}
+	return nil
 }
 
 // validateUbuntuBinaries checks Ubuntu's ecosystem_specific.binaries, when
@@ -515,8 +595,11 @@ func canonicalCVE(s string) bool {
 // for the distro ecosystems this build reads, the same packaging type
 // (Codex M70 R22 High-2).
 func purlAgrees(p OSVPackage) error {
-	segs, err := parseStrictPurl(p.Purl)
+	segs, quals, err := parseStrictPurl(p.Purl)
 	if err != nil {
+		return fmt.Errorf("package purl %q: %w", p.Purl, err)
+	}
+	if err := purlQualifiersAgree(p.Ecosystem, segs[0], quals); err != nil {
 		return fmt.Errorf("package purl %q: %w", p.Purl, err)
 	}
 	typ := segs[0]

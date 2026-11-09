@@ -26,7 +26,7 @@ func TestM70R27_StrictAffectedPurl(t *testing.T) {
 			t.Errorf("%s accepted", purl)
 		}
 	}
-	for _, purl := range []string{"pkg:deb/debian/p", "pkg:deb/debian/p?arch=source", "pkg:deb/Debian/p@1.0-1?arch=source&distro=bookworm"} {
+	for _, purl := range []string{"pkg:deb/debian/p", "pkg:deb/debian/p?arch=source", "pkg:deb/Debian/p@1.0-1?arch=source&distro=bullseye"} {
 		rec := `{"id":"DSA-9","modified":"2026-11-01T00:00:00Z","affected":[{"package":{"name":"p","ecosystem":"Debian:11","purl":"` + purl + `"}}]}`
 		if err := r15Query(t, `{"vulns":[`+rec+`]}`); err != nil {
 			t.Errorf("%s refused: %v", purl, err)
@@ -58,7 +58,7 @@ func TestM70R27_WithdrawnClearKeepsWatermark(t *testing.T) {
 		WMSource: "S", WMRev: "10", LabelSource: "S", LabelRev: "10"}
 	lookup := func(string) recordState { return recordState{withdrawn: true, rev: "20"} }
 	var counts DistroScanReport
-	pl := d.settleNoVerdict(l, []byte(`{"data_modified":"05"}`), lookup, &counts)
+	pl, _ := d.settleNoVerdict(l, []byte(`{"data_modified":"05"}`), lookup, &counts)
 	if !pl.withdrawnClear || pl.noVerdict {
 		t.Fatalf("%+v: want a withdrawn clear", pl)
 	}
@@ -75,10 +75,10 @@ func TestM70R27_WithdrawnClearKeepsWatermark(t *testing.T) {
 	// revision: no withdrawn clear.
 	l2 := l
 	l2.LabelSource = "T"
-	if pl := d.settleNoVerdict(l2, nil, lookup, &counts); pl.withdrawnClear {
+	if pl, _ := d.settleNoVerdict(l2, nil, lookup, &counts); pl.withdrawnClear {
 		t.Error("cleared a label of another source")
 	}
-	if pl := d.settleNoVerdict(l, nil, func(string) recordState { return recordState{withdrawn: true, rev: "09"} }, &counts); pl.withdrawnClear {
+	if pl, _ := d.settleNoVerdict(l, nil, func(string) recordState { return recordState{withdrawn: true, rev: "09"} }, &counts); pl.withdrawnClear {
 		t.Error("cleared on a withdrawal older than the label")
 	}
 }

@@ -277,6 +277,11 @@ func (r *ComponentRepository) SettleDistroNoVerdict(ctx context.Context, compone
 	return n == 1, err
 }
 
+// withdrawnWMRev: the source's watermark after a withdrawn clear — the
+// newer of the one read and the data's own revision (a clear on data that
+// did not go down still advances it; one on data that did keeps it).
+const withdrawnWMRev = `GREATEST(COALESCE($3::jsonb->>'wm_rev', ''), COALESCE($3::jsonb->>'data_modified', ''))`
+
 // ClearDistroWithdrawn clears a distro label whose evidence records were ALL
 // withdrawn from OSV (Codex M70 R24 High-1, R27 High-2). OSV's package query
 // omits withdrawn records, so the package revision can go down and the
@@ -285,7 +290,9 @@ func (r *ComponentRepository) SettleDistroNoVerdict(ctx context.Context, compone
 // as it is, and applies only when the row still rests on exactly that
 // evidence — the same source, the same record list and the same watermark
 // it was read with (one statement, so nothing slips in between). p is
-// {"source_id", "records", "wm_rev"}. It reports whether a row changed.
+// {"source_id", "records", "wm_rev", "data_modified"}; the source's
+// watermark becomes the newer of wm_rev and data_modified, and the records
+// are kept as tombstones. It reports whether a row changed.
 func (r *ComponentRepository) ClearDistroWithdrawn(ctx context.Context, componentID, vulnID uuid.UUID, p []byte) (bool, error) {
 	if len(p) == 0 {
 		return false, fmt.Errorf("withdrawn clear: needs the evidence it rests on")
@@ -294,7 +301,8 @@ func (r *ComponentRepository) ClearDistroWithdrawn(ctx context.Context, componen
 		UPDATE component_vulnerabilities cv
 		   SET match_method = CASE WHEN cv.match_evidence->>'prior_method' IN (`+priorMethodVocabulary+`)
 		                           THEN cv.match_evidence->>'prior_method' END,
-		       match_evidence = jsonb_build_object('wm_source', `+storedWMSource+`, 'wm_rev', `+storedWMRev+`, 'wm_by_source', `+carriedWM+`,
+		       match_evidence = jsonb_build_object('wm_source', ($3::jsonb->>'source_id'), 'wm_rev', `+withdrawnWMRev+`,
+		           'wm_by_source', `+carriedWM+` || jsonb_build_object($3::jsonb->>'source_id', `+withdrawnWMRev+`),
 		           'withdrawn_by_source', `+carriedTombstones+` || jsonb_build_object($3::jsonb->>'source_id',
 		               COALESCE(cv.match_evidence->'withdrawn_by_source'->($3::jsonb->>'source_id'), '[]'::jsonb) || ($3::jsonb->'records')))
 		 WHERE cv.component_id = $1

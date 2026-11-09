@@ -83,8 +83,8 @@ const (
 	// 10: unique record ids, OSV id character set (R21); 11: affected purl
 	// agreement and field length bounds (R22); 12: purl namespace,
 	// package-less GIT entries (R23); 13: strict affected purl, Ubuntu
-	// binaries validated (R27)).
-	distroCachePayloadVersion = 13
+	// binaries validated (R27); 14: purl distro / arch qualifiers (R31)).
+	distroCachePayloadVersion = 14
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -113,8 +113,12 @@ type recordState struct {
 // parameter, or nil; failed reports a lookup that failed.
 func (d distroData) withdrawnClear(l repository.SbomLink, lookup func(id string) recordState) (p []byte, failed bool) {
 	wmRev := l.RevFor(d.sourceID)
+	// Resolved whatever the revisions (Codex M70 R31 High-1): even when the
+	// package revision did not go down, a clear of a label whose records
+	// were withdrawn must leave their tombstones, or a delayed scan that read
+	// them before the withdrawal, at the same revision, brings it back.
 	if !model.MatchMethod(l.Method).IsDistro() || l.LabelSource != d.sourceID ||
-		wmRev <= d.revision || lookup == nil || len(l.Records) == 0 {
+		lookup == nil || len(l.Records) == 0 {
 		return nil, false
 	}
 	for _, id := range l.Records {
@@ -132,22 +136,27 @@ func (d distroData) withdrawnClear(l repository.SbomLink, lookup func(id string)
 		}
 	}
 	b, _ := json.Marshal(struct {
-		SourceID string   `json:"source_id"`
-		Records  []string `json:"records"`
-		WMRev    string   `json:"wm_rev"`
-	}{d.sourceID, l.Records, wmRev})
+		SourceID     string   `json:"source_id"`
+		Records      []string `json:"records"`
+		WMRev        string   `json:"wm_rev"`
+		DataModified string   `json:"data_modified"`
+	}{d.sourceID, l.Records, wmRev, d.revision})
 	return b, false
 }
 
 // settleNoVerdict is the one settlement of a no-verdict link.
-func (d distroData) settleNoVerdict(l repository.SbomLink, wm []byte, lookup func(id string) recordState, counts *DistroScanReport) pendingLink {
+// ok is false when nothing may be written: a lookup of the label's records
+// failed, so whether it is a withdrawal is unknown; the label is kept and
+// the failure reported (distro_data_failed).
+func (d distroData) settleNoVerdict(l repository.SbomLink, wm []byte, lookup func(id string) recordState, counts *DistroScanReport) (pl pendingLink, ok bool) {
 	p, failed := d.withdrawnClear(l, lookup)
 	if failed {
 		counts.LookupFailures++
+		return pendingLink{}, false
 	}
 	if p != nil {
 		counts.Cleared++
-		return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, withdrawnClear: true, evidence: p}
+		return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, withdrawnClear: true, evidence: p}, true
 	}
 	// Counted as cleared only when the write will clear it as read: the
 	// label's own evidence is of this source and not newer, and the data is
@@ -156,7 +165,7 @@ func (d distroData) settleNoVerdict(l repository.SbomLink, wm []byte, lookup fun
 	if model.MatchMethod(l.Method).IsDistro() && l.LabelSource == d.sourceID && l.LabelRev <= d.revision && l.RevFor(d.sourceID) <= d.revision {
 		counts.Cleared++
 	}
-	return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: wm}
+	return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: wm}, true
 }
 
 // withdrawalResolver looks a record up by id, memoised and paced like the
@@ -507,7 +516,9 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 				counts.NoVerdict[dec.reason]++
 				// Settled on the row as it is when written (clear a distro
 				// label / leave the watermark): Codex M70 R22 High-1.
-				g = append(g, d.settleNoVerdict(l, wm, lookup, &counts))
+				if pl, ok := d.settleNoVerdict(l, wm, lookup, &counts); ok {
+					g = append(g, pl)
+				}
 				continue
 			}
 			mk := w.target.release + "\x00" + w.target.pkg + "\x00" + w.target.version + "\x00" + w.target.binary + "\x00" + l.CVEID
@@ -530,7 +541,9 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 				counts.NoVerdict["evidence_too_large"]++
 				// The same settlement as any no verdict (Codex M70 R24 Low-4,
 				// R26 High-1).
-				g = append(g, d.settleNoVerdict(l, wm, lookup, &counts))
+				if pl, ok := d.settleNoVerdict(l, wm, lookup, &counts); ok {
+					g = append(g, pl)
+				}
 				continue
 			}
 			switch dec.verdict {
