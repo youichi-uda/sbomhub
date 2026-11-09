@@ -1,9 +1,11 @@
 package service
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/sbomhub/sbomhub/internal/cache"
+	"github.com/sbomhub/sbomhub/internal/cvss"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -104,4 +106,56 @@ func TestM67NVDCache_PreM67EntryIsRefetched(t *testing.T) {
 	if !usable || len(got) != 2 || got[0].CVSSVersion == nil || *got[0].CVSSVersion != "3.1" {
 		t.Errorf("a current entry was not served intact: usable=%v %+v", usable, got)
 	}
+}
+
+// TestM67NVD_MissingBaseScoreIsNotZero (Codex M67 R3, High). baseScore absent
+// or null on the wire used to decode as a real 0.0. Under version precedence
+// an empty v3.1 entry then beat a valid v4.0 9.8 CRITICAL and was stored
+// 0.0 / NONE — a critical gate passes on it. An absent score is absent.
+func TestM67NVD_MissingBaseScoreIsNotZero(t *testing.T) {
+	cases := []struct {
+		name, metrics string
+		version       cvss.Version
+		score         *float64
+		sev           string
+	}{
+		{"absent v3.1 beside a valid v4.0",
+			`{"cvssMetricV31":[{"type":"Primary","cvssData":{"version":"3.1"}}],
+			  "cvssMetricV40":[{"type":"Secondary","cvssData":{"baseScore":9.8,"baseSeverity":"CRITICAL"}}]}`,
+			cvss.V40, ptrF(9.8), "CRITICAL"},
+		{"null v3.1 beside a valid v4.0",
+			`{"cvssMetricV31":[{"type":"Primary","cvssData":{"baseScore":null}}],
+			  "cvssMetricV40":[{"type":"Secondary","cvssData":{"baseScore":9.8,"baseSeverity":"CRITICAL"}}]}`,
+			cvss.V40, ptrF(9.8), "CRITICAL"},
+		{"lone absent score", `{"cvssMetricV31":[{"type":"Primary","cvssData":{}}]}`, "", nil, "UNKNOWN"},
+		{"absent score with a stated rating keeps the rating",
+			`{"cvssMetricV31":[{"type":"Primary","cvssData":{"baseSeverity":"HIGH"}}]}`, cvss.V31, nil, "HIGH"},
+		{"a real 0.0 stays 0.0", `{"cvssMetricV31":[{"type":"Primary","cvssData":{"baseScore":0.0,"baseSeverity":"NONE"}}]}`,
+			cvss.V31, ptrF(0), "NONE"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var m NVDMetrics
+			if err := json.Unmarshal([]byte(tc.metrics), &m); err != nil {
+				t.Fatal(err)
+			}
+			got := SelectNVDCVSS(m)
+			if got.Version != tc.version || got.Severity != tc.sev || !eqF(got.Score, tc.score) {
+				t.Errorf("SelectNVDCVSS = {%q %v %q}, want {%q %v %q}", got.Version, got.Score, got.Severity, tc.version, tc.score, tc.sev)
+			}
+		})
+	}
+	var m NVDMetrics
+	if err := json.Unmarshal([]byte(`{"cvssMetricV31":[{"cvssData":{"baseScore":"9.8"}}]}`), &m); err == nil {
+		t.Error("a non-numeric baseScore decoded; it must fail as it did before")
+	}
+}
+
+func ptrF(v float64) *float64 { return &v }
+
+func eqF(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }

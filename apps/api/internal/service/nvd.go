@@ -350,6 +350,9 @@ type CvssMetric struct {
 type CvssData struct {
 	BaseScore    float64 `json:"baseScore"`
 	BaseSeverity string  `json:"baseSeverity"`
+	// baseScoreMissing is set by UnmarshalJSON (nvd_cvss.go) when the wire
+	// carried no baseScore or null — NOT a 0.0 score (Codex M67 R3, High).
+	baseScoreMissing bool
 }
 
 // nvdComponentKey is used for deduplication in NVD scanning.

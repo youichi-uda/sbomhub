@@ -156,3 +156,28 @@ func derefS(p *string) string {
 	}
 	return *p
 }
+
+// TestM67CVESync_MissingBaseScoreIsNotZero (Codex M67 R3, High): the sync
+// decodes NVD metrics through service.NVDMetrics too, so an empty v3.1 entry
+// must not outrank a valid v4.0 9.8 CRITICAL here either.
+func TestM67CVESync_MissingBaseScoreIsNotZero(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"totalResults": 1, "startIndex": 0, "resultsPerPage": 2000,
+			"vulnerabilities": [{"cve": {"id": "CVE-2026-0002",
+				"published": "2026-01-01T00:00:00.000", "lastModified": "2026-07-01T00:00:00.000",
+				"descriptions": [{"lang": "en", "value": "x"}],
+				"metrics": {"cvssMetricV31": [{"type": "Primary", "cvssData": {"baseScore": null}}],
+				            "cvssMetricV40": [{"type": "Secondary", "cvssData": {"baseScore": 9.8, "baseSeverity": "CRITICAL"}}]},
+				"configurations": []}}]}`)
+	}))
+	defer srv.Close()
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, nil, srv.URL, false)
+	cves, err := j.fetchModifiedCVEs(context.Background(), time.Now().Add(-24*time.Hour))
+	if err != nil || len(cves) != 1 {
+		t.Fatalf("fetchModifiedCVEs = %v, %v", cves, err)
+	}
+	if c := cves[0]; c.Severity != "CRITICAL" || deref(c.CVSSScore) != 9.8 || derefS(c.CVSSVersion) != "4.0" {
+		t.Errorf("sync extracted %s/%v/v%s, want CRITICAL/9.8/v4.0", c.Severity, deref(c.CVSSScore), derefS(c.CVSSVersion))
+	}
+}
