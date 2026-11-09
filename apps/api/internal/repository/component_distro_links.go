@@ -176,9 +176,11 @@ var ErrNotDistroMethod = errors.New("relabel: not a distro match method")
 // never inserts: the distro step only relabels what the NVD / JVN sweeps
 // linked, so a link removed meanwhile stays removed.
 //
-// The stored method is replaced only by a strictly stronger one
-// (model.MatchMethod.Rank), so a link a scan once found distro_affected is
-// never relabelled distro_fixed by a later one; a link already carrying THIS
+// The stored method is replaced by a strictly stronger one
+// (model.MatchMethod.Rank), or — whatever the rank — by strictly NEWER data
+// of the stored label's own source (Codex M70 R41 High-1); so evidence of
+// equal standing (the same revision, or another source) never relabels a
+// distro_affected link distro_fixed, but the source's own update does; a link already carrying THIS
 // method gets its evidence refreshed when it changed other than fetched_at /
 // prior_method. prior_method records the method before the FIRST distro
 // label, carried across distro relabels, so ClearDistro can restore it. It
@@ -202,6 +204,13 @@ func (r *ComponentRepository) RelabelDistro(ctx context.Context, componentID, vu
 		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
 		   AND (cv.match_method IS NULL
 		        OR cv.match_method = ANY($5)
+		        -- strictly NEWER data of the label's own source replaces any
+		        -- distro label, whatever the rank: the rank rule orders
+		        -- statements of equal standing, not a source's update of its
+		        -- own statement (Codex M70 R41 High-1)
+		        OR (cv.match_method IN (`+distroLabels+`)
+		            AND cv.match_evidence->>'source_id' IS NOT DISTINCT FROM ($4::jsonb->>'source_id')
+		            AND COALESCE(cv.match_evidence->>'data_modified', '') < COALESCE($4::jsonb->>'data_modified', ''))
 		        OR (cv.match_method = $3
 		            AND (cv.match_evidence - 'fetched_at' - 'prior_method' - 'wm_source' - 'wm_rev' - 'wm_by_source' - 'withdrawn_by_source')
 		                IS DISTINCT FROM ($4::jsonb - 'fetched_at')))

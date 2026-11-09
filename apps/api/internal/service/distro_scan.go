@@ -435,6 +435,13 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 			changed, err = s.store.ClearDistroWithdrawn(txCtx, l.componentID, l.vulnID, l.evidence)
 		case l.replace != nil:
 			changed, err = s.store.ReplaceDistroWithdrawn(txCtx, l.componentID, l.vulnID, l.method, l.evidence, l.replace)
+			if err == nil && !changed {
+				// The row no longer rests on what the withdrawal was resolved
+				// against (an overlapping scan wrote it): the verdict is still
+				// written by the ordinary, state-adaptive relabel (Codex M70
+				// R41 High-1), never dropped silently.
+				changed, err = s.store.RelabelDistro(txCtx, l.componentID, l.vulnID, l.method, l.evidence)
+			}
 			stillDistro = true
 		case l.noVerdict:
 			changed, stillDistro, err = s.store.SettleDistroNoVerdictOutcome(txCtx, l.componentID, l.vulnID, l.evidence)

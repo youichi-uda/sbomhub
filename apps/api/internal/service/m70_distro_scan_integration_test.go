@@ -698,19 +698,21 @@ func TestM70Watermark_AdvancesWhenRankRefuses(t *testing.T) {
 			[]byte(`{"source":"osv","source_id":"S","fixed":"r1","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
 		return err
 	})
+	// Rank refuses across sources (R41: within one source, newer data
+	// replaces); the refused check still advances THAT source's watermark.
 	run(func(c context.Context) error {
 		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
-			[]byte(`{"source":"osv","source_id":"S","fixed":"r3","data_modified":"2026-11-03T00:00:00.000000000Z"}`))
+			[]byte(`{"source":"osv","source_id":"T","fixed":"r3","data_modified":"2026-11-03T00:00:00.000000000Z"}`))
 		if changed {
-			t.Error("rank allowed affected -> fixed")
+			t.Error("rank allowed affected -> fixed across sources")
 		}
 		return err
 	})
 	run(func(c context.Context) error {
-		changed, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286,
-			[]byte(`{"source":"osv","source_id":"S","data_modified":"2026-11-02T00:00:00.000000000Z"}`))
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"T","fixed":"t2","data_modified":"2026-11-02T00:00:00.000000000Z"}`))
 		if changed {
-			t.Error("an older clear went through after newer data was processed")
+			t.Error("older data of T went through after T's newer check")
 		}
 		return err
 	})
@@ -1148,5 +1150,43 @@ func TestM70LockDistroLink_NoWait(t *testing.T) {
 	}
 	if d := time.Since(started); d > 2*time.Second {
 		t.Errorf("waited %v", d)
+	}
+}
+
+// Codex M70 R41 High-1: strictly newer data of the label's own source
+// replaces it whatever the rank; equal-revision data does not.
+func TestM70RelabelDistro_SameSourceNewerReplaces(t *testing.T) {
+	e := m70Seed(t, "m70samesrc")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"S","fixed":"a","data_modified":"2026-11-10T00:00:00.000000000Z"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"S","fixed":"same","data_modified":"2026-11-10T00:00:00.000000000Z"}`))
+		if changed {
+			t.Error("equal-revision fixed replaced affected")
+		}
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"S","fixed":"newer","data_modified":"2026-11-11T00:00:00.000000000Z"}`))
+		if !changed {
+			t.Error("newer same-source fixed did not replace affected")
+		}
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_fixed" || r.evidence.Fixed != "newer" {
+		t.Errorf("%+v", r)
 	}
 }
