@@ -127,13 +127,15 @@ func (d distroData) withdrawnClear(l repository.SbomLink, lookup func(id string)
 		lookup == nil || len(l.Records) == 0 {
 		return nil, false
 	}
-	for _, id := range l.Records {
-		if d.ids[id] {
-			return nil, false // still in the data: not a withdrawal
-		}
-	}
+	// Only the records ABSENT from the data are looked up: the data,
+	// present records included, already gave no verdict, so they do not
+	// support the label (Codex M70 R36 High-1: a present but undecided
+	// record must not keep a withdrawn record's label forever).
 	tombs := map[string]string{}
 	for _, id := range l.Records {
+		if d.ids[id] {
+			continue
+		}
 		st := lookup(id)
 		switch {
 		case st.failed:
@@ -146,6 +148,9 @@ func (d distroData) withdrawnClear(l repository.SbomLink, lookup func(id string)
 			return nil, false
 		}
 		tombs[id] = st.rev
+	}
+	if len(tombs) == 0 {
+		return nil, false // every record still in the data: no withdrawal
 	}
 	b, _ := json.Marshal(struct {
 		SourceID     string            `json:"source_id"`

@@ -85,7 +85,7 @@ func (c *OSVClient) GetRecordState(ctx context.Context, id string) (OSVRecordSta
 	if !canonicalOSVID(id) {
 		return none, fmt.Errorf("osv: %q is not an OSV id", id)
 	}
-	u, err := c.endpoint("/vulns/" + id) // canonical: no "/" (escaped by String)
+	u, err := c.endpoint("/vulns/" + neturl.PathEscape(id))
 	if err != nil {
 		return none, err
 	}
@@ -743,14 +743,21 @@ func purlAgrees(p OSVPackage) error {
 // High-3).
 // endpoint joins path onto the configured base URL's PATH, keeping its
 // query (a mirror's credential) and refusing a fragment (Codex M70 R34
-// Medium-2: plain concatenation put the path inside the query).
+// Medium-2: plain concatenation put the path inside the query). path is
+// given escaped.
 func (c *OSVClient) endpoint(path string) (string, error) {
 	u, err := neturl.Parse(c.baseURL)
 	if err != nil || u.Scheme == "" || u.Host == "" || u.Fragment != "" || strings.Contains(c.baseURL, "#") {
 		return "", fmt.Errorf("osv: base URL is not a plain absolute URL")
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + path
-	u.RawPath = ""
+	// Joined on the ESCAPED path, so an encoded "/" in the base stays one
+	// segment (Codex M70 R36 Medium-2); path is already escaped.
+	esc := strings.TrimRight(u.EscapedPath(), "/") + path
+	dec, err := neturl.PathUnescape(esc)
+	if err != nil {
+		return "", fmt.Errorf("osv: base URL path is not well escaped")
+	}
+	u.Path, u.RawPath = dec, esc
 	if u.RawQuery == "" {
 		u.ForceQuery = false
 	}
