@@ -91,18 +91,27 @@ const (
 // High-3); field lengths are bounded at the source already.
 const maxEvidenceBytes = 16 << 10
 
+// recordState is what a lookup by id said about one record.
+type recordState struct {
+	withdrawn bool
+	rev       string // the withdrawal's normalised revision
+	failed    bool   // the lookup failed: unknown
+}
+
 // noVerdictWatermark is the watermark a no-verdict settlement of l writes.
 // Normally the data's own. But OSV's package query omits WITHDRAWN records,
-// so when the record a stored distro label rests on was withdrawn, the
+// so when the records a stored distro label rests on were withdrawn, the
 // package revision can go DOWN, and the revision guard would then keep the
 // obsolete label forever (Codex M70 R24 High-1). So, when the data's
-// revision is below the link's watermark (same source) and a record of the
-// stored evidence is absent from the data, the record is looked up by id;
-// a withdrawal at or after the watermark is the newer revision the clear
-// rests on.
-func (d distroData) noVerdictWatermark(l repository.SbomLink, wm []byte, withdrawn func(id string) string) []byte {
-	if !model.MatchMethod(l.Method).IsDistro() || l.WMSource != d.sourceID || l.WMRev <= d.revision || withdrawn == nil {
-		return wm
+// revision is below the link's watermark (same source), every record of the
+// stored evidence that is absent from the data is looked up by id; only if
+// ALL of them are conclusively withdrawn (Codex M70 R25 High-1) does the
+// newest withdrawal — when at or after the watermark — become the revision
+// the clear rests on. failed reports a lookup that failed (the scan then
+// reports distro_data_failed).
+func (d distroData) noVerdictWatermark(l repository.SbomLink, wm []byte, lookup func(id string) recordState) (out []byte, failed bool) {
+	if !model.MatchMethod(l.Method).IsDistro() || l.WMSource != d.sourceID || l.WMRev <= d.revision || lookup == nil {
+		return wm, false
 	}
 	present := map[string]bool{}
 	for _, rs := range d.byCVE {
@@ -110,49 +119,59 @@ func (d distroData) noVerdictWatermark(l repository.SbomLink, wm []byte, withdra
 			present[r.ID] = true
 		}
 	}
-	best := ""
+	best, absent := "", 0
 	for _, id := range l.Records {
 		if present[id] {
 			continue
 		}
-		if rev := withdrawn(id); rev >= l.WMRev && rev > best {
-			best = rev
+		absent++
+		st := lookup(id)
+		switch {
+		case st.failed:
+			return wm, true
+		case !st.withdrawn:
+			return wm, false // still active: the regression is not its withdrawal
+		}
+		if st.rev > best {
+			best = st.rev
 		}
 	}
-	if best == "" {
-		return wm
+	if absent == 0 || best < l.WMRev {
+		return wm, false
 	}
 	b, _ := json.Marshal(struct {
 		Source       string `json:"source"`
 		SourceID     string `json:"source_id"`
 		DataModified string `json:"data_modified"`
 	}{model.DistroSourceOSV, d.sourceID, best})
-	return b
+	return b, false
 }
 
-// withdrawalResolver returns, for a record id, the normalised revision of
-// its WITHDRAWAL ("" when it is not withdrawn or cannot be read), memoised
-// and paced like the package queries.
-func (s *DistroService) withdrawalResolver(ctx context.Context, pace func(context.Context) error) func(string) string {
-	memo := map[string]string{}
-	return func(id string) string {
+// withdrawalResolver looks a record up by id, memoised and paced like the
+// package queries.
+func (s *DistroService) withdrawalResolver(ctx context.Context, pace func(context.Context) error) func(string) recordState {
+	memo := map[string]recordState{}
+	return func(id string) recordState {
 		if v, ok := memo[id]; ok {
 			return v
 		}
-		memo[id] = ""
-		if pace(ctx) != nil {
-			return ""
+		st := recordState{failed: true}
+		if pace(ctx) == nil {
+			modified, withdrawn, err := s.osv.GetRecordState(ctx, id)
+			switch {
+			case err != nil:
+			case withdrawn == "":
+				st = recordState{}
+			default:
+				rev := normaliseModified(withdrawn)
+				if m := normaliseModified(modified); m > rev {
+					rev = m
+				}
+				st = recordState{withdrawn: rev != "", rev: rev, failed: rev == ""}
+			}
 		}
-		modified, withdrawn, err := s.osv.GetRecordState(ctx, id)
-		if err != nil || withdrawn == "" {
-			return ""
-		}
-		rev := normaliseModified(withdrawn)
-		if m := normaliseModified(modified); m > rev {
-			rev = m
-		}
-		memo[id] = rev
-		return rev
+		memo[id] = st
+		return st
 	}
 }
 
@@ -235,6 +254,9 @@ type DistroScanReport struct {
 	// Cleared: links whose stored distro label the current data no longer
 	// supports, queued to go back to their earlier method.
 	Cleared int
+	// LookupFailures: record lookups by id (withdrawal checks) that failed;
+	// reported as distro_data_failed.
+	LookupFailures int
 	// LinksKeptForFailure: links of a package whose data failed.
 	LinksKeptForFailure int
 	// Relabelled: relabel statements that changed a row (a group later
@@ -421,6 +443,7 @@ func (s *DistroService) fetchAndDecide(ctx context.Context, work []distroWork, b
 					groups = append(groups, g...)
 					rep.Affected += counts.Affected
 					rep.Cleared += counts.Cleared
+					rep.LookupFailures += counts.LookupFailures
 					rep.Unfixed += counts.Unfixed
 					rep.Fixed += counts.Fixed
 					for r, n := range counts.NoVerdict {
@@ -447,7 +470,7 @@ func (s *DistroService) fetchAndDecide(ctx context.Context, work []distroWork, b
 
 // decideKey decides every link of the components of one package.
 func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []distroWork,
-	byComp map[uuid.UUID][]repository.SbomLink, withdrawn func(id string) string) ([][]pendingLink, DistroScanReport, error) {
+	byComp map[uuid.UUID][]repository.SbomLink, lookup func(id string) recordState) ([][]pendingLink, DistroScanReport, error) {
 	counts := DistroScanReport{NoVerdict: map[string]int{}}
 	var groups [][]pendingLink
 	// One encoded watermark per package, one encoded evidence per (target,
@@ -466,8 +489,11 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 				counts.NoVerdict[dec.reason]++
 				// Settled on the row as it is when written (clear a distro
 				// label / leave the watermark): Codex M70 R22 High-1.
-				g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true,
-					evidence: d.noVerdictWatermark(l, wm, withdrawn)})
+				lwm, failed := d.noVerdictWatermark(l, wm, lookup)
+				if failed {
+					counts.LookupFailures++
+				}
+				g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: lwm})
 				if model.MatchMethod(l.Method).IsDistro() {
 					counts.Cleared++
 				}
@@ -539,6 +565,10 @@ func (r DistroScanReport) incompleteErr() error {
 	if r.Cancelled {
 		errs = append(errs, fmt.Errorf("distro: the scan was cancelled with %d of %d package(s) unread: %w",
 			r.Unfetched, r.Packages, ErrScanCancelled))
+	}
+	if r.LookupFailures > 0 {
+		errs = append(errs, fmt.Errorf("distro: %d record lookup(s) by id failed; the labels they would have cleared were kept: %w",
+			r.LookupFailures, ErrScanDistroDataFailed))
 	}
 	if r.FetchFailures > 0 {
 		errs = append(errs, fmt.Errorf("distro: the fixed-version data of %d of %d package(s) could not be read; "+
