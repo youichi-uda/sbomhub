@@ -782,3 +782,98 @@ func TestM70SettleNoVerdict_IsStateAdaptive(t *testing.T) {
 		t.Errorf("%+v, want the older distro label cleared", r)
 	}
 }
+
+// Codex M70 R27 Medium-3: a rank-refused check from ANOTHER source moves the
+// watermark but not the label's support; that source's no-verdict cannot
+// clear the label.
+func TestM70Settle_OtherSourceCannotClear(t *testing.T) {
+	e := m70Seed(t, "m70othersrc")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroAffected,
+			[]byte(`{"source":"osv","source_id":"A","fixed":"r1","data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"B","fixed":"r3","data_modified":"2026-11-03T00:00:00.000000000Z"}`))
+		return err
+	})
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.SettleDistroNoVerdict(c, e.openssl, e.v0286,
+			[]byte(`{"source":"osv","source_id":"B","data_modified":"2026-11-04T00:00:00.000000000Z"}`))
+		if changed {
+			t.Error("source B cleared a label resting on source A")
+		}
+		return err
+	})
+	if r := m70Read(t, e.migDB, e.openssl, e.v0286); r.method != "distro_affected" || r.evidence.Fixed != "r1" {
+		t.Errorf("%+v", r)
+	}
+}
+
+// Codex M70 R24/R27: ClearDistroWithdrawn clears only a row resting on
+// exactly the given records and watermark, and keeps the watermark.
+func TestM70ClearDistroWithdrawn(t *testing.T) {
+	e := m70Seed(t, "m70wdclear")
+	ctx := WithScanScope(context.Background(), e.appDB, e.tenant)
+	scope, _ := ScanScopeFrom(ctx)
+	run := func(fn func(txCtx context.Context) error) {
+		t.Helper()
+		if err := scope.writeTx(ctx, e.sbom, fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const rev = "2026-11-05T00:00:00.000000000Z"
+	run(func(c context.Context) error {
+		_, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"S","records":["A"],"data_modified":"`+rev+`"}`))
+		return err
+	})
+	for _, p := range []string{
+		`{"source_id":"S","records":["B"],"wm_rev":"` + rev + `"}`,                    // other records
+		`{"source_id":"T","records":["A"],"wm_rev":"` + rev + `"}`,                    // other source
+		`{"source_id":"S","records":["A"],"wm_rev":"2026-11-04T00:00:00.000000000Z"}`, // watermark moved
+		`{"source_id":"S","records":[],"wm_rev":"` + rev + `"}`,
+	} {
+		run(func(c context.Context) error {
+			changed, err := e.compRepo.ClearDistroWithdrawn(c, e.openssl, e.v0286, []byte(p))
+			if changed {
+				t.Errorf("%s cleared", p)
+			}
+			return err
+		})
+	}
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.ClearDistroWithdrawn(c, e.openssl, e.v0286, []byte(`{"source_id":"S","records":["A"],"wm_rev":"`+rev+`"}`))
+		if !changed {
+			t.Error("exact withdrawn clear refused")
+		}
+		return err
+	})
+	var method sql.NullString
+	var wmSrc, wmRev string
+	if err := e.migDB.QueryRow(`SELECT match_method, match_evidence->>'wm_source', match_evidence->>'wm_rev' FROM component_vulnerabilities
+		WHERE component_id = $1 AND vulnerability_id = $2`, e.openssl, e.v0286).Scan(&method, &wmSrc, &wmRev); err != nil {
+		t.Fatal(err)
+	}
+	if method.String != "nvd_cpe_unverified" || wmSrc != "S" || wmRev != rev {
+		t.Errorf("method=%q wm=%s/%s, want the prior method and the kept watermark", method.String, wmSrc, wmRev)
+	}
+	// An older scan can no longer relabel it.
+	run(func(c context.Context) error {
+		changed, err := e.compRepo.RelabelDistro(c, e.openssl, e.v0286, model.MatchDistroFixed,
+			[]byte(`{"source":"osv","source_id":"S","records":["A"],"data_modified":"2026-11-01T00:00:00.000000000Z"}`))
+		if changed {
+			t.Error("older data relabelled after the withdrawn clear")
+		}
+		return err
+	})
+}

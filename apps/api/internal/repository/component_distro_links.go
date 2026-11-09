@@ -24,6 +24,10 @@ type SbomLink struct {
 	Records  []string
 	WMSource string
 	WMRev    string
+	// LabelSource / LabelRev: the source_id and data_modified of the stored
+	// evidence itself (what the label rests on, not the last check).
+	LabelSource string
+	LabelRev    string
 }
 
 // ListSbomLinks reads every link of one SBOM's components. Run inside the
@@ -34,7 +38,9 @@ func (r *ComponentRepository) ListSbomLinks(ctx context.Context, sbomID uuid.UUI
 		SELECT cv.component_id, cv.vulnerability_id, v.cve_id, COALESCE(cv.match_method, ''),
 		       COALESCE(cv.match_evidence->'records', '[]'::jsonb)::text,
 		       COALESCE(cv.match_evidence->>'wm_source', cv.match_evidence->>'source_id', ''),
-		       COALESCE(cv.match_evidence->>'wm_rev', cv.match_evidence->>'data_modified', '')
+		       COALESCE(cv.match_evidence->>'wm_rev', cv.match_evidence->>'data_modified', ''),
+		       COALESCE(cv.match_evidence->>'source_id', ''),
+		       COALESCE(cv.match_evidence->>'data_modified', '')
 		FROM component_vulnerabilities cv
 		JOIN components c ON c.id = cv.component_id
 		JOIN vulnerabilities v ON v.id = cv.vulnerability_id
@@ -48,7 +54,7 @@ func (r *ComponentRepository) ListSbomLinks(ctx context.Context, sbomID uuid.UUI
 	for rows.Next() {
 		var l SbomLink
 		var records string
-		if err := rows.Scan(&l.ComponentID, &l.VulnerabilityID, &l.CVEID, &l.Method, &records, &l.WMSource, &l.WMRev); err != nil {
+		if err := rows.Scan(&l.ComponentID, &l.VulnerabilityID, &l.CVEID, &l.Method, &records, &l.WMSource, &l.WMRev, &l.LabelSource, &l.LabelRev); err != nil {
 			return nil, err
 		}
 		if json.Unmarshal([]byte(records), &l.Records) != nil {
@@ -194,12 +200,52 @@ func (r *ComponentRepository) SettleDistroNoVerdict(ctx context.Context, compone
 		   AND cv.vulnerability_id = $2
 		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
 		   AND ((cv.match_method IN (`+distroLabels+`)
-		         AND `+storedWMSource+` IS NOT DISTINCT FROM ($3::jsonb->>'source_id')
-		         AND `+storedWMRev+` <= COALESCE($3::jsonb->>'data_modified', ''))
+		         -- the label's OWN evidence is of this source and not newer
+		         -- (Codex M70 R27 Medium-3: a rank-refused check from another
+		         -- source moves the watermark, not the label's support)
+		         AND cv.match_evidence->>'source_id' IS NOT DISTINCT FROM ($3::jsonb->>'source_id')
+		         AND COALESCE(cv.match_evidence->>'data_modified', '') <= COALESCE($3::jsonb->>'data_modified', '')
+		         AND `+distroFreshness("$3")+`)
 		     OR (COALESCE(cv.match_method, '') NOT IN (`+distroLabels+`)
 		         AND cv.match_evidence IS DISTINCT FROM `+withWM(`$3::jsonb`, "$3")+`
 		         AND `+distroFreshness("$3")+`))`,
 		componentID, vulnID, string(watermark))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// ClearDistroWithdrawn clears a distro label whose evidence records were ALL
+// withdrawn from OSV (Codex M70 R24 High-1, R27 High-2). OSV's package query
+// omits withdrawn records, so the package revision can go down and the
+// ordinary no-verdict settlement is refused by the revision guard. This
+// clear does not claim any package revision: it keeps the link's watermark
+// as it is, and applies only when the row still rests on exactly that
+// evidence — the same source, the same record list and the same watermark
+// it was read with (one statement, so nothing slips in between). p is
+// {"source_id", "records", "wm_rev"}. It reports whether a row changed.
+func (r *ComponentRepository) ClearDistroWithdrawn(ctx context.Context, componentID, vulnID uuid.UUID, p []byte) (bool, error) {
+	if len(p) == 0 {
+		return false, fmt.Errorf("withdrawn clear: needs the evidence it rests on")
+	}
+	res, err := r.q(ctx).ExecContext(ctx, `
+		UPDATE component_vulnerabilities cv
+		   SET match_method = CASE WHEN cv.match_evidence->>'prior_method' IN (`+priorMethodVocabulary+`)
+		                           THEN cv.match_evidence->>'prior_method' END,
+		       match_evidence = jsonb_build_object('wm_source', `+storedWMSource+`, 'wm_rev', `+storedWMRev+`)
+		 WHERE cv.component_id = $1
+		   AND cv.vulnerability_id = $2
+		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
+		   AND cv.match_method IN (`+distroLabels+`)
+		   AND jsonb_typeof($3::jsonb->'records') = 'array'
+		   AND jsonb_array_length($3::jsonb->'records') > 0
+		   AND cv.match_evidence->>'source_id' IS NOT DISTINCT FROM ($3::jsonb->>'source_id')
+		   AND cv.match_evidence->'records' = $3::jsonb->'records'
+		   AND `+storedWMSource+` IS NOT DISTINCT FROM ($3::jsonb->>'source_id')
+		   AND `+storedWMRev+` = COALESCE($3::jsonb->>'wm_rev', '')`,
+		componentID, vulnID, string(p))
 	if err != nil {
 		return false, err
 	}

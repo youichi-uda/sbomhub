@@ -35,21 +35,22 @@ func TestM70R24_WithdrawnRecordClearsDespiteLowerRevision(t *testing.T) {
 	tgt, _ := distroTargetFor("pkg:deb/debian/p@1.0-1?distro=debian-11", "1.0-1", nil)
 	comp, vuln := uuid.New(), uuid.New()
 	links := map[uuid.UUID][]repository.SbomLink{comp: {{ComponentID: comp, VulnerabilityID: vuln, CVEID: "CVE-2021-0001",
-		Method: "distro_fixed", Records: []string{"DLA-7"}, WMSource: s.sourceID, WMRev: "2026-11-01T00:00:00.000000000Z"}}}
+		Method: "distro_fixed", Records: []string{"DLA-7"}, WMSource: s.sourceID, WMRev: "2026-11-01T00:00:00.000000000Z",
+		LabelSource: s.sourceID, LabelRev: "2026-11-01T00:00:00.000000000Z"}}}
 	rep := DistroScanReport{NoVerdict: map[string]int{}}
 	groups, err := s.fetchAndDecide(context.Background(), []distroWork{{comp: model.Component{ID: comp}, target: tgt}}, links, &rep)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 1 || len(groups[0]) != 1 || !groups[0][0].noVerdict {
+	if len(groups) != 1 || len(groups[0]) != 1 || !groups[0][0].withdrawnClear {
 		t.Fatalf("groups %+v", groups)
 	}
-	var wm struct {
-		DataModified string `json:"data_modified"`
+	var p struct {
+		WMRev string `json:"wm_rev"`
 	}
-	_ = json.Unmarshal(groups[0][0].evidence, &wm)
-	if wm.DataModified != "2026-11-08T00:00:00.000000000Z" {
-		t.Errorf("watermark %s, want the withdrawal time", groups[0][0].evidence)
+	_ = json.Unmarshal(groups[0][0].evidence, &p)
+	if p.WMRev != "2026-11-01T00:00:00.000000000Z" { // R27 High-2: watermark kept
+		t.Errorf("clear %s, want the link's own watermark", groups[0][0].evidence)
 	}
 }
 

@@ -82,8 +82,9 @@ const (
 	// strings (R18); 9: canonical record identities, exact CVE matching (R19);
 	// 10: unique record ids, OSV id character set (R21); 11: affected purl
 	// agreement and field length bounds (R22); 12: purl namespace,
-	// package-less GIT entries (R23)).
-	distroCachePayloadVersion = 12
+	// package-less GIT entries (R23); 13: strict affected purl, Ubuntu
+	// binaries validated (R27)).
+	distroCachePayloadVersion = 13
 )
 
 // distroLinkStore is the repository surface the step uses.
@@ -98,47 +99,58 @@ type recordState struct {
 	failed    bool   // the lookup failed: unknown
 }
 
-// noVerdictWatermark is the watermark a no-verdict settlement of l writes.
-// Normally the data's own. But OSV's package query omits WITHDRAWN records,
-// so when the records a stored distro label rests on were withdrawn, the
-// package revision can go DOWN, and the revision guard would then keep the
-// obsolete label forever (Codex M70 R24 High-1). So, when the data's
-// revision is below the link's watermark (same source), every record of the
-// stored evidence that is absent from the data is looked up by id; only if
-// ALL of them are conclusively withdrawn (Codex M70 R25 High-1) does the
-// newest withdrawal — when at or after the watermark — become the revision
-// the clear rests on. failed reports a lookup that failed (the scan then
-// reports distro_data_failed).
-func (d distroData) noVerdictWatermark(l repository.SbomLink, wm []byte, lookup func(id string) recordState) (out []byte, failed bool) {
-	if !model.MatchMethod(l.Method).IsDistro() || l.WMSource != d.sourceID || l.WMRev <= d.revision || lookup == nil {
-		return wm, false
+// withdrawnClear decides whether a no-verdict link's distro label rests
+// only on WITHDRAWN records. OSV's package query omits withdrawn records,
+// so the package revision can go down, and the ordinary settlement (which
+// needs data at least as new as the watermark) is then refused forever
+// (Codex M70 R24 High-1). It applies only when the data's revision is below
+// the link's watermark (same source), the label's evidence is of this
+// source, and EVERY record of that evidence is absent from the data and,
+// looked up by id, conclusively withdrawn at or after the evidence's
+// revision (R25 High-1). The clear then claims no package revision: the
+// withdrawal time of one record is not a snapshot of the package (R27
+// High-2), so the watermark is kept as it is. It returns the clear's
+// parameter, or nil; failed reports a lookup that failed.
+func (d distroData) withdrawnClear(l repository.SbomLink, lookup func(id string) recordState) (p []byte, failed bool) {
+	if !model.MatchMethod(l.Method).IsDistro() || l.WMSource != d.sourceID || l.LabelSource != d.sourceID ||
+		l.WMRev <= d.revision || lookup == nil || len(l.Records) == 0 {
+		return nil, false
 	}
-	best, absent := "", 0
 	for _, id := range l.Records {
 		if d.ids[id] {
-			continue
+			return nil, false // still in the data: not a withdrawal
 		}
-		absent++
+	}
+	for _, id := range l.Records {
 		st := lookup(id)
 		switch {
 		case st.failed:
-			return wm, true
-		case !st.withdrawn:
-			return wm, false // still active: the regression is not its withdrawal
+			return nil, true
+		case !st.withdrawn, st.rev < l.LabelRev:
+			return nil, false
 		}
-		if st.rev > best {
-			best = st.rev
-		}
-	}
-	if absent == 0 || best < l.WMRev {
-		return wm, false
 	}
 	b, _ := json.Marshal(struct {
-		Source       string `json:"source"`
-		SourceID     string `json:"source_id"`
-		DataModified string `json:"data_modified"`
-	}{model.DistroSourceOSV, d.sourceID, best})
+		SourceID string   `json:"source_id"`
+		Records  []string `json:"records"`
+		WMRev    string   `json:"wm_rev"`
+	}{d.sourceID, l.Records, l.WMRev})
 	return b, false
+}
+
+// settleNoVerdict is the one settlement of a no-verdict link.
+func (d distroData) settleNoVerdict(l repository.SbomLink, wm []byte, lookup func(id string) recordState, counts *DistroScanReport) pendingLink {
+	if model.MatchMethod(l.Method).IsDistro() {
+		counts.Cleared++
+	}
+	p, failed := d.withdrawnClear(l, lookup)
+	if failed {
+		counts.LookupFailures++
+	}
+	if p != nil {
+		return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, withdrawnClear: true, evidence: p}
+	}
+	return pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: wm}
 }
 
 // withdrawalResolver looks a record up by id, memoised and paced like the
@@ -182,6 +194,7 @@ func watermark(d distroData) []byte {
 
 type distroLinkStore interface {
 	SettleDistroNoVerdict(ctx context.Context, componentID, vulnID uuid.UUID, watermark []byte) (bool, error)
+	ClearDistroWithdrawn(ctx context.Context, componentID, vulnID uuid.UUID, p []byte) (bool, error)
 	ListScanTargetsBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error)
 	ListSbomLinks(ctx context.Context, sbomID uuid.UUID) ([]repository.SbomLink, error)
 	RelabelDistro(ctx context.Context, componentID, vulnID uuid.UUID, method model.MatchMethod, evidence []byte) (bool, error)
@@ -342,6 +355,8 @@ func (s *DistroService) ScanComponentsWithReport(ctx context.Context, sbomID uui
 		var changed bool
 		var err error
 		switch {
+		case l.withdrawnClear:
+			changed, err = s.store.ClearDistroWithdrawn(txCtx, l.componentID, l.vulnID, l.evidence)
 		case l.noVerdict:
 			changed, err = s.store.SettleDistroNoVerdict(txCtx, l.componentID, l.vulnID, l.evidence)
 		default:
@@ -486,14 +501,7 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 				counts.NoVerdict[dec.reason]++
 				// Settled on the row as it is when written (clear a distro
 				// label / leave the watermark): Codex M70 R22 High-1.
-				lwm, failed := d.noVerdictWatermark(l, wm, lookup)
-				if failed {
-					counts.LookupFailures++
-				}
-				g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: lwm})
-				if model.MatchMethod(l.Method).IsDistro() {
-					counts.Cleared++
-				}
+				g = append(g, d.settleNoVerdict(l, wm, lookup, &counts))
 				continue
 			}
 			mk := w.target.release + "\x00" + w.target.pkg + "\x00" + w.target.version + "\x00" + w.target.binary + "\x00" + l.CVEID
@@ -514,16 +522,9 @@ func decideKey(ctx context.Context, d distroData, fetchedAt time.Time, work []di
 			}
 			if raw == nil {
 				counts.NoVerdict["evidence_too_large"]++
-				if model.MatchMethod(l.Method).IsDistro() {
-					counts.Cleared++ // Codex M70 R24 Low-4
-				}
-				// The same settlement as any no verdict, withdrawal handling
-				// included (Codex M70 R26 High-1).
-				lwm, failed := d.noVerdictWatermark(l, wm, lookup)
-				if failed {
-					counts.LookupFailures++
-				}
-				g = append(g, pendingLink{componentID: l.ComponentID, vulnID: l.VulnerabilityID, noVerdict: true, evidence: lwm})
+				// The same settlement as any no verdict (Codex M70 R24 Low-4,
+				// R26 High-1).
+				g = append(g, d.settleNoVerdict(l, wm, lookup, &counts))
 				continue
 			}
 			switch dec.verdict {

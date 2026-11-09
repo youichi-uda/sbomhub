@@ -204,6 +204,9 @@ type pendingLink struct {
 	// written (clear a distro label, or leave the watermark). evidence then
 	// holds the data's watermark (source, revision).
 	noVerdict bool
+	// withdrawnClear (M70): the label's evidence records were all withdrawn;
+	// evidence then holds {source_id, records, wm_rev} (ClearDistroWithdrawn).
+	withdrawnClear bool
 }
 
 // linkWriter is the one repository call the write phase makes per link.

@@ -29,7 +29,8 @@ func TestM70R26_OversizedEvidenceResolvesWithdrawal(t *testing.T) {
 	tgt := distroTarget{family: "debian", query: "Debian", release: "Debian:11", releaseMajor: 11, pkg: "p", binary: "p", version: "1.0-1", scheme: schemeDpkg}
 	comp, vuln := uuid.New(), uuid.New()
 	links := map[uuid.UUID][]repository.SbomLink{comp: {{ComponentID: comp, VulnerabilityID: vuln, CVEID: "CVE-2021-0001",
-		Method: "distro_affected", Records: []string{"A"}, WMSource: "S", WMRev: "2026-11-05T00:00:00.000000000Z"}}}
+		Method: "distro_affected", Records: []string{"A"}, WMSource: "S", WMRev: "2026-11-05T00:00:00.000000000Z",
+		LabelSource: "S", LabelRev: "2026-11-05T00:00:00.000000000Z"}}}
 	lookup := func(id string) recordState {
 		if id == "A" {
 			return recordState{withdrawn: true, rev: "2026-11-08T00:00:00.000000000Z"}
@@ -40,15 +41,15 @@ func TestM70R26_OversizedEvidenceResolvesWithdrawal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 1 || len(groups[0]) != 1 || !groups[0][0].noVerdict || counts.NoVerdict["evidence_too_large"] != 1 {
+	if len(groups) != 1 || len(groups[0]) != 1 || !groups[0][0].withdrawnClear || counts.NoVerdict["evidence_too_large"] != 1 {
 		t.Fatalf("groups=%d counts=%+v", len(groups), counts)
 	}
-	var wm struct {
-		DataModified string `json:"data_modified"`
+	var p struct {
+		Records []string `json:"records"`
 	}
-	_ = json.Unmarshal(groups[0][0].evidence, &wm)
-	if wm.DataModified != "2026-11-08T00:00:00.000000000Z" {
-		t.Errorf("watermark %s, want the withdrawal revision", groups[0][0].evidence)
+	_ = json.Unmarshal(groups[0][0].evidence, &p)
+	if len(p.Records) != 1 || p.Records[0] != "A" {
+		t.Errorf("clear %s, want the label's records", groups[0][0].evidence)
 	}
 }
 

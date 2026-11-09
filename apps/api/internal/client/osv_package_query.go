@@ -125,6 +125,94 @@ func (c *OSVClient) GetRecordState(ctx context.Context, id string) (modified, wi
 	return r.Modified, r.Withdrawn, nil
 }
 
+// parseStrictPurl parses a package URL fully (Codex M70 R27 High-1):
+// pkg:type/namespace.../name[@version][?qualifiers][#subpath]. Every part
+// must be well formed: valid percent encoding, no empty path segment, a
+// non-empty version after "@", qualifiers as key=value with lower-case keys
+// and non-empty values, no empty subpath segment. It returns the decoded
+// path segments, type lower-cased, namespaces lower-cased (deb / rpm
+// namespaces are case-insensitive vendors), the name as is.
+func parseStrictPurl(purl string) ([]string, error) {
+	rest, ok := strings.CutPrefix(purl, "pkg:")
+	if !ok {
+		return nil, fmt.Errorf("not a purl")
+	}
+	if i := strings.IndexByte(rest, '#'); i >= 0 {
+		for _, seg := range strings.Split(strings.Trim(rest[i+1:], "/"), "/") {
+			if v, err := neturl.PathUnescape(seg); err != nil || v == "" || v == "." || v == ".." {
+				return nil, fmt.Errorf("bad subpath")
+			}
+		}
+		rest = rest[:i]
+	}
+	if i := strings.IndexByte(rest, '?'); i >= 0 {
+		seen := map[string]bool{}
+		for _, kv := range strings.Split(rest[i+1:], "&") {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok || k == "" || k != strings.ToLower(k) || seen[k] {
+				return nil, fmt.Errorf("bad qualifier %q", kv)
+			}
+			seen[k] = true
+			for _, c := range k {
+				if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '.' && c != '-' && c != '_' {
+					return nil, fmt.Errorf("bad qualifier key %q", k)
+				}
+			}
+			if dv, err := neturl.PathUnescape(v); err != nil || dv == "" {
+				return nil, fmt.Errorf("bad qualifier value for %q", k)
+			}
+		}
+		rest = rest[:i]
+	}
+	if i := strings.LastIndexByte(rest, '@'); i >= 0 && !strings.Contains(rest[i:], "/") {
+		if v, err := neturl.PathUnescape(rest[i+1:]); err != nil || v == "" {
+			return nil, fmt.Errorf("empty or malformed version")
+		}
+		rest = rest[:i]
+	}
+	raw := strings.Split(rest, "/")
+	if len(raw) < 2 {
+		return nil, fmt.Errorf("no name")
+	}
+	out := make([]string, len(raw))
+	for i, seg := range raw {
+		v, err := neturl.PathUnescape(seg)
+		if err != nil || v == "" {
+			return nil, fmt.Errorf("bad path segment %d", i)
+		}
+		if i < len(raw)-1 {
+			v = strings.ToLower(v)
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+// validateUbuntuBinaries checks Ubuntu's ecosystem_specific.binaries, when
+// present: a list of objects each with a non-empty, bounded binary_name
+// (Codex M70 R27 Medium-4: a malformed list must fail, not read as absent).
+func validateUbuntuBinaries(es map[string]interface{}) error {
+	raw, present := es["binaries"]
+	if !present {
+		return nil
+	}
+	list, ok := raw.([]interface{})
+	if !ok {
+		return fmt.Errorf("ecosystem_specific.binaries is not a list")
+	}
+	for i, item := range list {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("ecosystem_specific.binaries[%d] is not an object", i)
+		}
+		name, ok := m["binary_name"].(string)
+		if !ok || name == "" || len(name) > MaxOSVFieldBytes {
+			return fmt.Errorf("ecosystem_specific.binaries[%d] has no usable binary_name", i)
+		}
+	}
+	return nil
+}
+
 // PackageQueryLimits bound one package query.
 type PackageQueryLimits struct {
 	// MaxPages is the most requests the walk may make.
@@ -344,6 +432,11 @@ func validateAffected(a OSVAffected) error {
 			return err
 		}
 	}
+	if strings.HasPrefix(a.Package.Ecosystem, "Ubuntu") {
+		if err := validateUbuntuBinaries(a.EcosystemSpecific); err != nil {
+			return err
+		}
+	}
 	// Canonical strings (Codex M70 R18 High-2): a name or a version is
 	// printable ASCII without any whitespace; an ecosystem may have inner
 	// spaces ("Rocky Linux:9") but none at either end. Anything else would
@@ -422,24 +515,12 @@ func canonicalCVE(s string) bool {
 // for the distro ecosystems this build reads, the same packaging type
 // (Codex M70 R22 High-2).
 func purlAgrees(p OSVPackage) error {
-	rest, ok := strings.CutPrefix(p.Purl, "pkg:")
-	if !ok {
-		return fmt.Errorf("package purl %q is not a purl", p.Purl)
+	segs, err := parseStrictPurl(p.Purl)
+	if err != nil {
+		return fmt.Errorf("package purl %q: %w", p.Purl, err)
 	}
-	if i := strings.IndexAny(rest, "?#"); i >= 0 {
-		rest = rest[:i]
-	}
-	segs := strings.Split(rest, "/")
-	if len(segs) < 2 {
-		return fmt.Errorf("package purl %q has no name", p.Purl)
-	}
-	typ := strings.ToLower(segs[0])
-	last := segs[len(segs)-1]
-	if at := strings.IndexByte(last, '@'); at >= 0 {
-		last = last[:at]
-	}
-	name, err := neturl.PathUnescape(last)
-	if err != nil || name != p.Name {
+	typ := segs[0]
+	if segs[len(segs)-1] != p.Name {
 		return fmt.Errorf("package purl %q does not name %q", p.Purl, p.Name)
 	}
 	want, ns := "", []string(nil)
@@ -461,7 +542,7 @@ func purlAgrees(p OSVPackage) error {
 	if ns != nil {
 		got := ""
 		if len(segs) == 3 {
-			got = strings.ToLower(segs[1])
+			got = segs[1]
 		}
 		okNS := false
 		for _, n := range ns {
