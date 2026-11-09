@@ -716,6 +716,12 @@ func (r DistroScanReport) incompleteErr() error {
 		errs = append(errs, fmt.Errorf("distro: the scan was cancelled with %d of %d package(s) unread: %w",
 			r.Unfetched, r.Packages, ErrScanCancelled))
 	}
+	if r.LockedSkipped > 0 {
+		// Not silently "complete" (Codex M70 R40 Medium-2): a manual scan
+		// may never be followed by another.
+		errs = append(errs, fmt.Errorf("distro: %d link(s) were held by another transaction and not relabelled; scan again: %w",
+			r.LockedSkipped, ErrScanWriteRefused))
+	}
 	if r.LookupFailures > 0 {
 		errs = append(errs, fmt.Errorf("distro: %d record lookup(s) by id failed; the labels they would have cleared were kept: %w",
 			r.LookupFailures, ErrScanDistroDataFailed))

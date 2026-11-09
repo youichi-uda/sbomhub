@@ -171,7 +171,7 @@ func (c *OSVClient) GetVulnerability(ctx context.Context, vulnID string) (*OSVVu
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 	defer resp.Body.Close()
 

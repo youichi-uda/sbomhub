@@ -96,7 +96,7 @@ func (c *OSVClient) GetRecordState(ctx context.Context, id string) (OSVRecordSta
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return none, fmt.Errorf("osv: get record: %w", err)
+		return none, fmt.Errorf("osv: get record: %w", redactURLError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
@@ -202,6 +202,11 @@ func parseStrictPurl(purl string) (segs []string, quals map[string]string, err e
 		rest = rest[:i]
 	}
 	if i := strings.IndexByte(rest, '?'); i >= 0 {
+		// One "?" only: a literal one is percent-encoded (Codex M70 R40
+		// Medium-3: "note=x?arch=..." would hide a qualifier).
+		if strings.Contains(rest[i+1:], "?") {
+			return nil, nil, fmt.Errorf("a second '?' in the qualifiers")
+		}
 		seen := map[string]bool{}
 		for _, kv := range strings.Split(rest[i+1:], "&") {
 			k, v, ok := strings.Cut(kv, "=")
@@ -779,6 +784,18 @@ func purlAgrees(p OSVPackage) error {
 
 // canonicalOSVID: OSV's id character set, [A-Za-z0-9:_.-]+ (Codex M70 R21
 // High-3).
+// redactURLError drops the request URL from a transport error (Codex M70
+// R40 High-1): the configured OSV URL may carry a credential in its query,
+// and net/http's *url.Error prints the whole URL. The operation and the
+// cause are kept.
+func redactURLError(err error) error {
+	var ue *neturl.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s <osv endpoint>: %w", ue.Op, ue.Err)
+	}
+	return err
+}
+
 // endpoint joins path onto the configured base URL's PATH, keeping its
 // query (a mirror's credential) and refusing a fragment (Codex M70 R34
 // Medium-2: plain concatenation put the path inside the query). path is
@@ -871,7 +888,7 @@ func (c *OSVClient) queryPackagePage(ctx context.Context, q osvPackageQueryReque
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return page, 0, fmt.Errorf("osv: package query: %w", err)
+		return page, 0, fmt.Errorf("osv: package query: %w", redactURLError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

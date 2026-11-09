@@ -130,6 +130,9 @@ func parsePurl(s string) (parsedPurl, bool) {
 	}
 	var p parsedPurl
 	if i := strings.IndexByte(rest, '?'); i >= 0 {
+		if strings.Contains(rest[i+1:], "?") { // Codex M70 R40 Medium-3
+			return parsedPurl{}, false
+		}
 		q, err := url.ParseQuery(rest[i+1:])
 		if err != nil {
 			return parsedPurl{}, false
