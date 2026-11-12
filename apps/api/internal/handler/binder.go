@@ -140,8 +140,8 @@ func (b *TextGuardBinder) Bind(i interface{}, c echo.Context) error {
 // in MultipartForm.File, not in the values checked here, so binary file
 // content — an SBOM upload — is never inspected. The form is parsed exactly as
 // echo would parse it for the handler (c.FormParams, cached on the request),
-// so nothing is read twice. A body that does not parse is left for the
-// handler's own read to report.
+// so nothing is read twice. A body that does not parse is refused here, with
+// the status echo.DefaultBinder gives it.
 func checkFormText(c echo.Context) error {
 	req := c.Request()
 	if req.ContentLength == 0 {
@@ -153,11 +153,15 @@ func checkFormText(c echo.Context) error {
 	}
 	params, err := c.FormParams()
 	if err != nil {
+		// Answered exactly as echo.DefaultBinder answers it (Codex R1): an
+		// HTTPError (BodyLimit's 413) as is, anything else as 400. It must not
+		// be swallowed: net/http caches the partially parsed form, so a later
+		// parse by echo would succeed and the handler would run on defaults.
 		var he *echo.HTTPError
-		if errors.As(err, &he) && he.Code == http.StatusRequestEntityTooLarge {
+		if errors.As(err, &he) {
 			return he
 		}
-		return nil
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error()).SetInternal(err)
 	}
 	for key, vals := range params {
 		if terr := validation.CheckTextField("a form field name", key, validation.TextRule{}); terr != nil {

@@ -147,3 +147,24 @@ func TestM71CLIUpload_RefusesFormTextBeforeTheService(t *testing.T) {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
 }
+
+// Codex R1 (Medium): a form body that does not parse must still be a 400 from
+// c.Bind. net/http caches the partially parsed form, so swallowing the parse
+// error in checkFormText made echo's own parse succeed afterwards and the
+// handler ran with defaults.
+func TestM71TextGuardBinder_MalformedFormIsStill400(t *testing.T) {
+	for name, tc := range map[string]struct{ body, ctype string }{
+		"urlencoded bad escape": {"name=%ZZ", echo.MIMEApplicationForm},
+		"multipart no boundary": {"--x\r\n", echo.MIMEMultipartForm},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := m71FormContext(t, tc.body, tc.ctype)
+			var v m71FormTarget
+			err := c.Bind(&v)
+			var he *echo.HTTPError
+			if !errors.As(err, &he) || he.Code != http.StatusBadRequest {
+				t.Fatalf("Bind err = %v, want a 400 HTTPError as echo.DefaultBinder answers", err)
+			}
+		})
+	}
+}
