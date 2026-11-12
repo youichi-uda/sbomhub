@@ -174,23 +174,26 @@ func (t *ScanTracker) Begin(sbomID uuid.UUID) uint64 {
 	e.updatedAt = time.Now()
 	e.active[gen] = true
 	t.entries[sbomID] = e
+	// Queued under t.mu, with the local change: the shared writes of one SBOM
+	// follow the order of its local transitions (Codex M72 R3 High-1).
+	ev := t.queueBeginLocked(sbomID, gen)
 	t.mu.Unlock()
-	t.sharedBegin(sbomID, gen)
+	if testHookAfterLocalBegin != nil {
+		testHookAfterLocalBegin(gen)
+	}
+	t.waitBegin(ev)
 	return gen
 }
+
+// testHookAfterLocalBegin runs once Begin's local state change is visible
+// (tests only).
+var testHookAfterLocalBegin func(gen uint64)
 
 // Finish records run gen's outcome — failed when errMsg or reasons is
 // non-empty, completed otherwise. It reports whether gen was an active run.
 // The SBOM's state becomes terminal only when no other run is active.
 func (t *ScanTracker) Finish(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string) bool {
-	ok := t.finishLocal(sbomID, gen, reasons, errMsg)
-	if ok {
-		if errMsg == "" && len(reasons) > 0 {
-			errMsg = "scan failed"
-		}
-		t.sharedFinish(sbomID, gen, errMsg, reasons)
-	}
-	return ok
+	return t.finishLocal(sbomID, gen, reasons, errMsg)
 }
 
 func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string) bool {
@@ -205,6 +208,11 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 		return false
 	}
 	delete(e.active, gen)
+	sharedMsg := errMsg
+	if sharedMsg == "" && len(reasons) > 0 {
+		sharedMsg = "scan failed"
+	}
+	t.queueFinishLocked(sbomID, gen, sharedMsg, reasons)
 	if errMsg != "" || len(reasons) > 0 {
 		if errMsg == "" {
 			errMsg = "scan failed"
@@ -240,9 +248,9 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 // routes use Begin / Finish).
 func (t *ScanTracker) MarkCompleted(sbomID uuid.UUID) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.entries[sbomID] = scanEntry{state: ScanStateCompleted, updatedAt: time.Now()}
-	t.mu.Unlock()
-	t.sharedMark(sbomID, ScanStateCompleted, "", nil)
+	t.queueMarkLocked(sbomID, ScanStateCompleted, "", nil)
 }
 
 // MarkFailed records that at least one background scan for the sbom
@@ -257,10 +265,10 @@ func (t *ScanTracker) MarkFailed(sbomID uuid.UUID, errMsg string) {
 // (service.ScanReason*), exposed as `reasons` on the scan-status response.
 func (t *ScanTracker) MarkFailedWithReasons(sbomID uuid.UUID, errMsg string, reasons []string) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.entries[sbomID] = scanEntry{state: ScanStateFailed, updatedAt: time.Now(), errMsg: errMsg,
 		reasons: append([]string(nil), reasons...)}
-	t.mu.Unlock()
-	t.sharedMark(sbomID, ScanStateFailed, errMsg, reasons)
+	t.queueMarkLocked(sbomID, ScanStateFailed, errMsg, reasons)
 }
 
 // GetDetail is Get plus the failed scan's reason codes, read atomically.

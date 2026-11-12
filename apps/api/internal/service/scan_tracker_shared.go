@@ -132,21 +132,34 @@ func (t *ScanTracker) apply(sbomID uuid.UUID, ev *sharedEvent) error {
 	}
 }
 
-func (t *ScanTracker) sharedBegin(sbomID uuid.UUID, gen uint64) {
+// The queue* functions are called with t.mu held, in the same critical
+// section as the local state change they mirror (lock order t.mu, then
+// t.qMu), so one SBOM's shared writes are queued in the order of its local
+// transitions.
+
+// queueBeginLocked queues run gen's begin; nil without a shared store (or if
+// the queue is full).
+func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) *sharedEvent {
 	if t.shared == nil {
-		return
+		return nil
 	}
 	ev := &sharedEvent{kind: evBegin, gen: gen}
 	t.qMu.Lock()
+	defer t.qMu.Unlock()
 	t.live[runKey{sbomID, gen}] = time.Now()
-	ok := t.enqueueLocked(sbomID, ev)
-	t.qMu.Unlock()
-	if !ok {
+	if !t.enqueueLocked(sbomID, ev) {
+		return nil
+	}
+	return ev
+}
+
+// waitBegin waits, at most beginWait, for a queued begin to reach Redis: a run
+// should normally be there before another process's run of the SBOM
+// finishes, but Begin is on the request path.
+func (t *ScanTracker) waitBegin(ev *sharedEvent) {
+	if ev == nil {
 		return
 	}
-	// A run should normally reach Redis before another process's run of the
-	// SBOM finishes, so Begin waits for its write — bounded, because it is on
-	// the request path.
 	timer := time.NewTimer(beginWait)
 	defer timer.Stop()
 	select {
@@ -155,21 +168,22 @@ func (t *ScanTracker) sharedBegin(sbomID uuid.UUID, gen uint64) {
 	}
 }
 
-func (t *ScanTracker) sharedFinish(sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) {
+func (t *ScanTracker) queueFinishLocked(sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) {
 	if t.shared == nil {
 		return
 	}
 	t.qMu.Lock()
+	defer t.qMu.Unlock()
 	delete(t.live, runKey{sbomID, gen})
 	t.enqueueLocked(sbomID, &sharedEvent{kind: evFinish, gen: gen, msg: errMsg, reasons: append([]string(nil), reasons...)})
-	t.qMu.Unlock()
 }
 
-func (t *ScanTracker) sharedMark(sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) {
+func (t *ScanTracker) queueMarkLocked(sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) {
 	if t.shared == nil {
 		return
 	}
 	t.qMu.Lock()
+	defer t.qMu.Unlock()
 	// A terminal state set outside a run ends this process's runs of it.
 	for k := range t.live {
 		if k.sbom == sbomID {
@@ -177,7 +191,6 @@ func (t *ScanTracker) sharedMark(sbomID uuid.UUID, state ScanState, errMsg strin
 		}
 	}
 	t.enqueueLocked(sbomID, &sharedEvent{kind: evMark, state: state, msg: errMsg, reasons: append([]string(nil), reasons...)})
-	t.qMu.Unlock()
 }
 
 // ensureHeartbeatLocked starts the heartbeat loop. t.qMu is held.

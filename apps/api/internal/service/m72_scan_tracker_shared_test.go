@@ -504,3 +504,38 @@ func (c *countingStore) heartbeatMany(ctx context.Context, runs []runKey) ([]boo
 	c.mu.Unlock()
 	return c.memStore.heartbeatMany(ctx, runs)
 }
+
+// Codex M72 R3 High-1: the shared write of a Begin is queued atomically with
+// its local state change. Run B has begun locally; run A's Finish arriving
+// right then must not reach Redis ahead of B's begin.
+func TestM72R3_BeginIsQueuedWithItsLocalStateChange(t *testing.T) {
+	store := newGroupStore()
+	a := trackerOn(store, time.Hour)
+	id := uuid.New()
+	ga := a.Begin(id)
+	settle(t, a, id)
+	var gb uint64
+	testHookAfterLocalBegin = func(gen uint64) {
+		if gen == ga {
+			return
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			a.Finish(id, ga, []string{ScanReasonFetchFailed}, "nvd: scan failed (fetch_failed)")
+		}()
+		select {
+		case <-done:
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	defer func() { testHookAfterLocalBegin = nil }()
+	gb = a.Begin(id)
+	testHookAfterLocalBegin = nil
+	settle(t, a, id)
+	a.Finish(id, gb, nil, "")
+	settle(t, a, id)
+	if st, _, _ := trackerOn(store, time.Hour).GetDetail(id); st != ScanStateFailed {
+		t.Fatalf("group outcome %s, want failed (A failed while B was running)", st)
+	}
+}
