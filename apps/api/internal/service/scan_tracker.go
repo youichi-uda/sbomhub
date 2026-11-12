@@ -325,10 +325,10 @@ func (t *ScanTracker) MarkFailedWithReasons(sbomID uuid.UUID, errMsg string, rea
 //     written cannot hide another process's run (Codex M72 R1 High-2);
 //   - a shared terminal state yields to this process's own unwritten one
 //     (it is newer);
-//   - Redis has no entry: this process's memory;
-//   - Redis unreadable: this process's memory, except that a "completed"
-//     reads unknown — another replica may be scanning the SBOM, and only
-//     Redis would say so (Codex M72 R4 High-2). running and failed are safe.
+//   - Redis unreadable, or without an entry (expired or evicted): this
+//     process's memory, except that a "completed" reads unknown — another
+//     replica may be scanning the SBOM, and only Redis would say so (Codex
+//     M72 R4 High-2, R11 High-1). running and failed are safe.
 //
 // A local transition that races the Redis read makes the read be retried
 // (Codex M72 R4 High-1).
@@ -354,8 +354,14 @@ func (t *ScanTracker) GetDetail(sbomID uuid.UUID) (ScanState, string, []string) 
 		case err != nil:
 			slog.Debug("scan status: shared store unavailable, answering from this process", "sbom_id", sbomID, "error", err)
 			return t.localWithoutShared(sbomID)
-		case !found:
+		case !found && t.pendingShared(sbomID):
+			// Its own writes have not landed yet: memory is newest.
 			return t.getDetailLocal(sbomID)
+		case !found:
+			// No entry (never written, expired, or evicted): a local
+			// "completed" may be stale — another replica's run would be in
+			// that entry — so it reads unknown (Codex M72 R11 High-1).
+			return t.localWithoutShared(sbomID)
 		case state == ScanStateRunning:
 			return state, "", nil
 		case t.pendingShared(sbomID):

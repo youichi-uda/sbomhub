@@ -237,7 +237,7 @@ func TestM72R3_ManyInterruptedRunsStayBounded(t *testing.T) {
 	}
 	keys := scanStatusKeys(id)
 	raw := rdb.HGet(context.Background(), keys[0], "outcomes").Val()
-	lost := rdb.ZCard(context.Background(), keys[0]+":lost").Val()
+	lost := countLost(t, rdb, id)
 	if len(raw) > 512 || lost > scanStatusMaxLost {
 		t.Fatalf("after 200 interrupted runs: outcomes %d bytes, %d lost ids", len(raw), lost)
 	}
@@ -265,8 +265,8 @@ func TestM72R4_RejoinKeepsTheGroupsInterruptions(t *testing.T) {
 	}
 	// The live run's identity is the one the cap dropped.
 	keys := scanStatusKeys(id)
-	rdb.ZRem(context.Background(), keys[2], genString(g))
-	rdb.HSet(context.Background(), keys[0], "lost_dropped", "1")
+	rdb.HDel(context.Background(), keys[0], "l:"+genString(g))
+	rdb.HSet(context.Background(), keys[0], "lost_dropped", time.Now().UnixMilli())
 	live.heartbeatPass() // inactive -> rejoin
 	if st, _, _ := detail(reader, id, live); st != ScanStateRunning {
 		t.Fatalf("after rejoin: %s, want running", st)
@@ -288,8 +288,8 @@ func TestM72R4_LostKeyCreatedByAReadExpires(t *testing.T) {
 	dead.Begin(id)
 	time.Sleep(60 * time.Millisecond)
 	detail(reader, id, dead)
-	if ttl := rdb.PTTL(context.Background(), scanStatusKeys(id)[2]).Val(); ttl <= 0 {
-		t.Fatalf(":lost PTTL %s, want a positive TTL", ttl)
+	if ttl := rdb.PTTL(context.Background(), scanStatusKeys(id)[0]).Val(); ttl <= 0 {
+		t.Fatalf("status key PTTL %s after a sweeping read, want a positive TTL", ttl)
 	}
 }
 
@@ -381,4 +381,40 @@ func TestM72R10_NewGroupKeepsLiveTombstones(t *testing.T) {
 // setMaxRunAge rebuilds tr's scripts for a different tombstone age.
 func setMaxRunAge(tr *ScanTracker, d time.Duration) {
 	tr.shared.(*redisScanStatusStore).scripts = newStatusScripts(d)
+}
+
+// Codex M72 R11 High-1: the status of one SBOM is ONE Redis key (evicted all
+// or nothing), and a missing entry does not let a stale local "completed"
+// through while another replica may be scanning.
+func TestM72R11_EvictionNeverYieldsAStaleCompleted(t *testing.T) {
+	rdb := m72Redis(t)
+	if n := len(scanStatusKeys(uuid.New())); n != 1 {
+		t.Fatalf("the status is spread over %d keys; partial eviction could split it", n)
+	}
+	a, b := process(rdb, 0, time.Hour), process(rdb, 0, time.Hour)
+	id := uuid.New()
+	a.Finish(id, a.Begin(id), nil, "") // A's earlier scan: local completed
+	settle(t, a, id)
+	b.Begin(id) // B scans now
+	settle(t, b, id)
+	rdb.Del(context.Background(), scanStatusKeys(id)...) // evicted
+	if st, _, _ := a.GetDetail(id); st == ScanStateCompleted {
+		t.Fatal("A answered its stale local completed while B scans (entry evicted)")
+	}
+}
+
+// countLost counts the tombstones (l:<gen> fields) of id's status.
+func countLost(t *testing.T, rdb *redis.Client, id uuid.UUID) int64 {
+	t.Helper()
+	keys, err := rdb.HKeys(context.Background(), scanStatusKeys(id)[0]).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	for _, k := range keys {
+		if strings.HasPrefix(k, "l:") {
+			n++
+		}
+	}
+	return n
 }

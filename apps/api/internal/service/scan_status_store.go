@@ -22,16 +22,11 @@ import (
 //
 // # Model
 //
-// Per SBOM, three keys sharing a hash tag (one Redis Cluster slot):
-//
-//	scanstatus1:{<sbom>}       HASH  state, error, reasons (JSON), updated,
-//	                                 outcomes (JSON: the distinct failures of
-//	                                 the current group), lost_dropped
-//	scanstatus1:{<sbom>}:runs  ZSET  the active runs (member: run generation,
-//	                                 score: lease expiry, ms of Redis time)
-//	scanstatus1:{<sbom>}:lost  ZSET  runs swept as interrupted (at most 64)
-//
-// All expire after the tracker's retention (scan deadline + 15m, at least
+// Per SBOM, ONE key, scanstatus1:{<sbom>}, a hash holding the published
+// status, the group's distinct failures, the active runs (r:<gen> -> lease
+// expiry) and the tombstones of runs swept as interrupted (l:<gen>); see
+// scanStatusLua. One key is evicted all or nothing (Codex M72 R11 High-1).
+// It expires after the tracker's retention (scan deadline + 15m, at least
 // 1h), refreshed on every write.
 //
 // A run holds a LEASE (ScanStatusLease, 90s) that the process running it
@@ -83,25 +78,51 @@ const (
 // scanInterruptedMarker is the error string of an interrupted run.
 var scanInterruptedMarker = ScanFailureMarker("scan", []string{ScanReasonInterrupted})
 
+// scanStatusKeys is the SBOM's one status key (as KEYS for the scripts).
 func scanStatusKeys(sbomID uuid.UUID) []string {
-	k := scanStatusPrefix + "{" + sbomID.String() + "}"
-	return []string{k, k + ":runs", k + ":lost"}
+	return []string{scanStatusPrefix + "{" + sbomID.String() + "}"}
 }
 
-// scanStatusLua is shared by every script. KEYS[1] the hash, KEYS[2] the
-// active runs, KEYS[3] the runs swept as interrupted (ZSET gen -> sweep time,
-// at most MAX_LOST newest; hash field lost_dropped = when one was dropped).
-// Tombstones outlive a new group and expire after MAX_RUN_AGE.
+// scanStatusLua is shared by every script. KEYS[1] is the SBOM's ONE key, a
+// hash (Codex M72 R11 High-1: one key is evicted all or nothing, so the
+// state, the active runs and the interruptions can never be split):
 //
-// outcomes holds only FAILURES, once per distinct marker (their reasons
-// merged), so it is bounded by the marker vocabulary (Codex M72 R2 High-3);
-// interrupted runs are counted through KEYS[3] instead of one outcome each, so
-// they are bounded too (Codex M72 R3 Medium-2).
+//	state, error, reasons, updated   the published status
+//	outcomes      JSON: the group's distinct failures (marker + reasons),
+//	              bounded by the marker vocabulary (Codex M72 R2 High-3)
+//	r:<gen>       an active run, value = lease expiry (ms, Redis time)
+//	l:<gen>       a run swept as interrupted (a tombstone), value = sweep time;
+//	              at most MAX_LOST (Codex M72 R3 Medium-2), they survive a new
+//	              group and expire after MAX_RUN_AGE (Codex M72 R10 High-1)
+//	lost_dropped  when a tombstone was dropped (or the runs were found lost)
 const scanStatusLua = `
-local K, R, L = KEYS[1], KEYS[2], KEYS[3]
+local K = KEYS[1]
 local function nowms()
   local t = redis.call('TIME')
   return tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+end
+local function fields()
+  local all = redis.call('HGETALL', K)
+  local runs, lost = {}, {}
+  for i = 1, #all, 2 do
+    local f, v = all[i], all[i + 1]
+    local p = string.sub(f, 1, 2)
+    if p == 'r:' then
+      runs[string.sub(f, 3)] = tonumber(v) or 0
+    elseif p == 'l:' then
+      lost[string.sub(f, 3)] = tonumber(v) or 0
+    end
+  end
+  return runs, lost
+end
+local function count(t)
+  local n = 0
+  for _ in pairs(t) do n = n + 1 end
+  return n
+end
+local function active_count()
+  local runs = fields()
+  return count(runs)
 end
 local function load_outcomes()
   local raw = redis.call('HGET', K, 'outcomes')
@@ -136,36 +157,45 @@ local function add_failure(msg, rs)
   save_outcomes(o)
 end
 local function mark_lost(g, now)
-  redis.call('ZADD', L, now, g)
-  local n = redis.call('ZCARD', L)
+  redis.call('HSET', K, 'l:' .. g, now)
+  local _, lost = fields()
+  local n = count(lost)
   if n > MAX_LOST then
-    redis.call('ZREMRANGEBYRANK', L, 0, n - MAX_LOST - 1)
+    local arr = {}
+    for gg, t in pairs(lost) do table.insert(arr, {gg, t}) end
+    table.sort(arr, function(x, y) return x[2] < y[2] end)
+    for i = 1, n - MAX_LOST do redis.call('HDEL', K, 'l:' .. arr[i][1]) end
     redis.call('HSET', K, 'lost_dropped', now)
   end
 end
--- Tombstones older than any scan can run (deadline + 5m) cannot belong to a
--- live run any more; they stop tainting the SBOM (Codex M72 R10 High-1).
-local function prune_lost(now)
-  redis.call('ZREMRANGEBYSCORE', L, '-inf', '(' .. (now - MAX_RUN_AGE))
-  local ld = tonumber(redis.call('HGET', K, 'lost_dropped') or '')
-  if ld and ld < now - MAX_RUN_AGE then redis.call('HDEL', K, 'lost_dropped') end
-end
 local function sweep(now, except)
-  local lost = redis.call('ZRANGEBYSCORE', R, '-inf', '(' .. now)
-  if #lost == 0 then return 0 end
-  redis.call('ZREMRANGEBYSCORE', R, '-inf', '(' .. now)
+  local runs = fields()
   local n = 0
-  for _, g in ipairs(lost) do
-    if g ~= except then
-      mark_lost(g, now)
-      n = n + 1
+  for g, exp in pairs(runs) do
+    if exp < now then
+      redis.call('HDEL', K, 'r:' .. g)
+      if g ~= except then
+        mark_lost(g, now)
+        n = n + 1
+      end
     end
   end
   return n
 end
+-- Tombstones older than any scan can run (deadline + 5m) cannot belong to a
+-- live run any more; they stop tainting the SBOM (Codex M72 R10 High-1).
+local function prune_lost(now)
+  local _, lost = fields()
+  for g, t in pairs(lost) do
+    if t < now - MAX_RUN_AGE then redis.call('HDEL', K, 'l:' .. g) end
+  end
+  local ld = tonumber(redis.call('HGET', K, 'lost_dropped') or '')
+  if ld and ld < now - MAX_RUN_AGE then redis.call('HDEL', K, 'lost_dropped') end
+end
 local function publish(now)
   prune_lost(now)
-  if redis.call('ZCARD', R) > 0 then
+  local runs, lost = fields()
+  if count(runs) > 0 then
     redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated', now)
     return
   end
@@ -184,7 +214,7 @@ local function publish(now)
       add(e.m, rs)
     end
   end
-  if redis.call('ZCARD', L) > 0 or redis.call('HEXISTS', K, 'lost_dropped') == 1 then
+  if count(lost) > 0 or redis.call('HEXISTS', K, 'lost_dropped') == 1 then
     add(INTERRUPTED_MSG, {INTERRUPTED_REASON})
   end
   if #msgs > 0 then
@@ -195,10 +225,12 @@ local function publish(now)
     redis.call('HSET', K, 'state', 'completed', 'error', '', 'reasons', '[]', 'updated', now)
   end
 end
+local function activate(g, now, lease)
+  redis.call('HDEL', K, 'l:' .. g)
+  redis.call('HSET', K, 'r:' .. g, now + tonumber(lease))
+end
 local function expire(ttl)
   redis.call('PEXPIRE', K, ttl)
-  redis.call('PEXPIRE', R, ttl)
-  redis.call('PEXPIRE', L, ttl)
 end
 `
 
@@ -224,37 +256,35 @@ local now = nowms()
 sweep(now, nil)
 -- A begin of a run already swept as interrupted (a retried write) rejoins
 -- the group instead of starting a new one (Codex M72 R8 High-1).
-if redis.call('ZREM', L, ARGV[1]) == 1 then
-  redis.call('ZADD', R, now + tonumber(ARGV[2]), ARGV[1])
+if redis.call('HEXISTS', K, 'l:' .. ARGV[1]) == 1 then
+  activate(ARGV[1], now, ARGV[2])
   publish(now)
   expire(ARGV[3])
   return 1
 end
-if redis.call('ZCARD', R) == 0 then
-  -- A new group. Runs swept as interrupted may still be alive (a suspended
-  -- process): their tombstones are kept, so the SBOM does not read completed
-  -- while one of them could still be writing (Codex M72 R10 High-1).
-  local ld = redis.call('HGET', K, 'lost_dropped')
-  redis.call('DEL', K)
-  if ld then redis.call('HSET', K, 'lost_dropped', ld) end
+if active_count() == 0 then
+  -- A new group. Tombstones are kept: a run swept as interrupted may still be
+  -- alive (a suspended process), so the SBOM must not read completed while it
+  -- could still be writing (Codex M72 R10 High-1).
+  redis.call('HDEL', K, 'state', 'error', 'reasons', 'updated')
   save_outcomes({})
 end
-redis.call('ZADD', R, now + tonumber(ARGV[2]), ARGV[1])
+activate(ARGV[1], now, ARGV[2])
 redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated', now)
 expire(ARGV[3])
 return 1`
 
 // ARGV: gen, ttl ms, error marker (empty = completed), reasons JSON.
 // Returns 1 if the run was active or swept as interrupted, 2 if Redis did not
-// know it (its begin never landed, or it lapsed and a new group started). A
+// know it (its begin never landed, or it lapsed and its tombstone expired). A
 // failure is recorded EITHER WAY (Codex M72 R5 High-2): a failure is never
 // dropped, at worst it is attributed to a later group — a conservative
 // "failed", never a false "completed".
 const scanStatusFinishLua = `
 local now = nowms()
-local active = redis.call('ZREM', R, ARGV[1]) == 1
+local active = redis.call('HDEL', K, 'r:' .. ARGV[1]) == 1
 sweep(now, ARGV[1])
-local wasLost = redis.call('ZREM', L, ARGV[1]) == 1
+local wasLost = redis.call('HDEL', K, 'l:' .. ARGV[1]) == 1
 local ok, rs = pcall(cjson.decode, ARGV[4])
 if not ok or type(rs) ~= 'table' then rs = {} end
 add_failure(ARGV[3], rs)
@@ -273,15 +303,11 @@ local ok, m = pcall(cjson.decode, ARGV[1])
 if not ok or type(m) ~= 'table' then return redis.error_reply('bad merge') end
 sweep(now, nil)
 if type(m.b) == 'table' then
-  for _, g in ipairs(m.b) do
-    redis.call('ZREM', L, g)
-    redis.call('ZADD', R, now + tonumber(ARGV[2]), g)
-  end
+  for _, g in ipairs(m.b) do activate(g, now, ARGV[2]) end
 end
 if type(m.f) == 'table' then
   for _, g in ipairs(m.f) do
-    redis.call('ZREM', R, g)
-    redis.call('ZREM', L, g)
+    redis.call('HDEL', K, 'r:' .. g, 'l:' .. g)
   end
 end
 if type(m.x) == 'table' then
@@ -298,33 +324,31 @@ expire(ARGV[3])
 return 1`
 
 // ARGV: gen, lease ms, ttl ms. Returns 1 while the run is (again) active, 0
-// when it was superseded.
+// when Redis does not know it.
 const scanStatusHeartbeatLua = `
 local now = nowms()
-if redis.call('ZSCORE', R, ARGV[1]) then
-  redis.call('ZADD', R, 'XX', now + tonumber(ARGV[2]), ARGV[1])
+if redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 1 then
+  activate(ARGV[1], now, ARGV[2])
   expire(ARGV[3])
   return 1
 end
-if redis.call('ZREM', L, ARGV[1]) == 1 then
+if redis.call('HEXISTS', K, 'l:' .. ARGV[1]) == 1 then
   -- swept as interrupted while it was alive: revive it
-  redis.call('ZADD', R, now + tonumber(ARGV[2]), ARGV[1])
+  activate(ARGV[1], now, ARGV[2])
   publish(now)
   expire(ARGV[3])
   return 1
 end
 return 0`
 
-// ARGV: gen, lease ms, ttl ms. A run that is alive but no longer active in
-// Redis (its lease ran out and its identity was dropped from the capped lost
-// set, or a new group started meanwhile) joins the CURRENT group again: unlike
-// Begin it never starts a new group, so the group's failures and
-// interruptions are kept (Codex M72 R4 High-3).
+// ARGV: gen, lease ms, ttl ms. A run that is alive but not active in Redis
+// (its tombstone was dropped, or the entry expired) joins the CURRENT group
+// again: unlike Begin it never starts a new group, so the group's failures
+// and interruptions are kept (Codex M72 R4 High-3).
 const scanStatusRejoinLua = `
 local now = nowms()
 sweep(now, ARGV[1])
-redis.call('ZREM', L, ARGV[1])
-redis.call('ZADD', R, now + tonumber(ARGV[2]), ARGV[1])
+activate(ARGV[1], now, ARGV[2])
 publish(now)
 expire(ARGV[3])
 return 1`
@@ -332,8 +356,7 @@ return 1`
 // ARGV: state, error, reasons JSON, ttl ms. A terminal state set outside a
 // run (MarkFailed / MarkCompleted): ends every run of the group.
 const scanStatusMarkLua = `
-redis.call('DEL', R, L)
-redis.call('HDEL', K, 'lost_dropped')
+redis.call('DEL', K)
 redis.call('HSET', K, 'state', ARGV[1], 'error', ARGV[2], 'reasons', ARGV[3], 'updated', nowms())
 save_outcomes({})
 expire(ARGV[4])
@@ -344,19 +367,13 @@ const scanStatusGetLua = `
 if redis.call('EXISTS', K) == 0 then return false end
 local now = nowms()
 local changed = sweep(now, nil) > 0
-if not changed and redis.call('HGET', K, 'state') == 'running' and redis.call('ZCARD', R) == 0 then
-  -- running with no active run and none just swept (the runs key itself was
-  -- lost): interrupted, without a run to revive.
+if not changed and redis.call('HGET', K, 'state') == 'running' and active_count() == 0 then
+  -- running with no active run and none just swept: interrupted, without a
+  -- run to revive.
   redis.call('HSET', K, 'lost_dropped', now)
   changed = true
 end
-if changed then
-  publish(now)
-  -- The lost-run key a read creates expires with the entry (Codex M72 R4
-  -- Medium-4).
-  local ttl = redis.call('PTTL', K)
-  if ttl > 0 then redis.call('PEXPIRE', L, ttl) end
-end
+if changed then publish(now) end
 return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]'}`
 
 // scanStatusStore is what the tracker needs from shared storage.
