@@ -14,6 +14,7 @@ import { RefreshCw, Shield, Bell, AlertTriangle, AlertCircle, Info } from "lucid
 import { Badge } from "@/components/ui/badge";
 import { LoadError } from "@/components/ui/load-error";
 import { loadErrorState } from "@/lib/load-state";
+import { parseIPASyncSettings } from "@/lib/ipa-settings";
 
 const SEVERITY_OPTIONS = [
   { value: "CRITICAL", label: "Critical", icon: AlertTriangle, color: "text-red-600" },
@@ -32,12 +33,11 @@ export default function IPASettingsPage() {
     queryKey: queryKeys.ipa.settings(),
     queryFn: async (): Promise<IPASyncSettings> => {
       try {
-        const settings = await api.ipa.getSettings();
-        // An empty 2xx answer (204, `null`) is not settings either: it
-        // would bring back the form of defaults (Codex M71 R2 Medium).
-        if (settings == null || typeof settings !== "object") {
-          throw new Error("IPA settings: empty response");
-        }
+        // An empty or malformed 2xx answer (204, `null`, `{}`) is not
+        // settings either: it would bring back the form of defaults (Codex
+        // M71 R2 / R3 Medium).
+        const settings = parseIPASyncSettings(await api.ipa.getSettings());
+        if (!settings) throw new Error("IPA settings: empty or malformed response");
         return settings;
       } catch (error) {
         // M71: a failed load is an error with Retry (M65 bug 10), not a form

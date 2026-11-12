@@ -204,6 +204,8 @@ test.describe('IPA settings load failure (M71)', () => {
     for (const [label, fulfill] of [
         ['204 No Content', { status: 204, body: '' }],
         ['200 null', { status: 200, contentType: 'application/json', body: 'null' }],
+        // Codex M71 R3 Medium: an object without the settings is not settings.
+        ['200 {}', { status: 200, contentType: 'application/json', body: '{}' }],
     ] as const) {
         test(`should treat an empty answer (${label}) as a load failure`, async ({ page }) => {
             await page.route(`${API_BASE_URL}/api/v1/settings/ipa`, (route) =>
