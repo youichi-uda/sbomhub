@@ -1,8 +1,11 @@
 package middleware
 
 import (
+	"bytes"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 
@@ -61,24 +64,79 @@ func checkRequestParams(c echo.Context) error {
 			return err
 		}
 	}
-	if c.Request().URL.RawQuery == "" {
-		return nil
-	}
-	for key, vals := range c.QueryParams() {
-		if err := validation.CheckTextField("a query parameter name", key, validation.TextRule{}); err != nil {
-			return err
+	return checkRawQuery(c.Request().URL.RawQuery)
+}
+
+// checkRawQuery checks every pair url.ParseQuery would decode, without
+// building url.Values (Codex R2): the guard runs before authentication, and
+// materialising a query of ~10,000 short pairs cost ~30,000 allocations per
+// request. Each key and value is decoded into one reused buffer and checked
+// there; a string is built only for the refusal message.
+//
+// It sees what a handler's c.QueryParam would see: a pair url.ParseQuery
+// drops (it contains ';', or a key or value is not a valid escape) is skipped,
+// '+' decodes to a space. It does not stop at net/url's 10,000-parameter cap
+// (above which ParseQuery hands handlers nothing): checking more is harmless,
+// and a GODEBUG raising the cap must not open a gap.
+func checkRawQuery(raw string) error {
+	var buf []byte
+	for raw != "" {
+		var pair string
+		pair, raw, _ = strings.Cut(raw, "&")
+		if pair == "" || strings.Contains(pair, ";") {
+			continue
 		}
-		field := "a query parameter"
-		if PlainParamName(key) {
-			field = "query parameter " + strconv.Quote(key)
+		rawKey, rawVal, _ := strings.Cut(pair, "=")
+		// Both halves are decoded before either is checked: url.ParseQuery
+		// drops the whole pair when either fails to decode.
+		var ok bool
+		if buf, ok = queryUnescapeInto(buf[:0], rawKey); !ok {
+			continue
 		}
-		for _, v := range vals {
-			if err := validation.CheckTextField(field, v, validation.TextRule{}); err != nil {
-				return err
+		keyLen := len(buf) // the value is decoded after the key, in the same buffer
+		if buf, ok = queryUnescapeInto(buf, rawVal); !ok {
+			continue
+		}
+		if !textStorable(buf[:keyLen]) {
+			return validation.CheckTextField("a query parameter name", string(buf[:keyLen]), validation.TextRule{})
+		}
+		if val := buf[keyLen:]; !textStorable(val) {
+			k := string(buf[:keyLen])
+			field := "a query parameter"
+			if PlainParamName(k) {
+				field = "query parameter " + strconv.Quote(k)
 			}
+			return validation.CheckTextField(field, string(val), validation.TextRule{})
 		}
 	}
 	return nil
+}
+
+// textStorable reports whether b is valid UTF-8 without U+0000 — what
+// validation.CheckTextField accepts under an empty TextRule.
+func textStorable(b []byte) bool {
+	return utf8.Valid(b) && bytes.IndexByte(b, 0) < 0
+}
+
+// queryUnescapeInto appends the url.QueryUnescape decoding of s to dst. ok is
+// false where url.QueryUnescape would fail (a '%' not followed by two hex
+// digits).
+func queryUnescapeInto(dst []byte, s string) ([]byte, bool) {
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '+':
+			dst = append(dst, ' ')
+		case '%':
+			if i+2 >= len(s) || !isHex(s[i+1]) || !isHex(s[i+2]) {
+				return dst, false
+			}
+			dst = append(dst, unhex(s[i+1])<<4|unhex(s[i+2]))
+			i += 2
+		default:
+			dst = append(dst, c)
+		}
+	}
+	return dst, true
 }
 
 // PlainParamName reports whether a client-supplied query or form key is safe

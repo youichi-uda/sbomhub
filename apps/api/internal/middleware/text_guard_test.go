@@ -2,10 +2,14 @@ package middleware
 
 import (
 	"encoding/json"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 )
@@ -104,5 +108,95 @@ func TestM71TextGuardParams_DoesNotEchoTheValue(t *testing.T) {
 	_, body, _ = m71GuardServe(t, http.MethodGet, "/search?%3Cscript%3E=%00")
 	if strings.Contains(body, "script") {
 		t.Fatalf("body echoes a query key that is not a plain identifier: %s", body)
+	}
+}
+
+// Codex R2 (Medium): the guard runs before authentication, so checking the
+// query must not materialise it. A query of ~10,000 short pairs used to cost
+// a map entry, a slice and a decoded string per pair (url.ParseQuery) on
+// every unauthenticated request; the scan is now allocation-bounded.
+func TestM71TextGuardParams_QueryScanDoesNotMaterialise(t *testing.T) {
+	var sb strings.Builder
+	// 9,999 pairs: under net/url's 10,000-parameter cap, so url.ParseQuery
+	// really does build them all (above the cap it parses nothing).
+	for i := 0; i < 9999; i++ {
+		sb.WriteString("k")
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteString("=v%41&") // distinct keys, escaped values
+	}
+	sb.WriteString("z=%E6%97%A5")
+	raw := sb.String()
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/search", nil)
+	req.URL.RawQuery = raw
+	rec := httptest.NewRecorder()
+	// A fresh context per run: echo caches the parsed query on the context.
+	allocs := testing.AllocsPerRun(5, func() {
+		if err := checkRequestParams(e.NewContext(req, rec)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Logf("allocs=%.0f len=%d", allocs, len(raw))
+	if allocs > 16 {
+		t.Fatalf("checkRequestParams allocated %.0f times for a %d-byte query; want a small constant", allocs, len(raw))
+	}
+}
+
+// The scanner refuses exactly what url.ParseQuery would hand a handler:
+// pairs url.ParseQuery drops (bad escape, ';') are not inspected, and '+'
+// decodes to a space.
+func TestM71TextGuardParams_ScannerMatchesParseQuery(t *testing.T) {
+	for _, tc := range []struct {
+		raw     string
+		refused bool
+	}{
+		{"a=%00", true},
+		{"a=ok&b=%00", true},
+		{"%00=1", true},
+		{"a=%ZZ%00", false},  // ParseQuery drops the pair (bad escape)
+		{"a=%00;b=1", false}, // ParseQuery drops the pair (semicolon)
+		{"a=b+c&d=%2B", false},
+		{"a=%FF", true},
+		{"a=%ED%A0%80", true},
+		{"a", false},
+		{"&&=&", false},
+	} {
+		e := echo.New()
+		req := httptest.NewRequest(http.MethodGet, "/search", nil)
+		req.URL.RawQuery = tc.raw
+		err := checkRequestParams(e.NewContext(req, httptest.NewRecorder()))
+		if (err != nil) != tc.refused {
+			t.Errorf("%q: err = %v, want refused=%v", tc.raw, err, tc.refused)
+		}
+	}
+}
+
+// Differential check of the scanner against the url.ParseQuery path it
+// replaced: over random queries built from the characters that matter, both
+// refuse exactly the same inputs.
+func TestM71TextGuardParams_ScannerAgreesWithParseQuery(t *testing.T) {
+	alphabet := []string{"a", "b", "=", "&", ";", "+", "%", "0", "00", "%00", "%FF", "%ED%A0%80", "%E6%97%A5", "%Z", "%2", "\x00", "%41"}
+	rng := rand.New(rand.NewPCG(71, 2))
+	for n := 0; n < 20000; n++ {
+		var sb strings.Builder
+		for k := rng.IntN(8); k >= 0; k-- {
+			sb.WriteString(alphabet[rng.IntN(len(alphabet))])
+		}
+		raw := sb.String()
+		want := false
+		vals, _ := url.ParseQuery(raw)
+		for k, vs := range vals {
+			if !utf8.ValidString(k) || strings.ContainsRune(k, 0) {
+				want = true
+			}
+			for _, v := range vs {
+				if !utf8.ValidString(v) || strings.ContainsRune(v, 0) {
+					want = true
+				}
+			}
+		}
+		if got := checkRawQuery(raw) != nil; got != want {
+			t.Fatalf("%q: scanner refused=%v, ParseQuery-based check refused=%v", raw, got, want)
+		}
 	}
 }
