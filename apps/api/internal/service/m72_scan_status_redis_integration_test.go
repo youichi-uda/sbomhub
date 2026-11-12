@@ -45,6 +45,7 @@ func process(rdb *redis.Client, lease, hb time.Duration) *ScanTracker {
 	// No young-key hold here (TestM72R19_EvictionYoungKeyAndVersions covers
 	// it): these tests read completed right after a fresh key's finish.
 	t.shared.(*redisScanStatusStore).scripts = newStatusScriptsYoung(t.maxRunAge, 0)
+	t.shared.(*redisScanStatusStore).immediate = nil // the override applies whatever Redis's eviction settings
 	if lease > 0 {
 		t.shared.(*redisScanStatusStore).lease = lease
 	}
@@ -386,6 +387,7 @@ func TestM72R10_NewGroupKeepsLiveTombstones(t *testing.T) {
 // setMaxRunAge rebuilds tr's scripts for a different tombstone age.
 func setMaxRunAge(tr *ScanTracker, d time.Duration) {
 	tr.shared.(*redisScanStatusStore).scripts = newStatusScriptsYoung(d, 0)
+	tr.shared.(*redisScanStatusStore).immediate = nil
 }
 
 // Codex M72 R11 High-1: the status of one SBOM is ONE Redis key (evicted all
@@ -593,6 +595,7 @@ func TestM72R19_EvictionYoungKeyAndVersions(t *testing.T) {
 	a := process(rdb, 0, time.Hour)
 	store := a.shared.(*redisScanStatusStore)
 	store.scripts = newStatusScriptsYoung(DefaultScanDeadline+5*time.Minute, 300*time.Millisecond)
+	store.probe, store.immediate = false, nil // exercise the hold whatever the test Redis's settings
 	ctx := context.Background()
 	id := uuid.New()
 	if err := store.begin(ctx, id, 1); err != nil { // A runs
@@ -616,5 +619,41 @@ func TestM72R19_EvictionYoungKeyAndVersions(t *testing.T) {
 	time.Sleep(350 * time.Millisecond)
 	if v, _ := store.get(ctx, id); v.state != ScanStateCompleted {
 		t.Fatalf("after the young window with no run back: %s, want completed", v.state)
+	}
+}
+
+// CI Web E2E (6ed0ece): on a Redis that cannot evict (the test Redis runs
+// with maxmemory 0), a fast scan of a new SBOM reads completed at once, not
+// after the 75s young-key hold.
+func TestM72NoEvictionRedisSkipsYoungHold(t *testing.T) {
+	rdb := m72Redis(t)
+	store := &redisScanStatusStore{client: rdb, ttl: time.Hour, lease: ScanStatusLease}
+	store.initScripts(DefaultScanDeadline + 5*time.Minute)
+	if !store.probeNoEviction() {
+		t.Skip("test Redis can evict keys")
+	}
+	store.noEvict.Store(true)
+	ctx := context.Background()
+	id := uuid.New()
+	if err := store.begin(ctx, id, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id, 1, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); v.state != ScanStateCompleted {
+		t.Fatalf("fresh key on a no-eviction Redis: %s, want completed", v.state)
+	}
+	// While eviction is possible (or unknown), the hold still applies.
+	store.noEvict.Store(false)
+	id2 := uuid.New()
+	if err := store.begin(ctx, id2, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id2, 1, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id2); v.state != ScanStateRunning {
+		t.Fatalf("fresh key, eviction possible: %s, want running (young hold)", v.state)
 	}
 }

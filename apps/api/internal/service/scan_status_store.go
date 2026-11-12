@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -515,10 +516,82 @@ type scanStatusStore interface {
 }
 
 type redisScanStatusStore struct {
-	client  *redis.Client
-	ttl     time.Duration
-	lease   time.Duration
-	scripts *statusScripts
+	client *redis.Client
+	ttl    time.Duration
+	lease  time.Duration
+	// scripts hold a young key's completed back as running (scanStatusYoung);
+	// immediate do not. The hold only guards against an evicted key, so
+	// immediate are used while Redis reports it cannot evict (CI Web E2E at
+	// 6ed0ece: every fast scan of a new SBOM read running for 75s).
+	scripts   *statusScripts
+	immediate *statusScripts
+	// noEvict: the last probe found maxmemory 0 or policy noeviction.
+	// Unknown (no probe yet, CONFIG refused, Redis down) counts as false.
+	noEvict atomic.Bool
+	// probe enables the periodic CONFIG GET (off for stores built in tests).
+	probe     bool
+	probeAt   atomic.Int64
+	probeBusy atomic.Bool
+}
+
+// evictionProbeEvery: how often the store re-reads Redis's eviction settings
+// (CONFIG SET can change them at runtime).
+const evictionProbeEvery = 30 * time.Second
+
+func (s *redisScanStatusStore) initScripts(maxRunAge time.Duration) {
+	s.scripts = newStatusScripts(maxRunAge)
+	s.immediate = newStatusScriptsYoung(maxRunAge, 0)
+}
+
+// sc returns the scripts to run now.
+func (s *redisScanStatusStore) sc() *statusScripts {
+	if s.probe {
+		s.maybeProbe()
+	}
+	if s.immediate != nil && s.noEvict.Load() {
+		return s.immediate
+	}
+	return s.scripts
+}
+
+// maybeProbe re-reads the eviction settings in the background when the last
+// read is older than evictionProbeEvery. It never delays the caller.
+func (s *redisScanStatusStore) maybeProbe() {
+	now := time.Now().UnixNano()
+	if now-s.probeAt.Load() < int64(evictionProbeEvery) {
+		return
+	}
+	if !s.probeBusy.CompareAndSwap(false, true) {
+		return
+	}
+	s.probeAt.Store(now)
+	go func() {
+		defer s.probeBusy.Store(false)
+		s.noEvict.Store(s.probeNoEviction())
+	}()
+}
+
+// probeNoEviction reports whether Redis says it cannot evict a key. Any
+// error (CONFIG disabled on managed Redis, Redis down) answers false.
+func (s *redisScanStatusStore) probeNoEviction() bool {
+	ctx, cancel := s.opCtx(context.Background())
+	defer cancel()
+	cfg, err := s.client.ConfigGet(ctx, "maxmemory*").Result()
+	if err != nil {
+		return false
+	}
+	return redisCannotEvict(cfg)
+}
+
+// redisCannotEvict: Redis evicts keys only when maxmemory is set and the
+// policy is not noeviction. An incomplete answer counts as "can evict".
+func redisCannotEvict(cfg map[string]string) bool {
+	mm, okM := cfg["maxmemory"]
+	pol, okP := cfg["maxmemory-policy"]
+	if !okM || !okP {
+		return false
+	}
+	return mm == "0" || pol == "noeviction"
 }
 
 func (s *redisScanStatusStore) opCtx(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -544,14 +617,14 @@ func reasonsJSON(reasons []string) string {
 func (s *redisScanStatusStore) begin(ctx context.Context, sbomID uuid.UUID, gen uint64) error {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	return s.scripts.begin.Run(ctx, s.client, scanStatusKeys(sbomID),
+	return s.sc().begin.Run(ctx, s.client, scanStatusKeys(sbomID),
 		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
 func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) (bool, error) {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	n, err := s.scripts.finish.Run(ctx, s.client, scanStatusKeys(sbomID),
+	n, err := s.sc().finish.Run(ctx, s.client, scanStatusKeys(sbomID),
 		genString(gen), s.ttl.Milliseconds(), errMsg, reasonsJSON(reasons)).Int()
 	return n == 1, err
 }
@@ -653,7 +726,7 @@ func (m *mergeSet) json() string {
 func (s *redisScanStatusStore) merge(ctx context.Context, sbomID uuid.UUID, m *mergeSet) error {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	return s.scripts.merge.Run(ctx, s.client, scanStatusKeys(sbomID),
+	return s.sc().merge.Run(ctx, s.client, scanStatusKeys(sbomID),
 		m.json(), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
@@ -661,14 +734,16 @@ func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey)
 	// EVALSHA in one pipeline; the script is loaded only after NOSCRIPT, each
 	// round trip under its own bound (Codex M72 R12 Medium-2: loading it every
 	// pass shared the pass's deadline, and its success reset the breaker's
-	// count each time).
+	// count each time). One script set for the whole call, so the script
+	// loaded after NOSCRIPT is the one run again.
+	hb := s.sc().heartbeat
 	run := func() ([]*redis.Cmd, error) {
 		octx, cancel := s.opCtx(ctx)
 		defer cancel()
 		cmds := make([]*redis.Cmd, len(runs))
 		_, err := s.client.Pipelined(octx, func(p redis.Pipeliner) error {
 			for i, r := range runs {
-				cmds[i] = s.scripts.heartbeat.EvalSha(octx, p, scanStatusKeys(r.sbom),
+				cmds[i] = hb.EvalSha(octx, p, scanStatusKeys(r.sbom),
 					genString(r.gen), s.lease.Milliseconds(), s.ttl.Milliseconds())
 			}
 			return nil
@@ -678,7 +753,7 @@ func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey)
 	cmds, err := run()
 	if err != nil && redis.HasErrorPrefix(err, "NOSCRIPT") {
 		lctx, cancel := s.opCtx(ctx)
-		lerr := s.scripts.heartbeat.Load(lctx, s.client).Err()
+		lerr := hb.Load(lctx, s.client).Err()
 		cancel()
 		if lerr != nil {
 			return nil, lerr
@@ -702,28 +777,28 @@ func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey)
 func (s *redisScanStatusStore) intent(ctx context.Context, sbomID uuid.UUID, gen uint64) error {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	return s.scripts.intent.Run(ctx, s.client, scanStatusKeys(sbomID),
+	return s.sc().intent.Run(ctx, s.client, scanStatusKeys(sbomID),
 		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
 func (s *redisScanStatusStore) rejoin(ctx context.Context, sbomID uuid.UUID, gen uint64) error {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	return s.scripts.rejoin.Run(ctx, s.client, scanStatusKeys(sbomID),
+	return s.sc().rejoin.Run(ctx, s.client, scanStatusKeys(sbomID),
 		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
 func (s *redisScanStatusStore) mark(ctx context.Context, sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) error {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	return s.scripts.mark.Run(ctx, s.client, scanStatusKeys(sbomID),
+	return s.sc().mark.Run(ctx, s.client, scanStatusKeys(sbomID),
 		string(state), errMsg, reasonsJSON(reasons), s.ttl.Milliseconds()).Err()
 }
 
 func (s *redisScanStatusStore) get(ctx context.Context, sbomID uuid.UUID) (statusView, error) {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	v, err := s.scripts.get.Run(ctx, s.client, scanStatusKeys(sbomID)).StringSlice()
+	v, err := s.sc().get.Run(ctx, s.client, scanStatusKeys(sbomID)).StringSlice()
 	if errors.Is(err, redis.Nil) {
 		return statusView{}, nil
 	}
