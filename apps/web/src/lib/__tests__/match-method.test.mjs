@@ -98,6 +98,9 @@ describe("distroBadge", () => {
       { status: "affected", release: "Debian:12", records: ["DSA-1"], fixed: "9999.0" },
       { ...affectedEv, installed: undefined },
       { ...affectedEv, package: undefined },
+      // Codex R4 Low-1: basis missing or outside the vocabulary
+      { ...affectedEv, basis: undefined },
+      { ...affectedEv, basis: "guess" },
     ]) {
       assert.deepEqual(
         distroBadge("distro_affected", ev),
@@ -201,7 +204,7 @@ describe("distroEvidenceView", () => {
   });
 
   test("an id that is not a token is kept as text without a link", () => {
-    const v = distroEvidenceView("distro_unfixed", { status: "unfixed", release: "Debian:12", package: "p", installed: "1-1", records: ["DSA-1", "bad id"] });
+    const v = distroEvidenceView("distro_unfixed", { status: "unfixed", basis: "release", release: "Debian:12", package: "p", installed: "1-1", records: ["DSA-1", "bad id"] });
     assert.deepEqual(v.records, [
       { id: "DSA-1", url: "https://osv.dev/vulnerability/DSA-1" },
       { id: "bad id", url: null },
@@ -266,7 +269,9 @@ describe("distroEvidenceView", () => {
     for (const u of ["https://api.osv.dev:443", "https://API.OSV.DEV", "https://api.osv.dev/"]) {
       assert.equal(distroEvidenceView("distro_affected", { ...affectedEv, source_url: u }).publicOsv, true, u);
     }
-    for (const u of ["https://api.osv.dev:8443", "http://api.osv.dev", "https://api.osv.dev.evil.example", "configured-endpoint", "https://user@api.osv.dev"]) {
+    for (const u of ["https://api.osv.dev:8443", "http://api.osv.dev", "https://api.osv.dev.evil.example", "configured-endpoint", "https://user@api.osv.dev",
+      // Codex R4 Low-2: a blob: URL's origin is its inner origin
+      "blob:https://api.osv.dev/0b6f0d0e-1111-2222-3333-444444444444"]) {
       assert.equal(distroEvidenceView("distro_affected", { ...affectedEv, source_url: u }).publicOsv, false, u);
     }
   });

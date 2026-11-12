@@ -163,7 +163,8 @@ export function isPublicOsvOrigin(sourceUrl: string | undefined): boolean {
   if (sourceUrl === undefined) return false;
   try {
     const u = new URL(sourceUrl);
-    return u.username === "" && u.password === "" && u.origin === PUBLIC_OSV_ORIGIN;
+    // protocol: a blob: URL reports its INNER origin (Codex R4 Low-2).
+    return u.protocol === "https:" && u.username === "" && u.password === "" && u.origin === PUBLIC_OSV_ORIGIN;
   } catch {
     return false;
   }
@@ -194,6 +195,7 @@ export function validDistroEvidence(method: unknown, raw: unknown): DistroEviden
     ev.release === undefined ||
     ev.package === undefined ||
     ev.installed === undefined ||
+    (ev.basis !== "release" && ev.basis !== "later_releases") ||
     (ev.records?.length ?? 0) === 0 ||
     (ev.basis === "later_releases" && (ev.status !== "fixed" || (ev.ecosystems?.length ?? 0) === 0))
   ) {
