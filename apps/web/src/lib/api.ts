@@ -1,3 +1,5 @@
+import type { DistroEvidence } from "./match-method";
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
 export interface Project {
@@ -148,6 +150,14 @@ export interface Vulnerability {
   source: string; // NVD or JVN
   // M46 B2: absent when the upstream feed carried no timestamp.
   published_at?: string;
+  // M60 / M70: how the strongest of this SBOM's links to the CVE was made
+  // (docs/UPGRADE.md §13.2, §21). Only the per-SBOM list sets these.
+  match_method?: string;
+  match_confidence?: string;
+  // M70: the evidence of a distro label (distro_affected / distro_unfixed /
+  // distro_fixed), public fields only; absent for every other method. Read
+  // it through src/lib/match-method.ts, which validates its shape.
+  match_evidence?: DistroEvidence;
 }
 
 // KEV types
