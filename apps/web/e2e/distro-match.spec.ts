@@ -141,6 +141,24 @@ test.describe('M70 distro labels', () => {
       await expect(badge).not.toBeFocused();
       await expect(hint).toBeHidden();
 
+      // Focus keeps it open when the pointer leaves (Codex M71 R2 Low), and
+      // the pointer can move from the badge onto the bubble.
+      await badge.focus();
+      await badge.hover();
+      await page.mouse.move(0, 0);
+      await expect(hint).toBeVisible();
+      await page.locator('h1').first().click();
+      await expect(hint).toBeHidden();
+      await badge.hover();
+      await expect(hint).toBeVisible();
+      const box = (await badge.boundingBox())!;
+      const hintBox = (await hint.boundingBox())!;
+      await page.mouse.move(box.x + 4, box.y + box.height - 1);
+      await page.mouse.move(hintBox.x + 4, hintBox.y + 4, { steps: 8 });
+      await expect(hint).toBeVisible();
+      await page.mouse.move(0, 0);
+      await expect(hint).toBeHidden();
+
       // A mouse click shows it too (and keeps it while hovered).
       await page.locator('h1').first().click();
       await expect(hint).toBeHidden();
