@@ -105,7 +105,10 @@ const maxQueryParams = 10000
 // '+' decodes to a space. Above net/url's parameter cap the values are taken
 // from url.ParseQuery itself (Codex R3): by default it decodes nothing, so
 // nothing is refused that no handler or audit row would read, and a GODEBUG
-// urlmaxqueryparams override is honoured exactly.
+// urlmaxqueryparams override that RAISES the cap is honoured. One known
+// divergence (Codex R4, Low): an override that LOWERS the cap below 10,000 is
+// not mirrored, so the guard may refuse a pair that net/url would discard —
+// stricter, never looser.
 func checkRawQuery(raw string, opaque map[string]bool) error {
 	if strings.Count(raw, "&")+1 > maxQueryParams {
 		vals, _ := url.ParseQuery(raw)
