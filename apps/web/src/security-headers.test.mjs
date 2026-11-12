@@ -1,6 +1,7 @@
-// Pins apps/web/security-headers.mjs (M65 bug 9): the headers next.config
-// sends on every route. The browser-level check (no CSP violations on the
-// main pages, self-host and Clerk builds) is the E2E / manual production
+// Pins apps/web/security-headers.mjs (M65 bug 9, M71 nonce): the static
+// headers next.config sends on every route and the per-request CSP the proxy
+// sets. The browser-level check (no CSP violations on the main pages,
+// self-host and Clerk builds) is e2e/security.spec.ts / the manual Clerk
 // check; this pins the policy text so a later edit is a visible diff.
 //
 // Run: node --test src/security-headers.test.mjs
@@ -11,15 +12,20 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  applyNonceCsp,
   buildContentSecurityPolicy,
   buildSecurityHeaders,
   clerkFrontendApiOrigin,
+  cspEnvFromProcessEnv,
+  cspHeaderName,
+  generateNonce,
+  nonceRequestHeaders,
   originOf,
-  securityHeadersFromProcessEnv,
 } from "../security-headers.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pk = (host) => `pk_test_${Buffer.from(`${host}$`).toString("base64")}`;
+const N = "AAAAAAAAAAAAAAAAAAAAAA==";
 const directives = (csp) =>
   Object.fromEntries(csp.split("; ").map((d) => [d.split(" ")[0], d.split(" ").slice(1)]));
 
@@ -47,14 +53,14 @@ test("originOf keeps only http(s) origins", () => {
 });
 
 describe("self-host production policy", () => {
-  const csp = buildContentSecurityPolicy({ apiUrl: "http://localhost:8080", dev: false });
+  const csp = buildContentSecurityPolicy({ nonce: N, apiUrl: "http://localhost:8080", dev: false });
   const d = directives(csp);
   test("exact policy", () => {
     assert.equal(
       csp,
       [
         "default-src 'self'",
-        "script-src 'self' 'unsafe-inline'",
+        `script-src 'self' 'nonce-${N}' 'strict-dynamic'`,
         "style-src 'self' 'unsafe-inline'",
         "img-src 'self' data: blob:",
         "font-src 'self' data:",
@@ -69,6 +75,11 @@ describe("self-host production policy", () => {
       ].join("; "),
     );
   });
+  test("no inline script without the nonce (M71)", () => {
+    assert.ok(!d["script-src"].includes("'unsafe-inline'"));
+    assert.ok(d["script-src"].includes(`'nonce-${N}'`));
+    assert.ok(d["script-src"].includes("'strict-dynamic'"));
+  });
   test("no eval, no Clerk, no websocket in production", () => {
     assert.ok(!d["script-src"].includes("'unsafe-eval'"));
     assert.ok(!csp.includes("clerk"));
@@ -77,20 +88,20 @@ describe("self-host production policy", () => {
 });
 
 test("dev adds eval (React Refresh) and HMR websockets only", () => {
-  const d = directives(buildContentSecurityPolicy({ apiUrl: "http://localhost:8080", dev: true }));
+  const d = directives(buildContentSecurityPolicy({ nonce: N, apiUrl: "http://localhost:8080", dev: true }));
   assert.ok(d["script-src"].includes("'unsafe-eval'"));
   assert.ok(d["connect-src"].includes("ws:"));
 });
 
 test("Clerk mode allows the decoded Frontend API and Clerk's documented hosts", () => {
   const d = directives(
-    buildContentSecurityPolicy({ apiUrl: "https://api.sbomhub.app", clerkPublishableKey: pk("clerk.sbomhub.app"), dev: false }),
+    buildContentSecurityPolicy({ nonce: N, apiUrl: "https://api.sbomhub.app", clerkPublishableKey: pk("clerk.sbomhub.app"), dev: false }),
   );
   // Clerk's manual CSP (clerk.com/docs/guides/secure/best-practices/csp-headers):
   // FAPI, Turnstile, and abuse/fraud protection (*.protect.clerk.com, served
   // on non-443 ports, hence ":*" in connect-src). Codex R1 High.
   assert.deepEqual(d["script-src"], [
-    "'self'", "'unsafe-inline'", "https://clerk.sbomhub.app", "https://challenges.cloudflare.com", "https://*.protect.clerk.com",
+    "'self'", `'nonce-${N}'`, "'strict-dynamic'", "https://clerk.sbomhub.app", "https://challenges.cloudflare.com", "https://*.protect.clerk.com",
   ]);
   assert.deepEqual(d["connect-src"], [
     "'self'", "https://api.sbomhub.app", "https://clerk.sbomhub.app", "https://*.protect.clerk.com:*", "https://clerk-telemetry.com",
@@ -102,39 +113,134 @@ test("Clerk mode allows the decoded Frontend API and Clerk's documented hosts", 
 });
 
 test("an undecodable Clerk key falls back to Clerk's hosted dev domains", () => {
-  const d = directives(buildContentSecurityPolicy({ clerkPublishableKey: "pk_test_placeholder", dev: false }));
+  const d = directives(buildContentSecurityPolicy({ nonce: N, clerkPublishableKey: "pk_test_placeholder", dev: false }));
   assert.ok(d["script-src"].includes("https://*.clerk.accounts.dev"));
   assert.ok(d["connect-src"].includes("http://localhost:8080"), "API defaults like lib/api.ts does");
 });
 
 test("waitlist form endpoint is reachable when configured", () => {
   const d = directives(
-    buildContentSecurityPolicy({ apiUrl: "http://localhost:8080", waitlistFormUrl: "https://formspree.io/f/abc", dev: false }),
+    buildContentSecurityPolicy({ nonce: N, apiUrl: "http://localhost:8080", waitlistFormUrl: "https://formspree.io/f/abc", dev: false }),
   );
   assert.ok(d["connect-src"].includes("https://formspree.io"));
 });
 
-test("header set, and report-only switch", () => {
-  const h = Object.fromEntries(buildSecurityHeaders({ dev: false }).map(({ key, value }) => [key, value]));
+test("a policy without a valid nonce is refused, never 'unsafe-inline'", () => {
+  for (const nonce of [undefined, "", "short", "has space AAAAAAAAAAAAAAAAAA", "AAAAAAAAAAAAAAAAAAAAAA'; script-src *", "<AAAAAAAAAAAAAAAAAAAAAAA>"]) {
+    assert.throws(() => buildContentSecurityPolicy({ nonce, dev: false }), /nonce is required/, String(nonce));
+  }
+});
+
+test("generateNonce: 128-bit base64, fresh every call", () => {
+  const seen = new Set();
+  for (let i = 0; i < 1000; i++) {
+    const n = generateNonce();
+    assert.match(n, /^[A-Za-z0-9+/]{22}==$/);
+    assert.equal(Buffer.from(n, "base64").length, 16);
+    seen.add(n);
+  }
+  assert.equal(seen.size, 1000);
+  // and it is accepted by the policy builder
+  assert.match(buildContentSecurityPolicy({ nonce: generateNonce() }), /'nonce-[A-Za-z0-9+/]{22}=='/);
+});
+
+test("static header set: no CSP (the proxy sets it per request)", () => {
+  const h = Object.fromEntries(buildSecurityHeaders().map(({ key, value }) => [key, value]));
   assert.equal(h["X-Content-Type-Options"], "nosniff");
-  assert.equal(h["X-Frame-Options"], "DENY");
+  assert.equal(h["X-Frame-Options"], "DENY", "framing stays denied in report-only mode too");
   assert.equal(h["Referrer-Policy"], "strict-origin-when-cross-origin");
   assert.match(h["Permissions-Policy"], /camera=\(\)/);
-  assert.ok(h["Content-Security-Policy"]);
-  const ro = buildSecurityHeaders({ dev: false, reportOnly: true }).map((x) => x.key);
-  assert.ok(ro.includes("Content-Security-Policy-Report-Only"));
-  assert.ok(!ro.includes("Content-Security-Policy"));
-  assert.ok(ro.includes("X-Frame-Options"), "framing stays denied in report-only mode");
+  assert.equal(h["Content-Security-Policy"], undefined);
+  assert.equal(h["Content-Security-Policy-Report-Only"], undefined);
 });
 
-test("process env mapping", () => {
-  const h = securityHeadersFromProcessEnv({ NODE_ENV: "production", NEXT_PUBLIC_API_URL: "http://localhost:18480", SBOMHUB_CSP_REPORT_ONLY: "true" });
-  const csp = h.find((x) => x.key === "Content-Security-Policy-Report-Only").value;
-  assert.match(csp, /connect-src 'self' http:\/\/localhost:18480(;|$)/);
+test("report-only switch and process env mapping", () => {
+  assert.equal(cspHeaderName(false), "Content-Security-Policy");
+  assert.equal(cspHeaderName(true), "Content-Security-Policy-Report-Only");
+  const env = cspEnvFromProcessEnv({ NODE_ENV: "production", NEXT_PUBLIC_API_URL: "http://localhost:18480", SBOMHUB_CSP_REPORT_ONLY: "true" });
+  assert.equal(env.reportOnly, true);
+  assert.equal(env.dev, false);
+  assert.match(buildContentSecurityPolicy({ ...env, nonce: N }), /connect-src 'self' http:\/\/localhost:18480(;|$)/);
+  assert.equal(cspEnvFromProcessEnv({ NODE_ENV: "production" }).reportOnly, false);
+  assert.equal(cspEnvFromProcessEnv({ NODE_ENV: "development" }).dev, true);
 });
 
-test("next.config wires it in and turns X-Powered-By off", () => {
+describe("nonce request headers (client cannot supply its own nonce)", () => {
+  const csp = buildContentSecurityPolicy({ nonce: N });
+  test("incoming CSP / x-nonce headers are dropped, ours set", () => {
+    const incoming = new Headers({
+      accept: "text/html",
+      "content-security-policy": "script-src 'nonce-attacker'",
+      "content-security-policy-report-only": "script-src 'nonce-attacker'",
+      "x-nonce": "attacker",
+    });
+    const h = nonceRequestHeaders(incoming, { nonce: N, csp, headerName: "Content-Security-Policy" });
+    assert.equal(h.get("accept"), "text/html");
+    assert.equal(h.get("content-security-policy"), csp);
+    assert.equal(h.get("content-security-policy-report-only"), null);
+    assert.equal(h.get("x-nonce"), N);
+    assert.equal(incoming.get("x-nonce"), "attacker", "input not mutated");
+  });
+  test("report-only mode forwards the policy under the report-only name", () => {
+    const h = nonceRequestHeaders(new Headers({ "content-security-policy": "x" }), {
+      nonce: N, csp, headerName: "Content-Security-Policy-Report-Only",
+    });
+    assert.equal(h.get("content-security-policy"), null);
+    assert.equal(h.get("content-security-policy-report-only"), csp);
+  });
+});
+
+describe("applyNonceCsp: every rendered response forwards the nonce", () => {
+  const csp = buildContentSecurityPolicy({ nonce: N });
+  const opts = { csp, headerName: "Content-Security-Policy" };
+  const req = nonceRequestHeaders(new Headers({ accept: "text/html", cookie: "a=b" }), { nonce: N, ...opts });
+  const forwarded = (res) =>
+    Object.fromEntries(
+      res.get("x-middleware-override-headers").split(",").map((k) => [k, res.get(`x-middleware-request-${k}`)]),
+    );
+
+  test("bare NextResponse.next() (forwarded nothing): forwards the whole request", () => {
+    const res = new Headers({ "x-middleware-next": "1" });
+    applyNonceCsp(res, req, opts);
+    assert.equal(res.get("content-security-policy"), csp);
+    assert.deepEqual(forwarded(res), { accept: "text/html", cookie: "a=b", "content-security-policy": csp, "x-nonce": N });
+  });
+
+  test("next-intl style forward of a stale set: values replaced, other headers kept", () => {
+    const res = new Headers({
+      "x-middleware-rewrite": "http://x/en",
+      "x-middleware-override-headers": "accept,x-next-intl-locale,content-security-policy-report-only,x-nonce",
+      "x-middleware-request-accept": "text/html",
+      "x-middleware-request-x-next-intl-locale": "en",
+      "x-middleware-request-content-security-policy-report-only": "script-src 'nonce-attacker'",
+      "x-middleware-request-x-nonce": "attacker",
+    });
+    applyNonceCsp(res, req, opts);
+    const f = forwarded(res);
+    assert.deepEqual(f, { accept: "text/html", "x-next-intl-locale": "en", "content-security-policy": csp, "x-nonce": N });
+    assert.equal(res.get("x-middleware-request-content-security-policy-report-only"), null);
+  });
+
+  test("a redirect gets the response header only", () => {
+    const res = new Headers({ location: "/en/sign-in" });
+    applyNonceCsp(res, req, opts);
+    assert.equal(res.get("content-security-policy"), csp);
+    assert.equal(res.get("x-middleware-override-headers"), null);
+  });
+});
+
+test("next.config wires the static headers in and turns X-Powered-By off", () => {
   const cfg = readFileSync(join(here, "..", "next.config.mjs"), "utf8");
   assert.match(cfg, /poweredByHeader:\s*false/);
-  assert.match(cfg, /source:\s*'\/:path\*',\s*headers:\s*securityHeadersFromProcessEnv\(process\.env\)/);
+  assert.match(cfg, /source:\s*'\/:path\*',\s*headers:\s*buildSecurityHeaders\(\)/);
+  assert.match(cfg, /SBOMHUB_CSP_REPORT_ONLY:\s*process\.env\.SBOMHUB_CSP_REPORT_ONLY/);
+});
+
+test("proxy.ts sets the nonce CSP on every response it returns", () => {
+  const src = readFileSync(join(here, "proxy.ts"), "utf8");
+  assert.match(src, /const nonce = generateNonce\(\);/);
+  assert.match(src, /buildContentSecurityPolicy\(\{ \.\.\.CSP_ENV, nonce \}\)/);
+  assert.match(src, /applyNonceCsp\(response\.headers, reqHeaders/);
+  // Build-time inlining needs literal member accesses, not the env object.
+  assert.doesNotMatch(src, /cspEnvFromProcessEnv\(process\.env\)/);
 });

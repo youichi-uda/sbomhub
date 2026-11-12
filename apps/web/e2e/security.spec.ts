@@ -326,6 +326,43 @@ test.describe('Security Tests', () => {
             expect(headers['x-powered-by']).toBeUndefined();
         });
 
+        // M71: script-src allows inline / loaded scripts by a per-request
+        // nonce ('strict-dynamic'), not 'unsafe-inline'.
+        test('should send a per-request script nonce and no unsafe-inline script-src', async ({ request }) => {
+            const nonces: string[] = [];
+            for (const path of ['/en/projects', '/en/projects', '/en']) {
+                const res = await request.get(path);
+                expect(res.status(), path).toBe(200);
+                const csp = res.headers()['content-security-policy'];
+                const scriptSrc = csp.split(';').map((d) => d.trim()).find((d) => d.startsWith('script-src '));
+                expect(scriptSrc, path).toBeDefined();
+                expect(scriptSrc, path).not.toContain("'unsafe-inline'");
+                expect(scriptSrc, path).toContain("'strict-dynamic'");
+                const nonce = /'nonce-([A-Za-z0-9+/]{22,}={0,2})'/.exec(scriptSrc!)?.[1];
+                expect(nonce, path).toBeTruthy();
+                nonces.push(nonce!);
+
+                // Every script the page ships carries this response's nonce.
+                const html = await res.text();
+                const scripts = [...html.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]);
+                expect(scripts.length, path).toBeGreaterThan(0);
+                for (const tag of scripts) {
+                    if (/type="application\/ld\+json"/.test(tag)) continue; // data block, never executed
+                    expect(tag, path).toContain(`nonce="${nonce}"`);
+                }
+            }
+            expect(new Set(nonces).size, 'a fresh nonce per response').toBe(nonces.length);
+        });
+
+        test('should ignore a client-supplied nonce or CSP request header', async ({ request }) => {
+            const res = await request.get('/en/projects', {
+                headers: { 'x-nonce': 'AAAAAAAAAAAAAAAAAAAAAA==', 'content-security-policy': "script-src 'nonce-AAAAAAAAAAAAAAAAAAAAAA=='" },
+            });
+            expect(res.status()).toBe(200);
+            expect(res.headers()['content-security-policy']).not.toContain('AAAAAAAAAAAAAAAAAAAAAA==');
+            expect(await res.text()).not.toContain('nonce="AAAAAAAAAAAAAAAAAAAAAA=="');
+        });
+
         test('should load the main pages without any CSP violation', async ({ page }) => {
             const violations: string[] = [];
             page.on('console', (msg) => {
@@ -338,9 +375,17 @@ test.describe('Security Tests', () => {
                     console.error(`Content Security Policy violation: ${e.violatedDirective} ${e.blockedURI}`);
                 });
             });
-            for (const path of ['/en', '/en/dashboard', '/en/projects', '/en/search', '/en/settings/apikeys', '/en/settings/sso', '/ja/projects']) {
+            // M71: plus the IPA settings page and an unknown path (404). The
+            // 404 used to be Next's build-time page, whose scripts carry no
+            // nonce.
+            const pages: [string, number][] = [
+                ['/en', 200], ['/en/dashboard', 200], ['/en/projects', 200], ['/en/search', 200],
+                ['/en/settings/apikeys', 200], ['/en/settings/sso', 200], ['/en/settings/ipa', 200],
+                ['/ja/projects', 200], ['/en/no-such-page-m71', 404],
+            ];
+            for (const [path, status] of pages) {
                 const res = await page.goto(path);
-                expect(res?.status(), path).toBe(200);
+                expect(res?.status(), path).toBe(status);
                 expect(res?.headers()['content-security-policy'], path).toContain("default-src 'self'");
                 // The page really ran its client code: hydrated and finished its
                 // API loads (connect-src), i.e. no loading placeholder is left.

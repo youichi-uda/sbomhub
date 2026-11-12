@@ -3,6 +3,14 @@ import createIntlMiddleware from "next-intl/middleware";
 import { routing } from "./i18n/routing";
 import { NextResponse } from "next/server";
 import type { NextRequest, NextFetchEvent } from "next/server";
+import {
+  applyNonceCsp,
+  buildContentSecurityPolicy,
+  cspEnvFromProcessEnv,
+  cspHeaderName,
+  generateNonce,
+  nonceRequestHeaders,
+} from "../security-headers.mjs";
 
 const intlMiddleware = createIntlMiddleware(routing);
 
@@ -65,8 +73,18 @@ const clerkHandler = clerkMiddleware(
   }
 );
 
-// Main proxy - conditionally use Clerk
-export default async function proxy(request: NextRequest) {
+// M71: Content-Security-Policy with a per-request nonce (security-headers.mjs).
+// `process.env.X` member accesses so Next inlines them at build time.
+const CSP_ENV = cspEnvFromProcessEnv({
+  NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
+  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
+  NEXT_PUBLIC_WAITLIST_FORM_URL: process.env.NEXT_PUBLIC_WAITLIST_FORM_URL,
+  NODE_ENV: process.env.NODE_ENV,
+  SBOMHUB_CSP_REPORT_ONLY: process.env.SBOMHUB_CSP_REPORT_ONLY,
+});
+const CSP_HEADER = cspHeaderName(CSP_ENV.reportOnly);
+
+async function route(request: NextRequest): Promise<Response> {
   if (request.nextUrl.pathname.startsWith("/public/")) {
     return NextResponse.next();
   }
@@ -77,7 +95,32 @@ export default async function proxy(request: NextRequest) {
   }
 
   // SaaS mode: use Clerk middleware
-  return clerkHandler(request, {} as NextFetchEvent);
+  return (await clerkHandler(request, {} as NextFetchEvent)) ?? NextResponse.next();
+}
+
+// Main proxy - conditionally use Clerk
+export default async function proxy(request: NextRequest) {
+  // Next.js puts the nonce from the request's CSP header on the scripts it
+  // renders; Clerk reads x-nonce. The request headers are replaced here,
+  // before next-intl / Clerk copy them into the headers they forward, and
+  // applyNonceCsp makes sure every rendered response forwards them.
+  const nonce = generateNonce();
+  const csp = buildContentSecurityPolicy({ ...CSP_ENV, nonce });
+  const reqHeaders = nonceRequestHeaders(request.headers, { nonce, csp, headerName: CSP_HEADER });
+  for (const k of [...request.headers.keys()]) {
+    if (!reqHeaders.has(k)) request.headers.delete(k);
+  }
+  reqHeaders.forEach((v, k) => request.headers.set(k, v));
+
+  let response = await route(request);
+  try {
+    applyNonceCsp(response.headers, reqHeaders, { csp, headerName: CSP_HEADER });
+  } catch {
+    // Immutable headers (a Response.redirect from a library): copy first.
+    response = new NextResponse(response.body, response);
+    applyNonceCsp(response.headers, reqHeaders, { csp, headerName: CSP_HEADER });
+  }
+  return response;
 }
 
 // M10-4 #72 + M10-Phase-D F160: matcher invariant — every request goes

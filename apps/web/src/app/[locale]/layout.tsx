@@ -5,6 +5,7 @@ import { getMessages, getTranslations } from "next-intl/server";
 import { routing } from "@/i18n/routing";
 import { QueryProvider } from "@/components/providers/query-provider";
 import { notFound } from "next/navigation";
+import { connection } from "next/server";
 import "../globals.css";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -80,6 +81,11 @@ interface Props {
 
 export default async function RootLayout({ children, params }: Props) {
   const { locale } = await params;
+  // M71: the CSP nonce is minted per request (src/proxy.ts) and Next.js can
+  // only put it on the scripts of a page rendered for that request. A page
+  // prerendered at build time would carry nonce-less inline scripts that
+  // the policy blocks, so every page under this layout renders on demand.
+  await connection();
 
   if (!routing.locales.includes(locale as (typeof routing.locales)[number])) {
     notFound();

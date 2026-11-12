@@ -2,6 +2,7 @@ import { ClerkProvider } from "@clerk/nextjs";
 import { jaJP, enUS } from "@clerk/localizations";
 import { ReactNode } from "react";
 import Link from "next/link";
+import { headers } from "next/headers";
 
 const CLERK_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
@@ -29,10 +30,13 @@ export default async function AuthLayout({ children, params }: AuthLayoutProps) 
     );
   }
 
-  // SaaS mode - wrap with ClerkProvider
+  // SaaS mode - wrap with ClerkProvider. M71: the Clerk script tag is
+  // server-rendered and needs this request's CSP nonce (src/proxy.ts).
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
   return (
     <ClerkProvider
       publishableKey={CLERK_PUBLISHABLE_KEY}
+      nonce={nonce}
       localization={localization}
       signInFallbackRedirectUrl={`/${locale}/dashboard`}
       signUpFallbackRedirectUrl={`/${locale}/dashboard`}

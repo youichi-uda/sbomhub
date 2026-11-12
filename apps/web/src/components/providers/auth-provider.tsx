@@ -8,12 +8,14 @@ import { ApiAuthProvider } from "./api-auth-provider";
 interface AuthProviderProps {
   children: ReactNode;
   locale: string;
+  /** This request's CSP nonce, for the Clerk script tag (M71). */
+  nonce?: string;
 }
 
 // Check at build time - direct access for proper inlining
 const CLERK_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
-export function AuthProvider({ children, locale }: AuthProviderProps) {
+export function AuthProvider({ children, locale, nonce }: AuthProviderProps) {
   // Self-hosted mode: no auth provider needed
   if (!CLERK_PUBLISHABLE_KEY) {
     return <>{children}</>;
@@ -25,6 +27,7 @@ export function AuthProvider({ children, locale }: AuthProviderProps) {
   return (
     <ClerkProvider
       publishableKey={CLERK_PUBLISHABLE_KEY}
+      nonce={nonce}
       localization={localization}
       signInFallbackRedirectUrl={`/${locale}/dashboard`}
       signUpFallbackRedirectUrl={`/${locale}/dashboard`}
