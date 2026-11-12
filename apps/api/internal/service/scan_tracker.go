@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -54,31 +55,21 @@ type ScanTracker struct {
 
 	// shared (M72) is the Redis store; nil keeps the tracker in-memory only.
 	shared scanStatusStore
-	// hb* is the heartbeat loop that renews this process's runs' leases and
-	// retries shared writes that failed.
-	hbMu       sync.Mutex
-	synced     map[runKey]*syncedRun
+	// qMu guards the shared-write queues, the live runs and the heartbeat
+	// loop's state (scan_tracker_shared.go).
+	qMu sync.Mutex
+	// queues holds, per SBOM, the shared writes not yet applied, in call
+	// order.
+	queues map[uuid.UUID]*sbomQueue
+	// live: this process's active runs (lease renewal), with their start.
+	live       map[runKey]time.Time
 	hbActive   bool
 	hbInterval time.Duration
-	// dirty: SBOMs whose last shared write outside a run (MarkFailed /
-	// MarkCompleted) failed, so the shared copy is stale; read locally.
-	dirty map[uuid.UUID]time.Time
 }
 
 type runKey struct {
 	sbom uuid.UUID
 	gen  uint64
-}
-
-// localRun is a run of this process as the shared store should see it.
-type localRun struct {
-	began time.Time
-	// begun: the shared Begin succeeded.
-	begun bool
-	// finished: the run ended; its outcome is still to be written.
-	finished bool
-	errMsg   string
-	reasons  []string
 }
 
 type scanEntry struct {
@@ -103,9 +94,9 @@ func NewScanTracker() *ScanTracker {
 	return &ScanTracker{
 		entries:    make(map[uuid.UUID]scanEntry),
 		retention:  1 * time.Hour,
-		synced:     map[runKey]*syncedRun{},
+		queues:     map[uuid.UUID]*sbomQueue{},
+		live:       map[runKey]time.Time{},
 		hbInterval: ScanStatusHeartbeat,
-		dirty:      map[uuid.UUID]time.Time{},
 	}
 }
 
@@ -117,6 +108,9 @@ func (t *ScanTracker) WithRedis(client *redis.Client) *ScanTracker {
 	}
 	return t
 }
+
+// newRunGenFn is newRunGen (a variable for tests).
+var newRunGenFn = newRunGen
 
 // newRunGen returns a random non-zero run generation: unique across API
 // processes without coordination (a collision needs 2^32 concurrent runs of
@@ -169,7 +163,7 @@ func (t *ScanTracker) MarkRunning(sbomID uuid.UUID) {
 // poller therefore never reads "completed" while some scan of the SBOM can
 // still add findings.
 func (t *ScanTracker) Begin(sbomID uuid.UUID) uint64 {
-	gen := newRunGen()
+	gen := newRunGenFn()
 	t.mu.Lock()
 	e, ok := t.entries[sbomID]
 	if !ok || len(e.active) == 0 || time.Since(e.updatedAt) > t.retention {
@@ -215,7 +209,11 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 		if errMsg == "" {
 			errMsg = "scan failed"
 		}
-		e.groupMsgs = append(e.groupMsgs, errMsg)
+		// Once per distinct marker: many runs failing the same way must not
+		// grow the entry (Codex M72 R2 High-3).
+		if !slices.Contains(e.groupMsgs, errMsg) {
+			e.groupMsgs = append(e.groupMsgs, errMsg)
+		}
 		e.groupReasons = MergeScanReasons(e.groupReasons, reasons)
 	}
 	e.updatedAt = time.Now()

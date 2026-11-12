@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,6 +78,18 @@ func (m *memStore) heartbeat(_ context.Context, id uuid.UUID, gen uint64) (bool,
 	}
 	m.beats++
 	return m.runs[id][gen], nil
+}
+
+func (m *memStore) heartbeatMany(ctx context.Context, runs []runKey) ([]bool, error) {
+	out := make([]bool, len(runs))
+	for i, r := range runs {
+		ok, err := m.heartbeat(ctx, r.sbom, r.gen)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = ok
+	}
+	return out, nil
 }
 
 func (m *memStore) mark(_ context.Context, id uuid.UUID, st ScanState, msg string, reasons []string) error {
@@ -178,8 +191,8 @@ func TestM72Tracker_StoreDownFallsBackAndRetries(t *testing.T) {
 		return st == ScanStateCompleted
 	})
 	waitFor(t, "the heartbeat loop to stop", func() bool {
-		a.hbMu.Lock()
-		defer a.hbMu.Unlock()
+		a.qMu.Lock()
+		defer a.qMu.Unlock()
 		return !a.hbActive
 	})
 }
@@ -209,7 +222,7 @@ func TestM72Tracker_HeartbeatRenewsActiveRuns(t *testing.T) {
 	gen := a.Begin(id)
 	waitFor(t, "heartbeats", func() bool { store.mu.Lock(); defer store.mu.Unlock(); return store.beats >= 3 })
 	a.Finish(id, gen, nil, "")
-	waitFor(t, "the loop to stop", func() bool { a.hbMu.Lock(); defer a.hbMu.Unlock(); return !a.hbActive })
+	waitFor(t, "the loop to stop", func() bool { a.qMu.Lock(); defer a.qMu.Unlock(); return !a.hbActive })
 	store.mu.Lock()
 	n := store.beats
 	store.mu.Unlock()
@@ -231,8 +244,8 @@ func TestM72Tracker_NoStoreIsInMemory(t *testing.T) {
 	if st != ScanStateFailed || msg != "scan failed" || !slices.Equal(r, []string{ScanReasonTruncated}) {
 		t.Fatalf("%s %q %v", st, msg, r)
 	}
-	a.hbMu.Lock()
-	defer a.hbMu.Unlock()
+	a.qMu.Lock()
+	defer a.qMu.Unlock()
 	if a.hbActive {
 		t.Fatal("no heartbeat loop without a store")
 	}
@@ -421,4 +434,71 @@ func (g *groupStore) finish(_ context.Context, id uuid.UUID, gen uint64, msg str
 		g.state[id] = ScanStateCompleted
 	}
 	return true, nil
+}
+
+// delayBeginStore delays the begin of one generation.
+type delayBeginStore struct {
+	*groupStore
+	slowGen atomic.Uint64
+	delay   time.Duration
+}
+
+func (d *delayBeginStore) begin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	if gen == d.slowGen.Load() {
+		time.Sleep(d.delay)
+	}
+	return d.groupStore.begin(ctx, id, gen)
+}
+
+// Codex M72 R2 High-1: one process's writes of one SBOM reach the store in
+// call order. B began before A finished, so A's failure belongs to B's group
+// even when B's begin write is slow.
+func TestM72R2_WritesOfOneSBOMKeepCallOrder(t *testing.T) {
+	store := &delayBeginStore{groupStore: newGroupStore(), delay: 2 * beginWait}
+	a := trackerOn(store, time.Hour)
+	id := uuid.New()
+	ga := a.Begin(id)
+	// B's generation is random; make every begin after A's slow.
+	store.slowGen.Store(0)
+	orig := newRunGenFn
+	newRunGenFn = func() uint64 { g := orig(); store.slowGen.Store(g); return g }
+	gb := a.Begin(id)
+	newRunGenFn = orig
+	a.Finish(id, ga, []string{ScanReasonFetchFailed}, "nvd: scan failed (fetch_failed)")
+	a.Finish(id, gb, nil, "")
+	settle(t, a, id)
+	if st, _, _ := trackerOn(store, time.Hour).GetDetail(id); st != ScanStateFailed {
+		t.Fatalf("group outcome %s, want failed", st)
+	}
+}
+
+// Codex M72 R2 Medium-4: a renewal pass costs one store round trip per batch,
+// not one per run.
+func TestM72R2_HeartbeatRenewsInBatches(t *testing.T) {
+	store := &countingStore{memStore: newMemStore()}
+	a := trackerOn(store, time.Hour)
+	for i := 0; i < 300; i++ {
+		a.Begin(uuid.New())
+	}
+	store.mu.Lock()
+	store.batches = 0
+	store.mu.Unlock()
+	a.heartbeatPass()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.beats != 300 || store.batches > 2 {
+		t.Fatalf("renewed %d runs in %d round trips, want 300 in <= 2", store.beats, store.batches)
+	}
+}
+
+type countingStore struct {
+	*memStore
+	batches int
+}
+
+func (c *countingStore) heartbeatMany(ctx context.Context, runs []runKey) ([]bool, error) {
+	c.mu.Lock()
+	c.batches++
+	c.mu.Unlock()
+	return c.memStore.heartbeatMany(ctx, runs)
 }

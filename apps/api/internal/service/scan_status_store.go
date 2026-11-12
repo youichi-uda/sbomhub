@@ -187,8 +187,27 @@ if not active and exists then
 end
 local ok, rs = pcall(cjson.decode, ARGV[4])
 if not ok or type(rs) ~= 'table' then rs = {} end
-local entry = {g = ARGV[1], m = ARGV[3], r = rs}
-if idx then o[idx] = entry else table.insert(o, entry) end
+if idx then table.remove(o, idx) end
+-- Only failures are kept, once per distinct marker (Codex M72 R2 High-3): a
+-- success adds nothing to the group's outcome, and a repeated marker (many
+-- runs failing the same way) only merges its reasons, so the entry stays
+-- bounded by the marker vocabulary plus the runs swept as interrupted.
+if ARGV[3] ~= '' then
+  local dup = nil
+  for _, e in ipairs(o) do
+    if e.lost ~= 1 and e.m == ARGV[3] then dup = e end
+  end
+  if dup then
+    if type(dup.r) ~= 'table' then dup.r = {} end
+    local have = {}
+    for _, r in ipairs(dup.r) do have[r] = true end
+    for _, r in ipairs(rs) do
+      if not have[r] then table.insert(dup.r, r); have[r] = true end
+    end
+  else
+    table.insert(o, {g = ARGV[1], m = ARGV[3], r = rs})
+  end
+end
 save_outcomes(o)
 publish(now)
 expire(ARGV[2])
@@ -246,7 +265,9 @@ return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or 
 type scanStatusStore interface {
 	begin(ctx context.Context, sbomID uuid.UUID, gen uint64) error
 	finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) (recorded bool, err error)
-	heartbeat(ctx context.Context, sbomID uuid.UUID, gen uint64) (active bool, err error)
+	// heartbeatMany renews the leases of runs in one round trip; active[i]
+	// is false for a run that was superseded.
+	heartbeatMany(ctx context.Context, runs []runKey) (active []bool, err error)
 	mark(ctx context.Context, sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) error
 	get(ctx context.Context, sbomID uuid.UUID) (state ScanState, errMsg string, reasons []string, found bool, err error)
 }
@@ -261,7 +282,7 @@ func (s *redisScanStatusStore) opCtx(ctx context.Context) (context.Context, cont
 	// Detached from the caller's cancellation: a status write at the end of
 	// a cancelled scan must still be attempted (bounded).
 	ctx = sbomredis.WithBreakerClass(context.WithoutCancel(ctx), sbomredis.ClassStatus)
-	return context.WithTimeout(ctx, scanStatusOpTimeout)
+	return sbomredis.OpContext(ctx, scanStatusOpTimeout)
 }
 
 func genString(gen uint64) string { return strconv.FormatUint(gen, 10) }
@@ -292,12 +313,32 @@ func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen
 	return n == 1, err
 }
 
-func (s *redisScanStatusStore) heartbeat(ctx context.Context, sbomID uuid.UUID, gen uint64) (bool, error) {
+func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey) ([]bool, error) {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	n, err := scanStatusHeartbeat.Run(ctx, s.client, scanStatusKeys(sbomID),
-		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Int()
-	return n == 1, err
+	if err := scanStatusHeartbeat.Load(ctx, s.client).Err(); err != nil {
+		return nil, err
+	}
+	cmds := make([]*redis.Cmd, len(runs))
+	_, err := s.client.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for i, r := range runs {
+			cmds[i] = scanStatusHeartbeat.EvalSha(ctx, p, scanStatusKeys(r.sbom),
+				genString(r.gen), s.lease.Milliseconds(), s.ttl.Milliseconds())
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]bool, len(runs))
+	for i, c := range cmds {
+		n, err := c.Int()
+		if err != nil {
+			return nil, err
+		}
+		out[i] = n == 1
+	}
+	return out, nil
 }
 
 func (s *redisScanStatusStore) mark(ctx context.Context, sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) error {

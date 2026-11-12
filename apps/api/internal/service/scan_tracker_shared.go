@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,20 +11,50 @@ import (
 	sbomredis "github.com/sbomhub/sbomhub/internal/redis"
 )
 
-// The ScanTracker's side of the shared store (M72): every write is attempted
-// once inline, bounded and best-effort; a write that failed is retried by the
-// heartbeat loop, which also renews the leases of this process's active runs.
-// Nothing here returns an error to the scan.
+// The ScanTracker's side of the shared store (M72).
+//
+// Every shared write of one SBOM goes through that SBOM's queue and is applied
+// in CALL order by one goroutine at a time (Codex M72 R2 High-1): a run that
+// began before another run of the SBOM finished reaches Redis before that
+// finish, so the two stay one group whatever the goroutine scheduling. A write
+// that fails stays at the head of its queue, and the heartbeat loop retries
+// it; while an SBOM has queued writes this process's memory answers for it
+// where Redis could be behind (see GetDetail). Nothing here returns an error
+// to the scan, and only Begin waits, at most beginWait.
 
-// syncedRun guards one run's shared writes, so the inline write and the
-// heartbeat loop never interleave for one run.
-type syncedRun struct {
-	mu sync.Mutex
-	localRun
-	done bool
-	// finishing is set (without mu) as soon as Finish is called, so the run
-	// counts as pending before its goroutine records the outcome.
-	finishing atomic.Bool
+const (
+	// beginWait bounds how long Begin waits for its shared write. Begin is on
+	// the request path (Codex M72 R1 Medium-5).
+	beginWait = 250 * time.Millisecond
+	// maxQueuedWrites bounds one SBOM's queue while Redis is unreachable; a
+	// write beyond it is dropped (the SBOM keeps answering from memory).
+	maxQueuedWrites = 256
+	// heartbeatBatch is how many lease renewals go in one pipelined round
+	// trip (Codex M72 R2 Medium-4).
+	heartbeatBatch = 256
+)
+
+type sharedEventKind int
+
+const (
+	evBegin sharedEventKind = iota
+	evFinish
+	evMark
+)
+
+type sharedEvent struct {
+	kind    sharedEventKind
+	gen     uint64
+	state   ScanState
+	msg     string
+	reasons []string
+	at      time.Time
+	done    chan struct{} // closed once applied
+}
+
+type sbomQueue struct {
+	events   []*sharedEvent
+	draining bool
 }
 
 func (t *ScanTracker) logSharedError(msg string, sbomID uuid.UUID, err error) {
@@ -37,35 +65,70 @@ func (t *ScanTracker) logSharedError(msg string, sbomID uuid.UUID, err error) {
 	slog.Warn(msg, "sbom_id", sbomID, "error", err)
 }
 
-// run returns (creating it) the shared-sync record of a run.
-func (t *ScanTracker) run(k runKey) *syncedRun {
-	t.hbMu.Lock()
-	defer t.hbMu.Unlock()
-	r, ok := t.hbRunsSynced()[k]
-	if !ok {
-		r = &syncedRun{localRun: localRun{began: time.Now()}}
-		t.hbRunsSynced()[k] = r
+// enqueue appends ev to sbomID's queue and starts its drain. t.qMu is held.
+func (t *ScanTracker) enqueueLocked(sbomID uuid.UUID, ev *sharedEvent) bool {
+	q := t.queues[sbomID]
+	if q == nil {
+		q = &sbomQueue{}
+		t.queues[sbomID] = q
 	}
-	if !t.hbActive {
-		t.hbActive = true
-		go t.heartbeatLoop()
+	if len(q.events) >= maxQueuedWrites {
+		slog.Warn("scan status: too many unwritten shared writes for the SBOM; dropping one", "sbom_id", sbomID)
+		return false
 	}
-	return r
+	ev.at = time.Now()
+	ev.done = make(chan struct{})
+	q.events = append(q.events, ev)
+	if !q.draining {
+		q.draining = true
+		go t.drain(sbomID)
+	}
+	t.ensureHeartbeatLocked()
+	return true
 }
 
-// hbRunsSynced is the run table. hbMu is held.
-func (t *ScanTracker) hbRunsSynced() map[runKey]*syncedRun {
-	if t.synced == nil {
-		t.synced = map[runKey]*syncedRun{}
+// drain applies sbomID's queued writes in order until the queue is empty or a
+// write fails (it then stays queued for the heartbeat loop to retry).
+func (t *ScanTracker) drain(sbomID uuid.UUID) {
+	for {
+		t.qMu.Lock()
+		q := t.queues[sbomID]
+		if q == nil || len(q.events) == 0 {
+			delete(t.queues, sbomID)
+			t.qMu.Unlock()
+			return
+		}
+		ev := q.events[0]
+		t.qMu.Unlock()
+
+		err := t.apply(sbomID, ev)
+
+		t.qMu.Lock()
+		if err != nil {
+			q.draining = false
+			t.qMu.Unlock()
+			t.logSharedError("scan status: shared write failed; retrying on the next heartbeat", sbomID, err)
+			return
+		}
+		q.events = q.events[1:]
+		close(ev.done)
+		t.qMu.Unlock()
 	}
-	return t.synced
 }
 
-func (t *ScanTracker) dropRun(k runKey, r *syncedRun) {
-	t.hbMu.Lock()
-	defer t.hbMu.Unlock()
-	if t.synced[k] == r {
-		delete(t.synced, k)
+func (t *ScanTracker) apply(sbomID uuid.UUID, ev *sharedEvent) error {
+	ctx := context.Background()
+	switch ev.kind {
+	case evBegin:
+		return t.shared.begin(ctx, sbomID, ev.gen)
+	case evFinish:
+		recorded, err := t.shared.finish(ctx, sbomID, ev.gen, ev.msg, ev.reasons)
+		if err == nil && !recorded {
+			slog.Info("scan status: outcome not recorded in the shared store; the run was superseded", "sbom_id", sbomID)
+		}
+		return err
+	default:
+		return t.shared.mark(ctx, sbomID, ev.state, ev.msg, ev.reasons)
 	}
 }
 
@@ -73,124 +136,60 @@ func (t *ScanTracker) sharedBegin(sbomID uuid.UUID, gen uint64) {
 	if t.shared == nil {
 		return
 	}
-	k := runKey{sbomID, gen}
-	r := t.run(k)
-	// Begin waits briefly for its write (Codex M72 R1 Medium-5 vs ordering):
-	// a run must normally reach Redis before another process's run of the
-	// SBOM finishes, or the two would not be one group and that run's
-	// failure would be dropped. But it is on the request path, so the wait is
-	// bounded by beginWait whatever Redis does; a write still in flight or
-	// failed is completed by the goroutine or the heartbeat loop.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		t.syncRun(k, r, false)
-	}()
+	ev := &sharedEvent{kind: evBegin, gen: gen}
+	t.qMu.Lock()
+	t.live[runKey{sbomID, gen}] = time.Now()
+	ok := t.enqueueLocked(sbomID, ev)
+	t.qMu.Unlock()
+	if !ok {
+		return
+	}
+	// A run should normally reach Redis before another process's run of the
+	// SBOM finishes, so Begin waits for its write — bounded, because it is on
+	// the request path.
 	timer := time.NewTimer(beginWait)
 	defer timer.Stop()
 	select {
-	case <-done:
+	case <-ev.done:
 	case <-timer.C:
 	}
 }
-
-// beginWait bounds how long Begin waits for its shared write.
-const beginWait = 250 * time.Millisecond
 
 func (t *ScanTracker) sharedFinish(sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) {
 	if t.shared == nil {
 		return
 	}
-	k := runKey{sbomID, gen}
-	r := t.run(k)
-	reasons = append([]string(nil), reasons...)
-	r.finishing.Store(true)
-	// Asynchronous: the run's begin may still be in flight (holding r.mu).
-	// Until the outcome lands the shared store still lists the run as
-	// active, so every reader sees running, never a premature terminal state.
-	go func() {
-		r.mu.Lock()
-		r.finished, r.errMsg, r.reasons = true, errMsg, reasons
-		r.mu.Unlock()
-		t.syncRun(k, r, false)
-	}()
+	t.qMu.Lock()
+	delete(t.live, runKey{sbomID, gen})
+	t.enqueueLocked(sbomID, &sharedEvent{kind: evFinish, gen: gen, msg: errMsg, reasons: append([]string(nil), reasons...)})
+	t.qMu.Unlock()
 }
 
 func (t *ScanTracker) sharedMark(sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) {
 	if t.shared == nil {
 		return
 	}
-	// Marked dirty until the write lands, so this process answers from
-	// memory meanwhile; the write itself does not hold up the caller.
-	at := time.Now()
-	t.hbMu.Lock()
-	t.dirty[sbomID] = at
-	t.hbMu.Unlock()
-	reasons = append([]string(nil), reasons...)
-	go func() {
-		err := t.shared.mark(context.Background(), sbomID, state, errMsg, reasons)
-		if err != nil {
-			t.logSharedError("scan status: shared write failed; this process answers for the SBOM", sbomID, err)
-			return
+	t.qMu.Lock()
+	// A terminal state set outside a run ends this process's runs of it.
+	for k := range t.live {
+		if k.sbom == sbomID {
+			delete(t.live, k)
 		}
-		t.hbMu.Lock()
-		if t.dirty[sbomID].Equal(at) {
-			delete(t.dirty, sbomID)
-		}
-		t.hbMu.Unlock()
-	}()
+	}
+	t.enqueueLocked(sbomID, &sharedEvent{kind: evMark, state: state, msg: errMsg, reasons: append([]string(nil), reasons...)})
+	t.qMu.Unlock()
 }
 
-// syncRun brings the shared store up to date with one run: Begin if it has
-// not reached Redis yet, then its outcome if it finished, else (heartbeat) a
-// lease renewal.
-func (t *ScanTracker) syncRun(k runKey, r *syncedRun, heartbeat bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.done {
-		return
-	}
-	ctx := context.Background()
-	if !r.begun {
-		if err := t.shared.begin(ctx, k.sbom, k.gen); err != nil {
-			t.logSharedError("scan status: shared begin failed; retrying on the next heartbeat", k.sbom, err)
-			return
-		}
-		r.begun = true
-		heartbeat = false // Begin set a fresh lease
-	}
-	if r.finished {
-		recorded, err := t.shared.finish(ctx, k.sbom, k.gen, r.errMsg, r.reasons)
-		if err != nil {
-			t.logSharedError("scan status: shared finish failed; retrying on the next heartbeat", k.sbom, err)
-			return
-		}
-		if !recorded {
-			slog.Info("scan status: outcome not recorded in the shared store; the run was superseded",
-				"sbom_id", k.sbom)
-		}
-		r.done = true
-		t.dropRun(k, r)
-		return
-	}
-	if heartbeat {
-		active, err := t.shared.heartbeat(ctx, k.sbom, k.gen)
-		if err != nil {
-			t.logSharedError("scan status: lease renewal failed", k.sbom, err)
-			return
-		}
-		if !active {
-			// Superseded while it was alive (its lease ran out and a new
-			// group started, or a terminal state was set): join the current
-			// group again on the next tick.
-			r.begun = false
-		}
+// ensureHeartbeatLocked starts the heartbeat loop. t.qMu is held.
+func (t *ScanTracker) ensureHeartbeatLocked() {
+	if !t.hbActive {
+		t.hbActive = true
+		go t.heartbeatLoop()
 	}
 }
 
 // heartbeatLoop renews leases and retries failed writes until this process
-// has no run left to sync. A run older than retention + lease is dropped (a
-// scan that never finished, e.g. an upload whose transaction rolled back).
+// has neither a live run nor a queued write.
 func (t *ScanTracker) heartbeatLoop() {
 	ticker := time.NewTicker(t.hbInterval)
 	defer ticker.Stop()
@@ -201,52 +200,69 @@ func (t *ScanTracker) heartbeatLoop() {
 	}
 }
 
-// heartbeatPass syncs every run once; false when none is left (the loop then
-// ends).
+// heartbeatPass restarts stalled queues and renews the lease of every live
+// run whose SBOM has no queued write, in pipelined batches; false when there
+// is nothing left to do (the loop then ends). A live run older than
+// retention + lease is dropped (a scan that never finished, e.g. an upload
+// whose transaction rolled back), and so is a queued write older than
+// retention.
 func (t *ScanTracker) heartbeatPass() bool {
-	t.hbMu.Lock()
-	if len(t.synced) == 0 {
-		t.hbActive = false
-		t.hbMu.Unlock()
-		return false
-	}
-	type item struct {
-		k runKey
-		r *syncedRun
-	}
-	items := make([]item, 0, len(t.synced))
-	for k, r := range t.synced {
-		items = append(items, item{k, r})
-	}
-	t.hbMu.Unlock()
-	// Renewed concurrently (bounded), so a pass takes about
-	// len/heartbeatWorkers round trips, not len (Codex M72 R1 Medium-6): at
-	// the 1s bound per call, 16 workers renew 480 runs within the 30s
-	// interval, well inside the 90s lease.
-	sem := make(chan struct{}, heartbeatWorkers)
-	var wg sync.WaitGroup
-	for _, it := range items {
-		it.r.mu.Lock()
-		stale := time.Since(it.r.began) > t.retention+ScanStatusLease
-		it.r.mu.Unlock()
-		if stale {
-			t.dropRun(it.k, it.r)
+	t.qMu.Lock()
+	for id, q := range t.queues {
+		for len(q.events) > 0 && time.Since(q.events[0].at) > t.retention {
+			close(q.events[0].done)
+			q.events = q.events[1:]
+		}
+		if len(q.events) == 0 && !q.draining {
+			delete(t.queues, id)
 			continue
 		}
-		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-			t.syncRun(it.k, it.r, true)
-		}()
+		if !q.draining {
+			q.draining = true
+			go t.drain(id)
+		}
 	}
-	wg.Wait()
+	var renew []runKey
+	for k, began := range t.live {
+		if time.Since(began) > t.retention+ScanStatusLease {
+			delete(t.live, k)
+			continue
+		}
+		if q := t.queues[k.sbom]; q != nil && len(q.events) > 0 {
+			continue // its writes come first; the begin sets a fresh lease
+		}
+		renew = append(renew, k)
+	}
+	if len(t.live) == 0 && len(t.queues) == 0 {
+		t.hbActive = false
+		t.qMu.Unlock()
+		return false
+	}
+	t.qMu.Unlock()
+
+	for start := 0; start < len(renew); start += heartbeatBatch {
+		batch := renew[start:min(start+heartbeatBatch, len(renew))]
+		active, err := t.shared.heartbeatMany(context.Background(), batch)
+		if err != nil {
+			t.logSharedError("scan status: lease renewal failed", batch[0].sbom, err)
+			continue
+		}
+		t.qMu.Lock()
+		for i, k := range batch {
+			if active[i] {
+				continue
+			}
+			// Superseded while alive (its lease ran out and a new group
+			// started, or a terminal state was set): join the current group
+			// again.
+			if _, still := t.live[k]; still {
+				t.enqueueLocked(k.sbom, &sharedEvent{kind: evBegin, gen: k.gen})
+			}
+		}
+		t.qMu.Unlock()
+	}
 	return true
 }
-
-// heartbeatWorkers bounds the concurrent renewals of one heartbeat pass.
-const heartbeatWorkers = 16
 
 // localActive reports whether a run of sbomID is active in this process.
 func (t *ScanTracker) localActive(sbomID uuid.UUID) bool {
@@ -256,41 +272,11 @@ func (t *ScanTracker) localActive(sbomID uuid.UUID) bool {
 	return ok && len(e.active) > 0 && time.Since(e.updatedAt) <= t.retention
 }
 
-// pendingShared reports whether this process holds state of sbomID that has
-// not reached the shared store: a run whose begin or outcome is unwritten (or
-// being written), or a MarkFailed / MarkCompleted that failed.
+// pendingShared reports whether this process has writes of sbomID that have
+// not reached the shared store.
 func (t *ScanTracker) pendingShared(sbomID uuid.UUID) bool {
-	t.hbMu.Lock()
-	defer t.hbMu.Unlock()
-	if at, ok := t.dirty[sbomID]; ok {
-		if time.Since(at) <= t.retention {
-			return true
-		}
-		delete(t.dirty, sbomID)
-	}
-	for k, r := range t.synced {
-		if k.sbom != sbomID {
-			continue
-		}
-		if r.finishing.Load() {
-			if r.mu.TryLock() {
-				done := r.done
-				r.mu.Unlock()
-				if !done {
-					return true
-				}
-				continue
-			}
-			return true
-		}
-		if !r.mu.TryLock() {
-			return true // a write is in flight
-		}
-		pending := !r.done && (!r.begun || r.finished)
-		r.mu.Unlock()
-		if pending {
-			return true
-		}
-	}
-	return false
+	t.qMu.Lock()
+	defer t.qMu.Unlock()
+	q := t.queues[sbomID]
+	return q != nil && len(q.events) > 0
 }

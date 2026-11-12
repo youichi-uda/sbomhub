@@ -140,11 +140,7 @@ func TestM72Redis_LapsedRunIsRevivedAndReportsItsOutcome(t *testing.T) {
 		t.Fatalf("lapsed: %s, want failed (interrupted)", st)
 	}
 	// The heartbeat comes back.
-	k := runKey{id, gen}
-	slow.hbMu.Lock()
-	r := slow.synced[k]
-	slow.hbMu.Unlock()
-	slow.syncRun(k, r, true)
+	slow.heartbeatPass()
 	if st, _, _ := detail(reader, id, slow); st != ScanStateRunning {
 		t.Fatalf("revived: %s, want running", st)
 	}
@@ -192,5 +188,32 @@ func TestM72Redis_MarkFailedIsShared(t *testing.T) {
 	a.MarkFailed(id, "tenant context missing")
 	if st, msg, _ := detail(b, id, a); st != ScanStateFailed || msg != "tenant context missing" {
 		t.Fatalf("%s %q", st, msg)
+	}
+}
+
+// Codex M72 R2 High-3: runs that fail the same way (queue_full while one
+// scan is active) must not grow the shared entry without bound.
+func TestM72R2_RepeatedFailuresDoNotGrowTheEntry(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	id := uuid.New()
+	a.Begin(id) // the long scan
+	for i := 0; i < 200; i++ {
+		g := a.Begin(id)
+		a.Finish(id, g, []string{ScanReasonQueueFull}, "scan: scan failed (queue_full)")
+	}
+	reader := process(rdb, 0, time.Hour)
+	if st, _, _ := detail(reader, id, a); st != ScanStateRunning {
+		t.Fatalf("%s", st)
+	}
+	raw := rdb.HGet(context.Background(), scanStatusKeys(id)[0], "outcomes").Val()
+	if len(raw) > 512 {
+		t.Fatalf("outcomes grew to %d bytes after 200 identical failures: %.200s", len(raw), raw)
+	}
+	a.mu.RLock()
+	n := len(a.entries[id].groupMsgs)
+	a.mu.RUnlock()
+	if n > 1 {
+		t.Fatalf("in-memory group kept %d copies of one marker", n)
 	}
 }
