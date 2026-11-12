@@ -734,8 +734,8 @@ export default function ProjectDetailPage() {
                     data-vuln-cve-id={vuln.cve_id}
                     className="border rounded-lg p-4"
                   >
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
+                      <div className="flex min-w-0 flex-wrap items-center gap-2">
                         {/* M13-3 F175 #89: the canonical CVE-ID display for
                             a vulnerability entry. The RemediationPanel
                             collapsible button below ALSO renders {cveId}
@@ -793,7 +793,7 @@ export default function ProjectDetailPage() {
                           evidence={vuln.match_evidence}
                         />
                       </div>
-                      <div className="flex shrink-0 items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm text-muted-foreground">
                           {/* M46 B2: cvss_score is absent for un-scored
                               CVEs — render "—", never 0.0. */}

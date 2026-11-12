@@ -87,6 +87,7 @@ test.describe('M70 distro labels', () => {
     expect(ev.basis).toBe('later_releases');
     expect(ev.records).toEqual(['DEBIAN-CVE-2020-8203', 'DLA-0000-1']);
     expect(ev.source_url).toBe('https://api.osv.dev');
+    expect(ev.data_modified).toBe('2026-11-09T00:00:00Z');
     // The seed stores these internal fields with the link; the list must
     // project the public DistroEvidence fields only.
     for (const internal of ['source_id', 'prior_method', 'wm_source', 'wm_rev', 'wm_by_source']) {
@@ -130,6 +131,7 @@ test.describe('M70 distro labels', () => {
       await expect(panel.getByTestId('distro-evidence-basis')).toHaveText(m.basisLaterReleases);
       await expect(panel.getByTestId('distro-evidence-source-url')).toHaveText('https://api.osv.dev');
       await expect(panel.getByTestId('distro-evidence-mirror-note')).toHaveCount(0);
+      await expect(panel.getByTestId('distro-evidence-data-modified')).toHaveText('2026-11-09T00:00:00Z');
       await expect(panel.getByRole('link', { name: 'DEBIAN-CVE-2020-8203' })).toHaveAttribute(
         'href',
         'https://osv.dev/vulnerability/DEBIAN-CVE-2020-8203',
@@ -150,6 +152,10 @@ test.describe('M70 distro labels', () => {
       await expect(affectedPanel.getByTestId('distro-evidence-basis')).toHaveText(m.basisRelease);
       await expect(affectedPanel.getByTestId('distro-evidence-later-releases')).toHaveCount(0);
       await expect(affectedPanel.getByText(m.distroFixedReview)).toHaveCount(0);
+      // no source_url in this evidence: the endpoint is unknown, not public
+      await expect(affectedPanel.getByTestId('distro-evidence-mirror-note')).toHaveText(
+        m.mirrorRecordsNote.replace('{source}', m.sourceUnknown),
+      );
 
       // distro_unfixed from a mirror endpoint: the osv.dev links are flagged
       const unfixedEntry = page.locator(`[data-vuln-cve-id="${DISTRO.unfixed}"]`);

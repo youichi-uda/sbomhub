@@ -87,7 +87,14 @@ describe("distroBadge", () => {
   });
 
   test("distro_affected without a usable fixed version is a plain affected badge", () => {
-    for (const ev of [undefined, null, {}, { fixed: "" }, { fixed: "   " }, { fixed: 3 }, "x", []]) {
+    for (const ev of [
+      undefined, null, {}, { fixed: "" }, { fixed: "   " }, { fixed: 3 }, "x", [],
+      // Codex R2 Medium-1: a fixed version outside coherent evidence (no
+      // status / release / records, or a contradicting status) is not advice.
+      { fixed: "9.9.9" },
+      { ...affectedEv, status: "fixed" },
+      { ...affectedEv, records: [] },
+    ]) {
       assert.deepEqual(
         distroBadge("distro_affected", ev),
         { method: "distro_affected", tone: "affected", label: "distroAffected" },
@@ -183,6 +190,7 @@ describe("distroEvidenceView", () => {
 
   test("later_releases basis raises the caveat and lists the deciding releases", () => {
     const v = distroEvidenceView("distro_fixed", fixedLaterEv);
+    assert.equal(v.hasEvidence, true);
     assert.equal(v.inferredFromLaterReleases, true);
     assert.deepEqual(v.laterReleases, ["Debian:12", "Debian:13"]);
     assert.equal(v.release, "Debian:11");
@@ -203,7 +211,7 @@ describe("distroEvidenceView", () => {
       inferredFromLaterReleases: false,
       laterReleases: [],
       records: [],
-      publicOsv: true,
+      publicOsv: false,
     });
   });
 
@@ -229,12 +237,27 @@ describe("distroEvidenceView", () => {
     assert.equal(pub.dataModified, "2026-11-09T12:00:00Z");
     assert.equal(pub.publicOsv, true);
 
-    const noUrl = distroEvidenceView("distro_affected", { ...affectedEv, source_url: undefined });
-    assert.equal(noUrl.publicOsv, true);
 
     const mirror = distroEvidenceView("distro_affected", { ...affectedEv, source_url: "https://osv.mirror.example" });
     assert.equal(mirror.sourceUrl, "https://osv.mirror.example");
     assert.equal(mirror.publicOsv, false);
+  });
+
+  // Codex R2 Medium-1: the evidence's status must be the label's own.
+  test("evidence whose status contradicts the label is no evidence", () => {
+    assert.equal(distroEvidenceView("distro_fixed", affectedEv).hasEvidence, false);
+    assert.equal(distroEvidenceView("distro_affected", fixedLaterEv).hasEvidence, false);
+    assert.equal(distroEvidenceView("distro_unfixed", affectedEv).hasEvidence, false);
+    assert.equal(distroEvidenceView("distro_fixed", fixedLaterEv).hasEvidence, true);
+  });
+
+  // Codex R2 Medium-2: only an explicit public endpoint is public.
+  test("an absent endpoint is unknown, not public OSV", () => {
+    const v = distroEvidenceView("distro_affected", { ...affectedEv, source_url: undefined });
+    assert.equal(v.publicOsv, false);
+    assert.equal(v.sourceUrl, undefined);
+    assert.equal(distroEvidenceView("distro_affected", { ...affectedEv, source_url: "https://api.osv.dev/" }).publicOsv, true);
+    assert.equal(distroEvidenceView("distro_affected", { ...affectedEv, source_url: "http://api.osv.dev" }).publicOsv, false);
   });
 
   test("non-distro methods have no evidence view", () => {

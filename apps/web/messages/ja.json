@@ -1569,6 +1569,7 @@
     "hideEvidenceFor": "{cve} の根拠を隠す",
     "sourceUrl": "取得先",
     "dataModified": "データ版",
-    "mirrorRecordsNote": "この判定は {source} のデータを使っています。レコードのリンクは公開版の osv.dev を開くため、内容が異なる場合があります。"
+    "mirrorRecordsNote": "この判定は {source} のデータを使っています。レコードのリンクは公開版の osv.dev を開くため、内容が異なる場合があります。",
+    "sourceUnknown": "記録のない取得先"
   }
 }

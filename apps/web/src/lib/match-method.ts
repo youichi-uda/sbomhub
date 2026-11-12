@@ -99,7 +99,10 @@ export function distroBadge(method: unknown, evidence: unknown): DistroBadge | n
   if (method === "distro_unfixed") {
     return { method, tone: "affected", label: "distroUnfixed" };
   }
-  const fixed = parseDistroEvidence(evidence)?.fixed;
+  // Upgrade advice only from evidence that validates for THIS label (Codex
+  // R2 Medium-1): a stray `fixed` in a partial or contradicting document is
+  // not a version to recommend.
+  const fixed = validDistroEvidence(method, evidence)?.fixed;
   return fixed !== undefined
     ? { method, tone: "affected", label: "distroAffectedUpgrade", upgradeTo: fixed }
     : { method, tone: "affected", label: "distroAffected" };
@@ -142,37 +145,51 @@ export interface DistroEvidenceView {
   /** The data's own revision (newest OSV `modified` of the package). */
   dataModified?: string;
   /**
-   * true when the data came from OSV's public API (or the API did not say):
-   * the osv.dev record links then show the records the verdict used. false
-   * for a configured mirror, whose records may differ from osv.dev's.
+   * true only when the evidence names OSV's public API as its endpoint: the
+   * osv.dev record links then show the records the verdict used. false for a
+   * configured mirror or an unrecorded endpoint, whose records may differ.
    */
   publicOsv: boolean;
 }
 
 const PUBLIC_OSV_ORIGIN = "https://api.osv.dev";
 
-const DISTRO_STATUSES = new Set(["affected", "unfixed", "fixed"]);
+const STATUS_FOR: Record<DistroMatchMethod, string> = {
+  distro_affected: "affected",
+  distro_unfixed: "unfixed",
+  distro_fixed: "fixed",
+};
 
 /**
- * Evidence is usable only when it is recognisably DistroEvidence: a known
- * status, a release and at least one record. Anything less (an empty object,
- * a partial or corrupted document) is shown as "no evidence recorded" rather
- * than as a table of dashes that looks like a verdict's basis.
+ * The ONE validator the badge and the evidence view share. Evidence is usable
+ * only when it is recognisably the DistroEvidence of THIS label: its status
+ * is the label's own (affected / unfixed / fixed), it names a release and at
+ * least one record, and basis = later_releases appears only with "fixed" (the
+ * only status the API infers that way). Anything less (an empty object, a
+ * partial, corrupted or contradicting document) is "no evidence recorded",
+ * never a table of dashes or a version to upgrade to. For "unfixed" a stray
+ * fixed version is dropped: no fix is released by definition.
  */
-function coherent(ev: DistroEvidence): boolean {
-  return (
-    ev.status !== undefined &&
-    DISTRO_STATUSES.has(ev.status) &&
-    ev.release !== undefined &&
-    (ev.records?.length ?? 0) > 0
-  );
+export function validDistroEvidence(method: unknown, raw: unknown): DistroEvidence | null {
+  if (!isDistroMatchMethod(method)) return null;
+  const ev = parseDistroEvidence(raw);
+  if (
+    !ev ||
+    ev.status !== STATUS_FOR[method] ||
+    ev.release === undefined ||
+    (ev.records?.length ?? 0) === 0 ||
+    (ev.basis === "later_releases" && ev.status !== "fixed")
+  ) {
+    return null;
+  }
+  return ev.status === "unfixed" ? { ...ev, fixed: undefined } : ev;
 }
 
 export function distroEvidenceView(method: unknown, evidence: unknown): DistroEvidenceView | null {
   if (!isDistroMatchMethod(method)) return null;
-  const ev = parseDistroEvidence(evidence);
-  if (!ev || !coherent(ev)) {
-    return { method, hasEvidence: false, inferredFromLaterReleases: false, laterReleases: [], records: [], publicOsv: true };
+  const ev = validDistroEvidence(method, evidence);
+  if (!ev) {
+    return { method, hasEvidence: false, inferredFromLaterReleases: false, laterReleases: [], records: [], publicOsv: false };
   }
   return {
     method,
@@ -189,6 +206,9 @@ export function distroEvidenceView(method: unknown, evidence: unknown): DistroEv
     fetchedAt: ev.fetched_at,
     sourceUrl: ev.source_url,
     dataModified: ev.data_modified,
-    publicOsv: ev.source_url === undefined || ev.source_url.replace(/\/+$/, "") === PUBLIC_OSV_ORIGIN,
+    // Only an explicit public endpoint is public; an unrecorded one is
+    // unknown and gets the same "osv.dev may differ" note as a mirror (Codex
+    // R2 Medium-2).
+    publicOsv: ev.source_url !== undefined && ev.source_url.replace(/\/+$/, "") === PUBLIC_OSV_ORIGIN,
   };
 }

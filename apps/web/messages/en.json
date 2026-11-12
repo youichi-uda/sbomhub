@@ -1569,6 +1569,7 @@
     "hideEvidenceFor": "Hide evidence for {cve}",
     "sourceUrl": "Endpoint",
     "dataModified": "Data revision",
-    "mirrorRecordsNote": "This verdict used data from {source}. The record links open the public osv.dev copy, which may differ from it."
+    "mirrorRecordsNote": "This verdict used data from {source}. The record links open the public osv.dev copy, which may differ from it.",
+    "sourceUnknown": "an endpoint the evidence does not record"
   }
 }
