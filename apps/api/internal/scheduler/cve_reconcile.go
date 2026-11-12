@@ -44,10 +44,10 @@ import (
 // It is also how rows stored under the pre-M67 CVSS rule converge (the sync
 // ranked v4.0 above v3.x until M67). The pass offers each record at the
 // lastModified the sync already stored, which `strictly newer wins` refuses,
-// so UpdateMetadata carries one exception: a row with a score and no
-// cvss_version (migration 069) is re-derived once at an equal timestamp.
-// A row NVD has not modified since the upgrade therefore converges on the
-// first pass after it — the next one due, i.e. at most
+// so UpdateMetadata carries one exception: a dated row with no cvss_version
+// (migration 069) is re-derived once at an equal timestamp — only when this
+// job reads NVD itself, not a mirror (canonicalNVD). A row NVD has not
+// modified since the upgrade therefore converges on the first pass after it — the next one due, i.e. at most
 // SBOMHUB_NVD_RECONCILE_INTERVAL (30 days by default) after the previous pass
 // finished, plus the pass's own duration.
 //

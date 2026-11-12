@@ -31,11 +31,14 @@
 --   whose upstream lastModified is not newer than the stored
 --   source_modified_at, so on its own it would never re-derive a row the old
 --   sync already dated: the M58 re-read offers exactly that timestamp again.
---   A DATED row (source_modified_at set) with a score and NULL cvss_version
---   is recognisably pre-069: every writer that dates a row from here on (the
---   CVE sync, the catalogue re-read) records the version. UpdateMetadata
---   re-derives such a row ONCE at an equal timestamp; see the guard's comment.
---   Scored rows without a version are also created after 069 by the scanner
+--   A DATED row (source_modified_at set) with NULL cvss_version is
+--   recognisably pre-069: every writer that dates a row from here on (the CVE
+--   sync, the catalogue re-read) records the version of any assessment it
+--   writes. UpdateMetadata re-derives such a row ONCE at an equal timestamp
+--   when the record carries an assessment AND was read from NVD itself — not
+--   from a mirror set with SBOMHUB_NVD_URL, which could serve a stale body
+--   under an unchanged timestamp; see the guard's comment.
+--   Rows without a version are also created after 069 by the scanner
 --   from a CPE-path cache hit (that cache does not carry the version yet), but
 --   scanner rows are UNDATED, so the ordinary "stored NULL timestamp is
 --   writable" rule refreshes them and the exception is never what reaches
@@ -55,6 +58,17 @@
 --   next CVE sync / catalogue re-read re-derives each from NVD's record. It is
 --   limited to source = 'NVD' because every NVD refresh writes that source,
 --   and a JVN-only row (JVNDB id) can never be re-derived from NVD.
+--
+-- Mirrors (Codex M67 R6, High):
+--   With SBOMHUB_NVD_URL pointing at a mirror the equal-timestamp
+--   re-derivation is off, so pre-069 rows keep the old rule until NVD modifies
+--   each CVE. To converge them anyway, once the mirror is known to be complete
+--   and current, run:
+--       UPDATE vulnerabilities SET source_modified_at = NULL
+--       WHERE cvss_version IS NULL AND source = 'NVD'
+--         AND source_modified_at IS NOT NULL;
+--   which makes each row writable once by the next dated record (the guard's
+--   documented operator escape hatch), from whichever source the sync reads.
 --
 -- No backfill:
 --   The version of a legacy score was never captured, and inferring it from
@@ -88,4 +102,4 @@ ALTER TABLE vulnerabilities
     NOT VALID;
 
 COMMENT ON COLUMN vulnerabilities.cvss_version IS
-    'M67: the CVSS version (''3.1'', ''3.0'', ''4.0'', ''2.0'') of the assessment cvss_score and severity were derived from, chosen by internal/cvss.Select: v3.1 > v3.0 > v4.0 > v2, NVD Primary over Secondary within a version. Global non-tenant attribute. NULL: unscored, an unrecognised feed version (JVN), a scanner row created from a CPE-path cache hit (undated, refreshed by the next CVE sync), or written before 069. A dated row with a score and NULL cvss_version is pre-069 and is re-derived once by repository.UpdateMetadata at an equal upstream timestamp, so the CVE sync and the monthly catalogue re-read converge it without a backfill.';
+    'M67: the CVSS version (''3.1'', ''3.0'', ''4.0'', ''2.0'') of the assessment cvss_score and severity were derived from, chosen by internal/cvss.Select: v3.1 > v3.0 > v4.0 > v2, NVD Primary over Secondary within a version. Global non-tenant attribute. NULL: unscored, an unrecognised feed version (JVN), a scanner row created from a CPE-path cache hit (undated, refreshed by the next CVE sync), or written before 069. A dated row with NULL cvss_version is pre-069 and is re-derived once by repository.UpdateMetadata at an equal upstream timestamp when the record carries an assessment and was read from NVD itself (not a mirror), so the CVE sync and the monthly catalogue re-read converge it without a backfill.';

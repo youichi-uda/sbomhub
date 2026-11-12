@@ -286,6 +286,11 @@ type CVESyncJob struct {
 	// orchestrator config value as NVDService.baseURL (cfg.NVDURL), so the
 	// scheduled feed and on-demand scans share one override.
 	baseURL string
+	// canonicalNVD is true when baseURL is NVD itself (cveSyncAPIURL), not a
+	// mirror. Only then may a write use UpdateMetadata's one-shot equal-
+	// timestamp re-derivation (M67, Codex R6 High): a mirror can serve a
+	// stale or partial body under an unchanged lastModified.
+	canonicalNVD bool
 	// offline short-circuits the scheduled feed when true (M40 Wave B
 	// air-gapped degrade mode): Run() returns nil before any pagination/network.
 	offline bool
@@ -351,6 +356,7 @@ func NewCVESyncJob(db *sql.DB, tenantRepo *repository.TenantRepository, nvdAPIKe
 		interval:         interval,
 		advisoryExcerpts: advisoryExcerpts,
 		baseURL:          baseURL,
+		canonicalNVD:     strings.TrimRight(baseURL, "/") == cveSyncAPIURL,
 		offline:          offline,
 		osv:              client.NewOSVClient().WithOffline(offline),
 		vulnRepo:         repository.NewVulnerabilityRepository(db),
@@ -1712,6 +1718,7 @@ func catalogueCtx(ctx context.Context) context.Context {
 // downgrade.
 func (j *CVESyncJob) writeCatalogueMetadata(ctx context.Context, cve CVEInfo) (repository.MetadataWriteOutcome, error) {
 	m := catalogueMetadata(cve, time.Now())
+	m.CanonicalNVD = j.canonicalNVD
 	if m.SourceModifiedAt == nil {
 		slog.Warn("CVE sync: NVD record carries no believable lastModified; not written",
 			"cve_id", cve.ID)

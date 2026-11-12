@@ -248,6 +248,7 @@ func TestM67_ReconcileConvergesARowTheOldSyncDated(t *testing.T) {
 	fake := &m67NVD{}
 	fake.set(m67Record(t, cveID, modified), modified)
 	j := m58Job(appDB, fake.server(t).URL)
+	j.canonicalNVD = true // stands in for services.nvd.nist.gov
 	m55PinWatermark(t, migDB, time.Now().UTC().Add(-time.Hour))
 
 	out, err := j.reconcileCatalogue(context.Background(), time.Now().UTC())
@@ -294,7 +295,7 @@ func TestM67_EqualTimestampDoesNotRewriteAnUnscoredOrPost069Row(t *testing.T) {
 		t.Helper()
 		out, err := repo.UpdateMetadata(context.Background(), repository.VulnerabilityMetadata{
 			CVEID: id, Description: "x", Severity: "CRITICAL", CVSSScore: &score, CVSSVersion: version,
-			Source: "NVD", SourceModifiedAt: &modified,
+			Source: "NVD", SourceModifiedAt: &modified, CanonicalNVD: true,
 		})
 		if err != nil {
 			t.Fatalf("UpdateMetadata: %v", err)
@@ -311,8 +312,14 @@ func TestM67_EqualTimestampDoesNotRewriteAnUnscoredOrPost069Row(t *testing.T) {
 		return id
 	}
 
-	if out := offer(seed(nil, nil), &ver); out != repository.MetadataRefusedStale {
-		t.Errorf("unscored pre-069 row: %s, want refused_stale (old and new rule agree on an unscored CVE)", out)
+	if out := offer(seed(nil, nil), nil); out != repository.MetadataRefusedStale {
+		t.Errorf("unscored row offered unscored: %s, want refused_stale (nothing to re-derive)", out)
+	}
+	// Codex M67 R6, Low: an unscored / severity-only pre-069 row is re-derived
+	// too when the offer records a version (e.g. a v2 rating-only CVE the old
+	// rule stored UNKNOWN; the new one reads NVD's metric-level rating).
+	if out := offer(seed(nil, nil), &ver); out != repository.MetadataWritten {
+		t.Errorf("unscored pre-069 row offered a versioned assessment: %s, want written", out)
 	}
 	if out := offer(seed(2.0, "3.1"), &ver); out != repository.MetadataRefusedStale {
 		t.Errorf("post-069 row: %s, want refused_stale (strict `<` applies once a version is recorded)", out)
@@ -396,6 +403,7 @@ func TestM67_MixedVersionWindowAndItsRecovery(t *testing.T) {
 	fake := &m67NVD{}
 	fake.set(m67Record(t, cveID, t2), t2)
 	j := m58Job(appDB, fake.server(t).URL)
+	j.canonicalNVD = true
 	m55PinWatermark(t, migDB, time.Now().UTC().Add(-time.Hour))
 	if out, err := j.reconcileCatalogue(context.Background(), time.Now().UTC()); err != nil || !out.Finished {
 		t.Fatalf("reconcileCatalogue = %+v, %v", out, err)
@@ -428,5 +436,57 @@ func TestM67_MixedVersionWindowAndItsRecovery(t *testing.T) {
 	}
 	if got := m67Read(t, migDB, cveID); !got.isV31Primary() {
 		t.Errorf("after the recovery and one re-read: %s, want HIGH/7.5/v3.1", got)
+	}
+}
+
+// TestM67_MirrorCannotUseTheEqualTimestampException (Codex M67 R6, High). The
+// one-shot re-derivation at an EQUAL lastModified trusts that the same
+// timestamp means the same record. That holds for services.nvd.nist.gov; a
+// configured mirror (SBOMHUB_NVD_URL, air-gapped installs) can serve a stale
+// or partial body under an unchanged timestamp, and the exception would let it
+// replace a pre-M67 CRITICAL with LOW once and then defend it. Against a
+// mirror the strict guard applies (the operator reset in the 069 header
+// covers convergence there).
+func TestM67_MirrorCannotUseTheEqualTimestampException(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+	m58Fresh(t, migDB)
+
+	cveID := m55CVEID(t)
+	m67Cleanup(t, migDB, cveID)
+	modified := time.Date(2026, 5, 3, 4, 5, 6, 0, time.UTC)
+	if _, err := migDB.Exec(`
+		INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, source_modified_at, updated_at)
+		VALUES ($1, $2, 'pre-M67', 'CRITICAL', 9.8, 'NVD', $3, NOW())`, uuid.New(), cveID, modified); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	stale := json.RawMessage(strings.Replace(string(m67Record(t, cveID, modified)), `"baseScore":7.5`, `"baseScore":2.0`, 1))
+	fake := &m67NVD{}
+	fake.set(stale, modified)
+	j := m58Job(appDB, fake.server(t).URL) // a mirror: not services.nvd.nist.gov
+	m55PinWatermark(t, migDB, time.Now().UTC().Add(-time.Hour))
+	if out, err := j.reconcileCatalogue(context.Background(), time.Now().UTC()); err != nil || !out.Finished {
+		t.Fatalf("reconcileCatalogue = %+v, %v", out, err)
+	}
+	got := m67Read(t, migDB, cveID)
+	if got.severity != "CRITICAL" || got.version.Valid {
+		t.Errorf("a mirror's equal-timestamp body rewrote a pre-M67 row to %s; want CRITICAL/9.8 unversioned", got)
+	}
+}
+
+// TestM67_CanonicalNVDURLIsRecognised pins which base URLs count as canonical.
+func TestM67_CanonicalNVDURLIsRecognised(t *testing.T) {
+	for url, want := range map[string]bool{
+		"": true,
+		"https://services.nvd.nist.gov/rest/json/cves/2.0":      true,
+		"https://services.nvd.nist.gov/rest/json/cves/2.0/":     true,
+		"http://services.nvd.nist.gov/rest/json/cves/2.0":       false,
+		"https://nvd-mirror.example/rest/json/cves/2.0":         false,
+		"https://services.nvd.nist.gov.evil/rest/json/cves/2.0": false,
+	} {
+		if got := NewCVESyncJob(nil, nil, "", time.Hour, nil, url, false).canonicalNVD; got != want {
+			t.Errorf("canonicalNVD(%q) = %v, want %v", url, got, want)
+		}
 	}
 }
