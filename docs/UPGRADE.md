@@ -2384,3 +2384,14 @@ EXCLUSIVE lock on `component_vulnerabilities`, restores each distro label to
 the method it replaced (its evidence `prior_method`, else NULL), restores the
 previous `match_method` CHECK, and drops `match_evidence`. Roll the binary
 back first.
+
+## 22. Web: distro labels and their evidence (M70)
+
+**Who must act:** nobody. The API is unchanged.
+
+The project vulnerability list now shows the M70 labels (§21):
+
+- `distro_affected` / `distro_unfixed` appear as high-confidence badges. When the evidence names a fix, the badge adds "upgrade to <fixed>".
+- `distro_fixed` appears as "Review required — distribution reports fixed, still open". It is still counted and is never shown as resolved. A reviewer records any VEX statement by hand.
+
+"Show evidence" lists the OSV records (linked to osv.dev), the release, the basis, the package and the versions. It warns when a `later_releases` verdict was inferred for an end-of-life Debian release, and when the data came from a mirror or from an endpoint that was not recorded. Evidence that does not match its label is shown as "no evidence recorded". NVD/JVN match labels are still not shown in the web UI.
