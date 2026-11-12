@@ -1036,6 +1036,7 @@ func (s *NVDService) cacheVulns(ctx context.Context, cacheName, label string, vu
 			Description: v.Description,
 			Severity:    v.Severity,
 			CVSSScore:   v.CVSSScore,
+			CVSSVersion: v.CVSSVersion,
 			PublishedAt: v.PublishedAt,
 		}
 	}

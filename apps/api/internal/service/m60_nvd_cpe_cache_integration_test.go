@@ -56,6 +56,26 @@ func TestM60NVDCache_SecondLookupIsServedFromCache(t *testing.T) {
 		t.Errorf("second lookup: requests=%d fromCache=%v vulns=%d/%d method=%q",
 			second.requests, second.fromCache, len(second.vulns), len(first.vulns), second.method)
 	}
+	// M67: the CVSS version the network answer chose survives the cache, so
+	// a row created from a CPE-path cache hit carries it like any other.
+	versions := map[string]string{}
+	for _, v := range first.vulns {
+		if v.CVSSVersion != nil {
+			versions[v.CVEID] = *v.CVSSVersion
+		}
+	}
+	if len(versions) == 0 {
+		t.Fatal("fixture yields no CVSS version on the network path")
+	}
+	for _, v := range second.vulns {
+		want, ok := versions[v.CVEID]
+		if !ok {
+			continue
+		}
+		if v.CVSSVersion == nil || *v.CVSSVersion != want {
+			t.Errorf("%s from cache: cvss_version=%v, want %q", v.CVEID, v.CVSSVersion, want)
+		}
+	}
 }
 
 // Codex M60 R4 Low: a lookup that SPENT requests (an unknown candidate probed
