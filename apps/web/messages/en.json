@@ -969,6 +969,7 @@
     },
     "IPA": {
       "title": "IPA Integration Settings",
+      "loadFailed": "Failed to load the IPA settings. Check that the API is reachable, then retry.",
       "description": "Automatically fetch security information from IPA (Information-technology Promotion Agency, Japan)",
       "syncSettings": "Sync Settings",
       "syncSettingsDescription": "Configure automatic fetching of IPA security alerts and JVN vulnerability information",

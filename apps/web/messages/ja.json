@@ -969,6 +969,7 @@
     },
     "IPA": {
       "title": "IPA連携設定",
+      "loadFailed": "IPA 連携設定の読み込みに失敗しました。API に接続できるか確認して、再試行してください。",
       "description": "IPA (独立行政法人 情報処理推進機構) からのセキュリティ情報を自動取得",
       "syncSettings": "同期設定",
       "syncSettingsDescription": "IPAセキュリティアラートとJVN脆弱性情報の自動取得を設定します",

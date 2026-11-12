@@ -12,6 +12,8 @@ import { api, IPASyncSettings } from "@/lib/api";
 import { queryKeys } from "@/lib/query/keys";
 import { RefreshCw, Shield, Bell, AlertTriangle, AlertCircle, Info } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { LoadError } from "@/components/ui/load-error";
+import { loadErrorState } from "@/lib/load-state";
 
 const SEVERITY_OPTIONS = [
   { value: "CRITICAL", label: "Critical", icon: AlertTriangle, color: "text-red-600" },
@@ -23,21 +25,24 @@ const SEVERITY_OPTIONS = [
 
 export default function IPASettingsPage() {
   const t = useTranslations("Settings.IPA");
+  const tc = useTranslations("Common");
   const locale = useLocale();
   const queryClient = useQueryClient();
   const settingsQuery = useQuery({
     queryKey: queryKeys.ipa.settings(),
-    queryFn: async (): Promise<IPASyncSettings | null> => {
+    queryFn: async (): Promise<IPASyncSettings> => {
       try {
         return await api.ipa.getSettings();
       } catch (error) {
-        // A failed load renders the page without settings, as before.
+        // M71: a failed load is an error with Retry (M65 bug 10), not a form
+        // of defaults that looked like "no settings" and saved nothing.
         console.error("Failed to load IPA settings:", error);
-        return null;
+        throw error;
       }
     },
   });
   const loading = settingsQuery.isPending;
+  const errorState = loadErrorState(settingsQuery.isError, settingsQuery.data != null);
   // Unsaved edits live in `draft`; until the operator touches a control the
   // form shows the server copy. Saving writes the server's answer back to
   // the cache and drops the draft, which is what `setSettings(updated)` did.
@@ -111,174 +116,197 @@ export default function IPASettingsPage() {
         </p>
       </div>
 
-      <div className="grid gap-6">
-        {/* Sync Settings */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Shield className="h-5 w-5" />
-              {t('syncSettings')}
-            </CardTitle>
-            <CardDescription>
-              {t('syncSettingsDescription')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5">
-                <Label htmlFor="enabled">{t('enableAutoSync')}</Label>
-                <p className="text-sm text-muted-foreground">
-                  {t('autoSyncInterval')}
-                </p>
-              </div>
-              <Switch
-                id="enabled"
-                checked={settings?.enabled ?? true}
-                onCheckedChange={(checked) =>
-                  setSettings(settings ? { ...settings, enabled: checked } : null)
-                }
-              />
-            </div>
+      {errorState === "banner" && (
+        <LoadError
+          compact
+          testId="ipa-settings-load-error"
+          message={t("loadFailed")}
+          retryLabel={tc("retry")}
+          onRetry={() => void settingsQuery.refetch()}
+          retrying={settingsQuery.isFetching}
+        />
+      )}
 
-            {settings?.last_sync_at && (
-              <div className="text-sm text-muted-foreground">
-                {t('lastSync')}: {new Date(settings.last_sync_at).toLocaleString(locale === 'ja' ? "ja-JP" : "en-US")}
-              </div>
-            )}
-
-            <div className="flex items-center gap-4">
-              <Button onClick={handleSync} disabled={syncing} variant="outline">
-                <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? "animate-spin" : ""}`} />
-                {syncing ? t('syncing') : t('syncNow')}
-              </Button>
-
-              {syncResult && (
-                <div className="text-sm">
-                  <Badge variant="secondary">{t('new')}: {syncResult.new}</Badge>
-                  <Badge variant="outline" className="ml-2">{t('updated')}: {syncResult.updated}</Badge>
+      {errorState === "full" ? (
+        <LoadError
+          testId="ipa-settings-load-error"
+          message={t("loadFailed")}
+          retryLabel={tc("retry")}
+          onRetry={() => void settingsQuery.refetch()}
+          retrying={settingsQuery.isFetching}
+        />
+      ) : (
+        <>
+          <div className="grid gap-6">
+            {/* Sync Settings */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Shield className="h-5 w-5" />
+                  {t('syncSettings')}
+                </CardTitle>
+                <CardDescription>
+                  {t('syncSettingsDescription')}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="enabled">{t('enableAutoSync')}</Label>
+                    <p className="text-sm text-muted-foreground">
+                      {t('autoSyncInterval')}
+                    </p>
+                  </div>
+                  <Switch
+                    id="enabled"
+                    checked={settings?.enabled ?? true}
+                    onCheckedChange={(checked) =>
+                      setSettings(settings ? { ...settings, enabled: checked } : null)
+                    }
+                  />
                 </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
 
-        {/* Notification Settings */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Bell className="h-5 w-5" />
-              {t('notificationSettings')}
-            </CardTitle>
-            <CardDescription>
-              {t('notificationSettingsDescription')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5">
-                <Label htmlFor="notify">{t('notifyOnNew')}</Label>
-                <p className="text-sm text-muted-foreground">
-                  {t('notifyOnNewDescription')}
-                </p>
-              </div>
-              <Switch
-                id="notify"
-                checked={settings?.notify_on_new ?? true}
-                onCheckedChange={(checked) =>
-                  setSettings(settings ? { ...settings, notify_on_new: checked } : null)
-                }
-              />
-            </div>
+                {settings?.last_sync_at && (
+                  <div className="text-sm text-muted-foreground">
+                    {t('lastSync')}: {new Date(settings.last_sync_at).toLocaleString(locale === 'ja' ? "ja-JP" : "en-US")}
+                  </div>
+                )}
 
-            <div className="space-y-3">
-              <Label>{t('notifySeverityLevel')}</Label>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-                {SEVERITY_OPTIONS.map((option) => {
-                  const Icon = option.icon;
-                  const isChecked = settings?.notify_severity?.includes(option.value) ?? false;
+                <div className="flex items-center gap-4">
+                  <Button onClick={handleSync} disabled={syncing} variant="outline">
+                    <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? "animate-spin" : ""}`} />
+                    {syncing ? t('syncing') : t('syncNow')}
+                  </Button>
 
-                  return (
-                    <div
-                      key={option.value}
-                      className="flex items-center space-x-2"
-                    >
-                      <Checkbox
-                        id={`severity-${option.value}`}
-                        checked={isChecked}
-                        onCheckedChange={() => toggleSeverity(option.value)}
-                        disabled={!settings?.notify_on_new}
-                      />
-                      <label
-                        htmlFor={`severity-${option.value}`}
-                        className={`text-sm font-medium cursor-pointer flex items-center gap-1 ${option.color}`}
-                      >
-                        <Icon className="h-4 w-4" />
-                        {option.label}
-                      </label>
+                  {syncResult && (
+                    <div className="text-sm">
+                      <Badge variant="secondary">{t('new')}: {syncResult.new}</Badge>
+                      <Badge variant="outline" className="ml-2">{t('updated')}: {syncResult.updated}</Badge>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Information Sources */}
-        <Card>
-          <CardHeader>
-            <CardTitle>{t('informationSources')}</CardTitle>
-            <CardDescription>
-              {t('informationSourcesDescription')}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <div className="flex items-start gap-4 p-4 rounded-lg border">
-                <Shield className="h-8 w-8 text-blue-600 shrink-0" />
-                <div>
-                  <h4 className="font-medium">{t('ipaSecurityAlert')}</h4>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    {t('ipaSecurityAlertDescription')}
-                  </p>
-                  <a
-                    href="https://www.ipa.go.jp/security/alert/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-primary hover:underline mt-2 inline-block"
-                  >
-                    {t('viewDetails')} →
-                  </a>
+                  )}
                 </div>
-              </div>
+              </CardContent>
+            </Card>
 
-              <div className="flex items-start gap-4 p-4 rounded-lg border">
-                <Shield className="h-8 w-8 text-green-600 shrink-0" />
-                <div>
-                  <h4 className="font-medium">{t('jvnVulnerabilityInfo')}</h4>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    {t('jvnVulnerabilityInfoDescription')}
-                  </p>
-                  <a
-                    href="https://jvndb.jvn.jp/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-primary hover:underline mt-2 inline-block"
-                  >
-                    {t('viewDetails')} →
-                  </a>
+            {/* Notification Settings */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Bell className="h-5 w-5" />
+                  {t('notificationSettings')}
+                </CardTitle>
+                <CardDescription>
+                  {t('notificationSettingsDescription')}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="notify">{t('notifyOnNew')}</Label>
+                    <p className="text-sm text-muted-foreground">
+                      {t('notifyOnNewDescription')}
+                    </p>
+                  </div>
+                  <Switch
+                    id="notify"
+                    checked={settings?.notify_on_new ?? true}
+                    onCheckedChange={(checked) =>
+                      setSettings(settings ? { ...settings, notify_on_new: checked } : null)
+                    }
+                  />
                 </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
 
-      {/* Save Button */}
-      <div className="flex justify-end">
-        <Button onClick={handleSave} disabled={saving}>
-          {saving ? t('saving') : t('saveSettings')}
-        </Button>
-      </div>
+                <div className="space-y-3">
+                  <Label>{t('notifySeverityLevel')}</Label>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                    {SEVERITY_OPTIONS.map((option) => {
+                      const Icon = option.icon;
+                      const isChecked = settings?.notify_severity?.includes(option.value) ?? false;
+
+                      return (
+                        <div
+                          key={option.value}
+                          className="flex items-center space-x-2"
+                        >
+                          <Checkbox
+                            id={`severity-${option.value}`}
+                            checked={isChecked}
+                            onCheckedChange={() => toggleSeverity(option.value)}
+                            disabled={!settings?.notify_on_new}
+                          />
+                          <label
+                            htmlFor={`severity-${option.value}`}
+                            className={`text-sm font-medium cursor-pointer flex items-center gap-1 ${option.color}`}
+                          >
+                            <Icon className="h-4 w-4" />
+                            {option.label}
+                          </label>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Information Sources */}
+            <Card>
+              <CardHeader>
+                <CardTitle>{t('informationSources')}</CardTitle>
+                <CardDescription>
+                  {t('informationSourcesDescription')}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-4">
+                  <div className="flex items-start gap-4 p-4 rounded-lg border">
+                    <Shield className="h-8 w-8 text-blue-600 shrink-0" />
+                    <div>
+                      <h4 className="font-medium">{t('ipaSecurityAlert')}</h4>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        {t('ipaSecurityAlertDescription')}
+                      </p>
+                      <a
+                        href="https://www.ipa.go.jp/security/alert/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm text-primary hover:underline mt-2 inline-block"
+                      >
+                        {t('viewDetails')} →
+                      </a>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-4 p-4 rounded-lg border">
+                    <Shield className="h-8 w-8 text-green-600 shrink-0" />
+                    <div>
+                      <h4 className="font-medium">{t('jvnVulnerabilityInfo')}</h4>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        {t('jvnVulnerabilityInfoDescription')}
+                      </p>
+                      <a
+                        href="https://jvndb.jvn.jp/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm text-primary hover:underline mt-2 inline-block"
+                      >
+                        {t('viewDetails')} →
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Save Button */}
+          <div className="flex justify-end">
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? t('saving') : t('saveSettings')}
+            </Button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

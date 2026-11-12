@@ -172,3 +172,41 @@ test.describe('IPA in Japanese', () => {
         await expect(page.getByRole('button', { name: ja.Settings.IPA.saveSettings })).toBeVisible();
     });
 });
+
+test.describe('IPA settings load failure (M71)', () => {
+    // A failed load used to render the form with defaults, i.e. look
+    // like "no settings". Same contract as the M66 list screens.
+    test('should show a load error with Retry when the settings fail to load', async ({ page }) => {
+        let fail = true;
+        await page.route(`${API_BASE_URL}/api/v1/settings/ipa`, (route) =>
+            fail && route.request().method() === 'GET' ? route.fulfill({ status: 500, body: '{"error":"boom"}' }) : route.continue(),
+        );
+        await page.goto('/en/settings/ipa');
+        await expect(page.getByRole('heading', { level: 1, name: IPA.title })).toBeVisible({ timeout: 15000 });
+        const error = page.getByTestId('ipa-settings-load-error');
+        await expect(error).toBeVisible();
+        await expect(error).toHaveAttribute('role', 'alert');
+        await expect(error).toContainText(IPA.loadFailed);
+        // No form of defaults, no Save button that would save nothing.
+        await expect(page.getByRole('switch')).toHaveCount(0);
+        await expect(page.getByRole('button', { name: IPA.saveSettings })).toHaveCount(0);
+
+        fail = false;
+        const retried = page.waitForResponse((r) => r.url() === `${API_BASE_URL}/api/v1/settings/ipa` && r.request().method() === 'GET');
+        await error.getByRole('button', { name: en.Common.retry }).click();
+        expect((await retried).status()).toBe(200);
+        await expect(error).toHaveCount(0);
+        await expect(page.getByRole('switch').first()).toBeVisible();
+        await expect(page.getByRole('button', { name: IPA.saveSettings })).toBeVisible();
+    });
+
+    test('should show the load error in Japanese too', async ({ page }) => {
+        await page.route(`${API_BASE_URL}/api/v1/settings/ipa`, (route) =>
+            route.request().method() === 'GET' ? route.abort() : route.continue(),
+        );
+        await page.goto('/ja/settings/ipa');
+        const error = page.getByTestId('ipa-settings-load-error');
+        await expect(error).toContainText(ja.Settings.IPA.loadFailed, { timeout: 15000 });
+        await expect(error.getByRole('button', { name: ja.Common.retry })).toBeVisible();
+    });
+});
