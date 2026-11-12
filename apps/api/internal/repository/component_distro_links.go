@@ -284,19 +284,24 @@ func (r *ComponentRepository) SettleDistroNoVerdictOutcome(ctx context.Context, 
 	// the check is recorded in its watermark (Codex M70 R29 High-1).
 	keep := `(cv.match_method IN (` + distroLabels + `) AND NOT ` + clear + `)`
 	newEvidence := `CASE WHEN ` + keep + ` THEN ` + withWM(`cv.match_evidence`, "$3") + ` ELSE ` + withWM(`$3::jsonb`, "$3") + ` END`
-	err = r.q(ctx).QueryRowContext(ctx, `
+	// The statement is assembled in three parts: nullscan traces string
+	// concatenation only to a fixed depth, and one 19-operand chain exceeds
+	// it (the gate then cannot analyse the RETURNING scan at all).
+	setPart := `
 		UPDATE component_vulnerabilities cv
 		   SET match_method = CASE
-		           WHEN `+clear+` THEN
-		               CASE WHEN cv.match_evidence->>'prior_method' IN (`+priorMethodVocabulary+`)
+		           WHEN ` + clear + ` THEN
+		               CASE WHEN cv.match_evidence->>'prior_method' IN (` + priorMethodVocabulary + `)
 		                    THEN cv.match_evidence->>'prior_method' END
 		           ELSE cv.match_method END,
-		       match_evidence = `+newEvidence+`
+		       match_evidence = ` + newEvidence
+	wherePart := `
 		 WHERE cv.component_id = $1
 		   AND cv.vulnerability_id = $2
 		   AND EXISTS (SELECT 1 FROM components c WHERE c.id = cv.component_id)
-		   AND `+distroFreshness("$3")+`
-		   AND (`+clear+` OR cv.match_evidence IS DISTINCT FROM `+newEvidence+`)
+		   AND ` + distroFreshness("$3") + `
+		   AND (` + clear + ` OR cv.match_evidence IS DISTINCT FROM ` + newEvidence + `)`
+	err = r.q(ctx).QueryRowContext(ctx, setPart+wherePart+`
 		RETURNING COALESCE(cv.match_method IN (`+distroLabels+`), false)`,
 		componentID, vulnID, string(watermark)).Scan(&stillDistro)
 	if errors.Is(err, sql.ErrNoRows) {
