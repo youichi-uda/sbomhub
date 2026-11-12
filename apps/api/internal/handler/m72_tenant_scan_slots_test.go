@@ -262,3 +262,29 @@ func TestM72R2_SlotHandOverAndCancelledWaiter(t *testing.T) {
 		t.Fatalf("slot leaked: in use %d", s.InUse(tenant))
 	}
 }
+
+// Codex M72 R3 Low-3: a scan whose context already ended gets its
+// interruption, not a slot and not queue_full.
+func TestM72R3_EndedContextIsReportedAsSuch(t *testing.T) {
+	s := service.NewTenantScanSlots(1)
+	tenant := uuid.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := s.Acquire(ctx, tenant); !errors.Is(err, service.ErrScanCancelled) {
+		t.Fatalf("free slot, ended context: %v, want cancelled", err)
+	}
+	if s.InUse(tenant) != 0 {
+		t.Fatal("an ended scan took a slot")
+	}
+	rel, _, _ := s.Acquire(context.Background(), tenant)
+	defer rel()
+	live, stop := context.WithCancel(context.Background())
+	defer stop()
+	for i := 0; i < service.TenantScanQueueLimit(1); i++ {
+		go func() { _, _, _ = s.Acquire(live, tenant) }()
+	}
+	waitUntil(t, func() bool { return s.Waiting(tenant) == service.TenantScanQueueLimit(1) })
+	if _, _, err := s.Acquire(ctx, tenant); !errors.Is(err, service.ErrScanCancelled) {
+		t.Fatalf("full queue, ended context: %v, want cancelled", err)
+	}
+}

@@ -92,6 +92,11 @@ func (s *TenantScanSlots) Acquire(ctx context.Context, tenantID uuid.UUID) (func
 		return func() {}, 0, nil
 	}
 	start := time.Now()
+	// An ended scan takes no slot, and reports why it ended rather than a
+	// full queue (Codex M72 R3 Low-3).
+	if err := scanInterruption(ctx); err != nil {
+		return nil, 0, fmt.Errorf("waiting for a scan slot of the tenant: %w", err)
+	}
 	s.mu.Lock()
 	ts := s.slots[tenantID]
 	if ts == nil {
