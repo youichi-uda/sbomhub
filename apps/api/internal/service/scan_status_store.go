@@ -156,30 +156,43 @@ local function add_failure(msg, rs)
   table.insert(o, {m = msg, r = rs})
   save_outcomes(o)
 end
-local function mark_lost(g, now)
-  redis.call('HSET', K, 'l:' .. g, now)
+-- cap_lost keeps the MAX_LOST newest tombstones. One pass, one sort.
+local function cap_lost(now)
   local _, lost = fields()
-  local n = count(lost)
-  if n > MAX_LOST then
-    local arr = {}
-    for gg, t in pairs(lost) do table.insert(arr, {gg, t}) end
-    table.sort(arr, function(x, y) return x[2] < y[2] end)
-    for i = 1, n - MAX_LOST do redis.call('HDEL', K, 'l:' .. arr[i][1]) end
-    redis.call('HSET', K, 'lost_dropped', now)
+  local arr = {}
+  for g, t in pairs(lost) do table.insert(arr, {g, t}) end
+  if #arr <= MAX_LOST then return end
+  table.sort(arr, function(x, y) return x[2] < y[2] end)
+  local drop = {}
+  for i = 1, #arr - MAX_LOST do table.insert(drop, 'l:' .. arr[i][1]) end
+  for i = 1, #drop, 1000 do
+    redis.call('HDEL', K, unpack(drop, i, math.min(i + 999, #drop)))
   end
+  redis.call('HSET', K, 'lost_dropped', now)
 end
+-- sweep moves every expired run to a tombstone in ONE pass over the hash
+-- (Codex M72 R15 Medium-3: one hash read per run was quadratic).
 local function sweep(now, except)
   local runs = fields()
   local n = 0
+  local del, set = {}, {}
   for g, exp in pairs(runs) do
     if exp < now then
-      redis.call('HDEL', K, 'r:' .. g)
+      table.insert(del, 'r:' .. g)
       if g ~= except then
-        mark_lost(g, now)
+        table.insert(set, 'l:' .. g)
+        table.insert(set, now)
         n = n + 1
       end
     end
   end
+  for i = 1, #del, 1000 do
+    redis.call('HDEL', K, unpack(del, i, math.min(i + 999, #del)))
+  end
+  for i = 1, #set, 2000 do
+    redis.call('HSET', K, unpack(set, i, math.min(i + 1999, #set)))
+  end
+  if n > 0 then cap_lost(now) end
   return n
 end
 -- Tombstones older than any scan can run (deadline + 5m) cannot belong to a

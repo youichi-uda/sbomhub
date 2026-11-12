@@ -477,3 +477,39 @@ func TestM72R14_SharedVersionIsUniquePerWrite(t *testing.T) {
 		}
 	}
 }
+
+// Codex M72 R15 Medium-3: sweeping many expired runs is one pass, not one
+// full hash read per run.
+func TestM72R15_SweepingManyRunsIsCheap(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	store := a.shared.(*redisScanStatusStore)
+	ctx := context.Background()
+	id := uuid.New()
+	// 2000 runs with a 1ms lease, written directly (one pipeline).
+	key := scanStatusKeys(id)[0]
+	now := time.Now().UnixMilli()
+	pipe := rdb.Pipeline()
+	pipe.HSet(ctx, key, "state", "running", "error", "", "reasons", "[]", "updated", now, "outcomes", "[]")
+	for i := 1; i <= 2000; i++ {
+		pipe.HSet(ctx, key, "r:"+genString(uint64(i)), now-1000)
+	}
+	pipe.PExpire(ctx, key, time.Hour)
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	v, err := store.get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 300*time.Millisecond {
+		t.Fatalf("sweeping 2000 expired runs took %s", d)
+	}
+	if v.state != ScanStateFailed {
+		t.Fatalf("after sweeping: %s, want failed (interrupted)", v.state)
+	}
+	if lost := countLost(t, rdb, id); lost > scanStatusMaxLost {
+		t.Fatalf("%d tombstones kept, cap %d", lost, scanStatusMaxLost)
+	}
+}
