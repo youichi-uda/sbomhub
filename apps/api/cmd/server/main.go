@@ -538,6 +538,13 @@ func main() {
 		os.Exit(1)
 	}
 	service.SetTenantScanConcurrency(scanTenantConcurrency)
+	// M72: Redis circuit-breaker settings. Refused here, before migrations
+	// run, like the other startup-only settings above.
+	breakerThreshold, breakerCooldown, err := cfg.RedisBreaker()
+	if err != nil {
+		slog.Error("Refusing to start", "error", err)
+		os.Exit(1)
+	}
 
 	// SECURITY (P0 #2 / Trust Rescue 9.1.1): Migrations and runtime use
 	// distinct DB roles. We open a short-lived migrator connection here, run
@@ -578,12 +585,8 @@ func main() {
 	}
 
 	// M72: every Redis caller goes through the circuit breakers (one per
-	// caller class, internal/redis.BreakerClass).
-	breakerThreshold, breakerCooldown, err := cfg.RedisBreaker()
-	if err != nil {
-		slog.Error("Refusing to start", "error", err)
-		os.Exit(1)
-	}
+	// caller class, internal/redis.BreakerClass); the settings were checked
+	// before migrations, above.
 	rdb, _, err := redis.NewClientWithBreaker(cfg.RedisURL, redis.BreakerConfig{FailureThreshold: breakerThreshold, Cooldown: breakerCooldown})
 	if err != nil {
 		slog.Error("Failed to connect to redis", "error", err)
