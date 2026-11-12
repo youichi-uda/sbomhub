@@ -852,6 +852,19 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	// called GetVulnerabilities(projectID), which silently switched to the
 	// most recent SBOM — so polling status(sbom1) right after uploading
 	// sbom2 returned sbom2's counts and the CLI's threshold check raced.
+	// M72 (Codex M72 R12 High-1): the scan state is read BEFORE the counts.
+	// A scan publishes its terminal state only after its findings committed,
+	// so counts read after a terminal state include them. Read the other way
+	// round, a scan finishing during the count query answered "completed"
+	// with the pre-commit counts. (The state is only returned below, after
+	// the SBOM was found in the caller's project.)
+	state := service.ScanStateUnknown
+	var errMsg string
+	var reasons []string
+	if h.scanTracker != nil {
+		state, errMsg, reasons = h.scanTracker.GetDetail(sbomID)
+	}
+
 	vulns, err := h.sbomService.GetVulnerabilitiesBySbom(c.Request().Context(), projectID, sbomID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -864,13 +877,6 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to get scan status"})
 	}
 	summary := summariseVulnerabilities(vulns)
-
-	state := service.ScanStateUnknown
-	var errMsg string
-	var reasons []string
-	if h.scanTracker != nil {
-		state, errMsg, reasons = h.scanTracker.GetDetail(sbomID)
-	}
 
 	resp := ScanStatusResponse{
 		Status:          string(state),
