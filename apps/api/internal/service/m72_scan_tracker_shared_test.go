@@ -92,6 +92,21 @@ func (m *memStore) heartbeatMany(ctx context.Context, runs []runKey) ([]bool, er
 	return out, nil
 }
 
+func (m *memStore) rejoin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	if m.down {
+		return errStoreDown
+	}
+	if m.runs[id] == nil {
+		m.runs[id] = map[uint64]bool{}
+	}
+	m.runs[id][gen] = true
+	m.state[id] = ScanStateRunning
+	return nil
+}
+
 func (m *memStore) mark(_ context.Context, id uuid.UUID, st ScanState, msg string, reasons []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -181,8 +196,10 @@ func TestM72Tracker_StoreDownFallsBackAndRetries(t *testing.T) {
 	if !a.Finish(id, gen, nil, "") {
 		t.Fatal("Finish must record locally while the store is down")
 	}
-	if st, _, _ := a.GetDetail(id); st != ScanStateCompleted {
-		t.Fatalf("local answer after finish while down: %s", st)
+	// A local "completed" is not trusted while Redis is unreadable (another
+	// replica may be scanning; Codex M72 R4 High-2): unknown.
+	if st, _, _ := a.GetDetail(id); st != ScanStateUnknown {
+		t.Fatalf("local answer after finish while down: %s, want unknown", st)
 	}
 	store.setDown(false)
 	other := trackerOn(store, time.Hour)
@@ -537,5 +554,63 @@ func TestM72R3_BeginIsQueuedWithItsLocalStateChange(t *testing.T) {
 	settle(t, a, id)
 	if st, _, _ := trackerOn(store, time.Hour).GetDetail(id); st != ScanStateFailed {
 		t.Fatalf("group outcome %s, want failed (A failed while B was running)", st)
+	}
+}
+
+// hookGetStore runs onGet inside get, after the shared state was read and
+// before it is returned — a transition racing the read.
+type hookGetStore struct {
+	*memStore
+	onGet func()
+}
+
+func (h *hookGetStore) get(ctx context.Context, id uuid.UUID) (ScanState, string, []string, bool, error) {
+	st, msg, r, found, err := h.memStore.get(ctx, id)
+	if f := h.onGet; f != nil {
+		h.onGet = nil
+		f()
+	}
+	return st, msg, r, found, err
+}
+
+// Codex M72 R4 High-1: a Begin that completes (write included) while
+// GetDetail reads Redis must not let the read return the older terminal state.
+func TestM72R4_ReadRacingABeginIsNotStale(t *testing.T) {
+	store := &hookGetStore{memStore: newMemStore()}
+	a := trackerOn(store, time.Hour)
+	id := uuid.New()
+	a.Finish(id, a.Begin(id), nil, "")
+	settle(t, a, id)
+	store.onGet = func() {
+		a.Begin(id)
+		settle(t, a, id)
+	}
+	if st, _, _ := a.GetDetail(id); st != ScanStateRunning {
+		t.Fatalf("read racing a Begin: %s, want running", st)
+	}
+}
+
+// Codex M72 R4 High-2: with the shared store configured but unreadable, a
+// local "completed" may be stale (another replica may be scanning): it reads
+// unknown. Local running and failed are safe and stay.
+func TestM72R4_UnreadableStoreNeverYieldsALocalCompleted(t *testing.T) {
+	store := newMemStore()
+	a := trackerOn(store, time.Hour)
+	done, failed, running := uuid.New(), uuid.New(), uuid.New()
+	a.Finish(done, a.Begin(done), nil, "")
+	a.Finish(failed, a.Begin(failed), []string{ScanReasonFetchFailed}, "nvd: scan failed (fetch_failed)")
+	a.Begin(running)
+	settle(t, a, done)
+	settle(t, a, failed)
+	settle(t, a, running)
+	store.setDown(true)
+	if st, _, _ := a.GetDetail(done); st != ScanStateUnknown {
+		t.Errorf("completed, store unreadable: %s, want unknown", st)
+	}
+	if st, _, _ := a.GetDetail(failed); st != ScanStateFailed {
+		t.Errorf("failed, store unreadable: %s, want failed", st)
+	}
+	if st, _, _ := a.GetDetail(running); st != ScanStateRunning {
+		t.Errorf("running, store unreadable: %s, want running", st)
 	}
 }

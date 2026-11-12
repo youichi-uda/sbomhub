@@ -52,6 +52,7 @@ type ScanTracker struct {
 	mu        sync.RWMutex
 	entries   map[uuid.UUID]scanEntry
 	retention time.Duration
+	revSeq    uint64
 
 	// shared (M72) is the Redis store; nil keeps the tracker in-memory only.
 	shared scanStatusStore
@@ -85,6 +86,24 @@ type scanEntry struct {
 	// last one finishes.
 	groupMsgs    []string
 	groupReasons []string
+	// rev is the tracker-wide sequence number of the entry's last
+	// transition (M72): GetDetail detects a transition that raced its Redis
+	// read (Codex M72 R4 High-1).
+	rev uint64
+}
+
+// put stores e as sbomID's entry with a new revision. t.mu is held.
+func (t *ScanTracker) put(sbomID uuid.UUID, e scanEntry) {
+	t.revSeq++
+	e.rev = t.revSeq
+	t.entries[sbomID] = e
+}
+
+// revision returns sbomID's entry revision (0 without an entry).
+func (t *ScanTracker) revision(sbomID uuid.UUID) uint64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.entries[sbomID].rev
 }
 
 // NewScanTracker creates an in-memory tracker. Entries older than 1 hour
@@ -150,7 +169,7 @@ func (t *ScanTracker) MarkRunning(sbomID uuid.UUID) {
 	if e, ok := t.entries[sbomID]; ok && len(e.active) > 0 {
 		return
 	}
-	t.entries[sbomID] = scanEntry{state: ScanStateRunning, updatedAt: time.Now()}
+	t.put(sbomID, scanEntry{state: ScanStateRunning, updatedAt: time.Now()})
 }
 
 // Begin starts a new run of the sbom's scan, marks it running, and returns the
@@ -173,7 +192,7 @@ func (t *ScanTracker) Begin(sbomID uuid.UUID) uint64 {
 	e.errMsg, e.reasons = "", nil
 	e.updatedAt = time.Now()
 	e.active[gen] = true
-	t.entries[sbomID] = e
+	t.put(sbomID, e)
 	// Queued under t.mu, with the local change: the shared writes of one SBOM
 	// follow the order of its local transitions (Codex M72 R3 High-1).
 	ev := t.queueBeginLocked(sbomID, gen)
@@ -227,7 +246,7 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 	e.updatedAt = time.Now()
 	if len(e.active) > 0 {
 		e.state = ScanStateRunning
-		t.entries[sbomID] = e
+		t.put(sbomID, e)
 		return true
 	}
 	if len(e.groupMsgs) > 0 {
@@ -239,7 +258,7 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 		e.errMsg, e.reasons = "", nil
 	}
 	e.groupMsgs, e.groupReasons = nil, nil
-	t.entries[sbomID] = e
+	t.put(sbomID, e)
 	return true
 }
 
@@ -249,7 +268,7 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 func (t *ScanTracker) MarkCompleted(sbomID uuid.UUID) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.entries[sbomID] = scanEntry{state: ScanStateCompleted, updatedAt: time.Now()}
+	t.put(sbomID, scanEntry{state: ScanStateCompleted, updatedAt: time.Now()})
 	t.queueMarkLocked(sbomID, ScanStateCompleted, "", nil)
 }
 
@@ -266,8 +285,8 @@ func (t *ScanTracker) MarkFailed(sbomID uuid.UUID, errMsg string) {
 func (t *ScanTracker) MarkFailedWithReasons(sbomID uuid.UUID, errMsg string, reasons []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.entries[sbomID] = scanEntry{state: ScanStateFailed, updatedAt: time.Now(), errMsg: errMsg,
-		reasons: append([]string(nil), reasons...)}
+	t.put(sbomID, scanEntry{state: ScanStateFailed, updatedAt: time.Now(), errMsg: errMsg,
+		reasons: append([]string(nil), reasons...)})
 	t.queueMarkLocked(sbomID, ScanStateFailed, errMsg, reasons)
 }
 
@@ -280,25 +299,49 @@ func (t *ScanTracker) MarkFailedWithReasons(sbomID uuid.UUID, errMsg string, rea
 //     written cannot hide another process's run (Codex M72 R1 High-2);
 //   - a shared terminal state yields to this process's own unwritten one
 //     (it is newer);
-//   - Redis unreadable or without an entry: this process's memory, as before
-//     M72.
+//   - Redis has no entry: this process's memory;
+//   - Redis unreadable: this process's memory, except that a "completed"
+//     reads unknown — another replica may be scanning the SBOM, and only
+//     Redis would say so (Codex M72 R4 High-2). running and failed are safe.
+//
+// A local transition that races the Redis read makes the read be retried
+// (Codex M72 R4 High-1).
 func (t *ScanTracker) GetDetail(sbomID uuid.UUID) (ScanState, string, []string) {
-	if t.shared == nil || t.localActive(sbomID) {
+	if t.shared == nil {
 		return t.getDetailLocal(sbomID)
 	}
-	state, msg, reasons, found, err := t.shared.get(context.Background(), sbomID)
-	if err != nil {
-		slog.Debug("scan status: shared store unavailable, answering from this process", "sbom_id", sbomID, "error", err)
-		return t.getDetailLocal(sbomID)
+	for attempt := 0; attempt < 3; attempt++ {
+		if t.localActive(sbomID) {
+			return t.getDetailLocal(sbomID)
+		}
+		rev := t.revision(sbomID)
+		state, msg, reasons, found, err := t.shared.get(context.Background(), sbomID)
+		if t.revision(sbomID) != rev {
+			continue
+		}
+		switch {
+		case err != nil:
+			slog.Debug("scan status: shared store unavailable, answering from this process", "sbom_id", sbomID, "error", err)
+			return t.localWithoutShared(sbomID)
+		case !found:
+			return t.getDetailLocal(sbomID)
+		case state == ScanStateRunning:
+			return state, "", nil
+		case t.pendingShared(sbomID):
+			return t.getDetailLocal(sbomID)
+		}
+		return state, msg, reasons
 	}
-	if !found {
-		return t.getDetailLocal(sbomID)
-	}
-	if state == ScanStateRunning {
-		return state, "", nil
-	}
-	if t.pendingShared(sbomID) {
-		return t.getDetailLocal(sbomID)
+	// Transitions kept racing the read: the safe local answer.
+	return t.localWithoutShared(sbomID)
+}
+
+// localWithoutShared is this process's answer when Redis could not be
+// consulted: a local "completed" is not trusted (see GetDetail).
+func (t *ScanTracker) localWithoutShared(sbomID uuid.UUID) (ScanState, string, []string) {
+	state, msg, reasons := t.getDetailLocal(sbomID)
+	if state == ScanStateCompleted {
+		return ScanStateUnknown, "", nil
 	}
 	return state, msg, reasons
 }
