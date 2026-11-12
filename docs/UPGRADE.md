@@ -2133,7 +2133,7 @@ The web app now sends:
 
 It no longer sends X-Powered-By. Pages can no longer be embedded in iframes.
 
-The policy is computed at build time:
+The policy's origins are computed at build time (since §23 the header itself is built per request, with a nonce):
 
 - `connect-src` allows the origin of `NEXT_PUBLIC_API_URL`, and of
   `NEXT_PUBLIC_WAITLIST_FORM_URL` when that is set.
@@ -2395,3 +2395,83 @@ The project vulnerability list now shows the M70 labels (§21):
 - `distro_fixed` appears as "Review required — distribution reports fixed, still open". It is still counted and is never shown as resolved. A reviewer records any VEX statement by hand.
 
 "Show evidence" lists the OSV records (linked to osv.dev), the release, the basis, the package and the versions. It warns when a `later_releases` verdict was inferred for an end-of-life Debian release, and when the data came from a mirror or from an endpoint that was not recorded. Evidence that does not match its label is shown as "no evidence recorded". NVD/JVN match labels are still not shown in the web UI.
+
+## 23. Web: per-request CSP nonce, accessible distro badges, IPA settings errors (M71)
+
+**Who must act:** only deployments that inject their own scripts into the web pages.
+
+- Content-Security-Policy `script-src` is now `'self' 'nonce-…' 'strict-dynamic'`; `'unsafe-inline'` is gone. The proxy (`src/proxy.ts`) sets the CSP on every page request, so no page is prerendered. `/api`, `/_next` and `/_vercel` bypass the proxy and get a fallback CSP that allows no scripts; files under `/_next/static/` get it only when loaded as a document or frame, and ordinary script / style / image loads of them carry no CSP. `style-src` keeps `'unsafe-inline'`: React `style` attributes and Clerk's runtime styles cannot carry a nonce.
+- `SBOMHUB_CSP_REPORT_ONLY=true` still applies at build time.
+- A script you inject must now carry the nonce. The proxy passes it to the app in the `x-nonce` request header.
+- The vulnerability list's distro badges (§22) can be reached by keyboard and touch. Evidence timestamps follow the viewer's locale and time zone.
+- The IPA settings page shows a failed load as an error with Retry, not as a form of default values.
+
+## 24. API: text checks on URLs and forms, LLM finish reasons, `cvss_version` (M71)
+
+**Who must act:** clients that send U+0000 or invalid UTF-8 in a query string,
+path or form; clients that want the CVSS version of a score.
+
+### 24.1 Query strings, path parameters and form values
+
+Every request now gets 400 `{"error": "<what> must not contain a NUL character"}`
+(or `... is not valid UTF-8`) when a path parameter, a query parameter name or
+value, or an urlencoded / multipart form value contains U+0000 or is not valid
+UTF-8 (`%00`, `%FF`, a UTF-16 surrogate such as `%ED%A0%80`). The message names
+the parameter, never the value. Before, these reached PostgreSQL and answered
+500. Any audited GET did too, even for a parameter the route ignores
+(`?x=%00`), because the audit log records the query string.
+
+- The check runs before authentication, inside CORS, and reads only the URL.
+  Form values are checked when the handler reads the form. SBOM file parts are
+  binary and are never inspected.
+- A form body that does not parse is now 400 on every route that reads the
+  form (through request binding or the form check, including the legacy CLI
+  upload). Routes that ignore the body still ignore it.
+- The share-link password (`?password=` on `GET /api/v1/public/:token` and
+  `.../download`) is exempt: it is only compared with its bcrypt hash, and a
+  link created before M66 may have one containing U+0000.
+- Above net/url's 10,000-parameter limit nothing is decoded for the handler,
+  and nothing is refused.
+
+### 24.2 LLM finish reasons
+
+`llm_calls.finish_reason` stores the provider's value, with surrounding
+whitespace trimmed, when it is 1-30 ASCII letters, digits, `_ . : -` (every
+value OpenAI, Anthropic, Gemini and Ollama document today). An empty value is
+stored as NULL, as before. Anything else is stored as `unrecognized`. Before,
+a longer value, or one with U+0000 or invalid UTF-8, failed the insert, and
+with it the triage / CRA run. No migration.
+
+### 24.3 `cvss_version` in responses
+
+`cvss_version` (`"3.1"`, `"3.0"`, `"4.0"`, `"2.0"`; recorded since migration
+069, §20) is now returned beside `cvss_score` by:
+`GET /projects/:id/vulnerabilities` (and `/mcp/...`), `GET /search/cve`,
+`GET /search/component`, `GET /projects/:id/kev`,
+`GET /vulnerabilities/:cve_id/impact` and `GET /vulnerabilities/:cve_id/paths`.
+
+It is omitted when unknown: no usable assessment, an unrecognised feed version,
+or a row not re-derived since 069 (§20.2 says when that happens). It can be
+present without `cvss_score`. Dashboard top-risks and SSVC responses do not
+carry it yet.
+
+## 25. Redis circuit breaker, per-tenant scan limit, shared scan status (M72)
+
+**Who must act:** operators of more than one API replica (read §25.3); anyone whose CI relies on many simultaneous scans of one tenant (§25.2).
+
+### 25.1 Redis circuit breaker
+Every Redis call now goes through a circuit breaker. After `SBOMHUB_REDIS_BREAKER_THRESHOLD` (default 5) consecutive failures — a dial/read error, the call's own timeout, or an answer that took 1s or more — Redis calls fail at once for `SBOMHUB_REDIS_BREAKER_COOLDOWN` (default 5s, 1s–30s), then one probe call decides. The caches, the rate limiters and the scan-status store have separate breakers. Transitions are logged (`redis circuit breaker opened` / `half-open` / `closed`).
+What each caller does when Redis is down is unchanged, only faster: the NVD and distro caches count a miss, API-key rate limiting answers 500, public-link rate limiting answers 503 — now immediately instead of after 1–3s per call. Measured against a frozen Redis (docker pause): 20 cache lookups 20.0s → 5.0s, 10 rate-limited calls 20.0s → 10.0s. Recovery after Redis returns takes up to one cool-down.
+
+### 25.2 Per-tenant scan concurrency: `SBOMHUB_SCAN_TENANT_CONCURRENCY` (default 2)
+At most this many upload, manual (`POST .../scan`) and forced (`POST /settings/scan/force`) scans of one tenant run at once per API process (`off` disables it, 1–64 otherwise). The periodic scheduler takes no slot, so its one scan at a time may run in addition. A scan that finds the slots taken waits, first come first served, within its own `SBOMHUB_SCAN_DEADLINE`: if the deadline fires while it waits it is reported failed (`deadline_exceeded`) without running. At most 32 scans per slot may wait; one beyond that fails at once with the new reason `queue_full`.
+
+### 25.3 scan-status is shared through Redis
+`GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` now reads a status kept in Redis, so a scan started on one replica is visible from every replica and survives restarts.
+- A scan whose API process stopped (crash, restart, kill) reads `failed` with the new reason `interrupted` once its 90s lease has run out and no other scan of the same SBOM is still running (until then it reads `running`), instead of `running` until retention or `unknown`.
+- If Redis cannot be read, or holds no entry, a scan that completed in the answering process reads `unknown` (another replica may be scanning), or `running` while that process still has status writes to Redis pending; `running` and `failed` are answered from the process itself.
+- A status entry younger than 75s does not read `completed`; such a scan reads `running` until then.
+- The response shape is unchanged; the new reason codes are `interrupted` and `queue_full`. The status is only read after the SBOM was found in the caller's project.
+
+New environment variables: `SBOMHUB_REDIS_BREAKER_THRESHOLD`, `SBOMHUB_REDIS_BREAKER_COOLDOWN`, `SBOMHUB_SCAN_TENANT_CONCURRENCY`. An invalid value stops the API at startup.
+
