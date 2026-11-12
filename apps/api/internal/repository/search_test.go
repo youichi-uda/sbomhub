@@ -30,11 +30,11 @@ func TestSearchByCVE_ReadsRealEPSSColumn(t *testing.T) {
 	repo := NewSearchRepository(db)
 
 	// M46 B2: severity is COALESCE'd to '' in the same position.
-	pattern := regexp.MustCompile(`(?is)cvss_score,\s*epss_score,\s*` + regexp.QuoteMeta("COALESCE(severity, '')"))
-	if pattern.MatchString("cvss_score, 0::numeric, COALESCE(severity, '')") {
+	pattern := regexp.MustCompile(`(?is)cvss_score,\s*cvss_version,\s*epss_score,\s*` + regexp.QuoteMeta("COALESCE(severity, '')"))
+	if pattern.MatchString("cvss_score, cvss_version, 0::numeric, COALESCE(severity, '')") {
 		t.Fatalf("pattern is vacuous: it also matches the old 0::numeric sentinel")
 	}
-	if pattern.MatchString("cvss_score, COALESCE(epss_score, 0), COALESCE(severity, '')") {
+	if pattern.MatchString("cvss_score, cvss_version, COALESCE(epss_score, 0), COALESCE(severity, '')") {
 		t.Fatalf("pattern is vacuous: it also matches the COALESCE sentinel form")
 	}
 
@@ -42,10 +42,10 @@ func TestSearchByCVE_ReadsRealEPSSColumn(t *testing.T) {
 	// Query 1: the vulnerability lookup carrying the flipped EPSS column.
 	mock.ExpectQuery(pattern.String()).
 		WithArgs("CVE-2026-0007").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "cve_id", "description", "cvss_score", "epss_score", "severity"}).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "cve_id", "description", "cvss_score", "cvss_version", "epss_score", "severity"}).
 			// Un-synced row: the bare column yields a raw NULL in the 5th
 			// position -> nil pointer.
-			AddRow(vulnID, "CVE-2026-0007", "desc", 7.5, nil, "HIGH"))
+			AddRow(vulnID, "CVE-2026-0007", "desc", 7.5, "3.1", nil, "HIGH"))
 	// Query 2: affected projects (empty result is fine for this assertion).
 	mock.ExpectQuery(`(?is)FROM\s+projects\s+p`).
 		WithArgs(vulnID).
@@ -104,13 +104,13 @@ func TestGetComponentVulnerabilities_ReadsRealEPSSColumns(t *testing.T) {
 	mock.ExpectQuery(pattern.String()).
 		WithArgs(compID).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score",
+			"id", "cve_id", "description", "severity", "cvss_score", "cvss_version",
 			"epss_score", "epss_percentile", "source", "published_at", "updated_at",
 		}).
 			// Un-synced row: both columns are raw NULL -> pointers stay nil.
-			AddRow(uuid.New(), "CVE-2026-0010", "d1", "HIGH", 7.5, nil, nil, "NVD", now, now).
+			AddRow(uuid.New(), "CVE-2026-0010", "d1", "HIGH", 7.5, nil, nil, nil, "NVD", now, now).
 			// Synced row: real score/percentile -> pointers set.
-			AddRow(uuid.New(), "CVE-2026-0011", "d2", "CRITICAL", 9.8, 0.5, 0.9, "NVD", now, now))
+			AddRow(uuid.New(), "CVE-2026-0011", "d2", "CRITICAL", 9.8, "4.0", 0.5, 0.9, "NVD", now, now))
 
 	vulns, err := repo.getComponentVulnerabilities(context.Background(), compID)
 	if err != nil {

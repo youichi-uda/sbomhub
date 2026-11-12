@@ -188,6 +188,7 @@ GET /api/v1/projects/:id/vulnerabilities
       "id": "CVE-2024-1234",
       "severity": "high",
       "cvss_score": 8.5,
+      "cvss_version": "3.1",
       "epss_score": 0.15,
       "component": "lodash",
       "version": "4.17.20",
@@ -215,6 +216,16 @@ GET /api/v1/projects/:id/vulnerabilities
 バージョンと照合できなかったものです。keyword 系は
 名前の文字列一致であり、確定した所見ではなく候補として扱ってください。
 `docs/UPGRADE.md` §13 を参照。
+
+**CVSS バージョン (M71).** `cvss_version` は `cvss_score` と `severity` を取った
+CVSS のバージョンです: `"3.1"`、`"3.0"`、`"4.0"`、`"2.0"` のいずれか (選択規則は
+`docs/UPGRADE.md` §20)。バージョンが不明なとき (使える評価がない、フィードが
+未知のバージョンを示した、migration 069 以降まだ再導出されていない行) は
+省略されます。`cvss_score` なしで返ることもあります (スコアはないが評価の
+レーティングだけが示されている場合)。同じフィールドは `GET /api/v1/search/cve`、
+`GET /api/v1/search/component`、`GET /api/v1/vulnerabilities/:cve_id/impact`、
+`GET /api/v1/vulnerabilities/:cve_id/paths`、`GET /api/v1/projects/:id/kev` と
+MCP の対応エンドポイントでも返ります。
 
 ---
 

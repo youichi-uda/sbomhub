@@ -99,6 +99,7 @@ func (s *CVEPathsService) GetCVEPaths(ctx context.Context, tenantID uuid.UUID, c
 		CVEID:                cveID,
 		Severity:             meta.Severity,
 		CVSSScore:            meta.CVSSScore,
+		CVSSVersion:          meta.CVSSVersion,
 		EPSSScore:            meta.EPSSScore,
 		InKEV:                meta.InKEV,
 		AffectedProjectCount: len(projects),

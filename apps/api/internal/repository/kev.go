@@ -430,7 +430,7 @@ func (r *KEVRepository) GetKEVVulnerabilities(ctx context.Context, projectID uui
 	// (existing repo convention); cvss_score/published_at/updated_at scan
 	// into the model's pointer fields (no sentinels).
 	query := `
-		SELECT DISTINCT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score,
+		SELECT DISTINCT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score, v.cvss_version,
 			v.epss_score, v.epss_percentile, v.epss_updated_at,
 			v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
 			COALESCE(v.source, 'NVD'), v.published_at, v.updated_at
@@ -455,7 +455,7 @@ func (r *KEVRepository) GetKEVVulnerabilities(ctx context.Context, projectID uui
 	for rows.Next() {
 		var v model.Vulnerability
 		if err := rows.Scan(
-			&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
+			&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore, &v.CVSSVersion,
 			&v.EPSSScore, &v.EPSSPercentile, &v.EPSSUpdatedAt,
 			&v.InKEV, &v.KEVDateAdded, &v.KEVDueDate, &v.KEVRansomwareUse,
 			&v.Source, &v.PublishedAt, &v.UpdatedAt,

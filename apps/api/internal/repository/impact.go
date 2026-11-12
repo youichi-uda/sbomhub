@@ -57,6 +57,7 @@ func (r *SearchRepository) GetVulnerabilityImpactMeta(ctx context.Context, cveID
 			id,
 			COALESCE(severity, 'UNKNOWN') AS severity,
 			cvss_score,
+			cvss_version,
 			epss_score,
 			in_kev
 		FROM vulnerabilities
@@ -65,7 +66,7 @@ func (r *SearchRepository) GetVulnerabilityImpactMeta(ctx context.Context, cveID
 	`
 	var m model.CVEImpactMeta
 	err := r.q(ctx).QueryRowContext(ctx, query, cveID).Scan(
-		&m.VulnerabilityID, &m.Severity, &m.CVSSScore, &m.EPSSScore, &m.InKEV,
+		&m.VulnerabilityID, &m.Severity, &m.CVSSScore, &m.CVSSVersion, &m.EPSSScore, &m.InKEV,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

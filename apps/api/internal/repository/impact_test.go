@@ -111,21 +111,21 @@ func TestGetVulnerabilityImpactMeta_ReadsRealEPSSColumn(t *testing.T) {
 	// discriminator anchors on the surrounding columns: the bare form emits
 	// "cvss_score, epss_score, in_kev" while both sentinel forms interpose
 	// either 0::numeric or a COALESCE wrapper.
-	pattern := regexp.MustCompile(`(?is)cvss_score,\s*epss_score,\s*in_kev`)
-	if pattern.MatchString("cvss_score, 0::numeric AS epss_score, in_kev") {
+	pattern := regexp.MustCompile(`(?is)cvss_score,\s*cvss_version,\s*epss_score,\s*in_kev`)
+	if pattern.MatchString("cvss_score, cvss_version, 0::numeric AS epss_score, in_kev") {
 		t.Fatalf("pattern is vacuous: it also matches the old 0::numeric sentinel")
 	}
-	if pattern.MatchString("cvss_score, COALESCE(epss_score, 0) AS epss_score, in_kev") {
+	if pattern.MatchString("cvss_score, cvss_version, COALESCE(epss_score, 0) AS epss_score, in_kev") {
 		t.Fatalf("pattern is vacuous: it also matches the COALESCE sentinel form")
 	}
 
 	vulnID := uuid.New()
 	mock.ExpectQuery(pattern.String()).
 		WithArgs("CVE-2026-0001").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "severity", "cvss_score", "epss_score", "in_kev"}).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "severity", "cvss_score", "cvss_version", "epss_score", "in_kev"}).
 			// Real 0.0000: a FIRST score below 0.00005 rounded down by the
 			// DECIMAL(5,4) column. Must stay non-nil.
-			AddRow(vulnID, "HIGH", 7.5, float64(0), false))
+			AddRow(vulnID, "HIGH", 7.5, "3.1", float64(0), false))
 
 	got, err := repo.GetVulnerabilityImpactMeta(context.Background(), "CVE-2026-0001")
 	if err != nil {
@@ -163,10 +163,10 @@ func TestGetVulnerabilityImpactMeta_NullEPSSScansCleanly(t *testing.T) {
 	vulnID := uuid.New()
 	mock.ExpectQuery(`(?is)FROM\s+vulnerabilities`).
 		WithArgs("CVE-2026-0002").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "severity", "cvss_score", "epss_score", "in_kev"}).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "severity", "cvss_score", "cvss_version", "epss_score", "in_kev"}).
 			// A raw NULL — what a bare (non-COALESCE) epss_score column would
 			// return for an un-synced row.
-			AddRow(vulnID, "HIGH", 7.5, nil, false))
+			AddRow(vulnID, "HIGH", 7.5, nil, nil, false))
 
 	got, err := repo.GetVulnerabilityImpactMeta(context.Background(), "CVE-2026-0002")
 	if err != nil {

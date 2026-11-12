@@ -45,7 +45,7 @@ func (r *SearchRepository) SearchByCVE(ctx context.Context, cveID string) (*mode
 	// *float64 CVESearchResult.CVSSScore — no 0-sentinel, un-scored stays
 	// nil (CVSS 0.0 is a real "None" score).
 	vulnQuery := `
-		SELECT id, cve_id, COALESCE(description, ''), cvss_score, epss_score, COALESCE(severity, '')
+		SELECT id, cve_id, COALESCE(description, ''), cvss_score, cvss_version, epss_score, COALESCE(severity, '')
 		FROM vulnerabilities
 		WHERE cve_id = $1
 		LIMIT 1
@@ -57,6 +57,7 @@ func (r *SearchRepository) SearchByCVE(ctx context.Context, cveID string) (*mode
 		&result.CVEID,
 		&result.Description,
 		&result.CVSSScore,
+		&result.CVSSVersion,
 		&result.EPSSScore,
 		&result.Severity,
 	)
@@ -254,7 +255,7 @@ func (r *SearchRepository) getComponentVulnerabilities(ctx context.Context, comp
 	// updated_at scan into the model's pointer fields. NULLS LAST keeps
 	// un-scored rows at the tail (Postgres defaults DESC to NULLS FIRST).
 	query := `
-		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score,
+		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score, v.cvss_version,
 		       v.epss_score, v.epss_percentile,
 		       COALESCE(v.source, 'NVD'), v.published_at, v.updated_at
 		FROM vulnerabilities v
@@ -274,7 +275,7 @@ func (r *SearchRepository) getComponentVulnerabilities(ctx context.Context, comp
 		var v model.Vulnerability
 		var epssScore, epssPercentile sql.NullFloat64
 		if err := rows.Scan(
-			&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
+			&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore, &v.CVSSVersion,
 			&epssScore, &epssPercentile,
 			&v.Source, &v.PublishedAt, &v.UpdatedAt,
 		); err != nil {

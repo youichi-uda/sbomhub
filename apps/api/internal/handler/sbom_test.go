@@ -448,7 +448,7 @@ func TestSBOMHandler_GetVulnerabilities_DefaultLimit_F26(t *testing.T) {
 	mock.ExpectQuery(`FROM vulnerabilities v.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, VulnsDefaultLimit, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"id", "cve_id", "description", "severity", "cvss_score", "cvss_version", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at", "match_method", "match_evidence",
 		}))
@@ -544,11 +544,11 @@ func TestSBOMHandler_GetVulnerabilities_OffsetPagination_F26(t *testing.T) {
 	mock.ExpectQuery(`FROM vulnerabilities v.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, 200, 100).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score",
+			"id", "cve_id", "description", "severity", "cvss_score", "cvss_version",
 			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at", "match_method", "match_evidence",
-		}).AddRow(uuid.New(), "CVE-2024-1", "desc", "HIGH", 7.5, 0.0, 0.0, "NVD",
+		}).AddRow(uuid.New(), "CVE-2024-1", "desc", "HIGH", 7.5, nil, 0.0, 0.0, "NVD",
 			false, nil, nil, nil, now, now, nil, nil))
 
 	sbomService := service.NewSbomService(
@@ -662,7 +662,7 @@ func driveSortHappyPath(t *testing.T, query, wantOrderBy string) {
 	mock.ExpectQuery(`FROM vulnerabilities v .*WHERE EXISTS.*`+wantOrderBy+`.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, VulnsDefaultLimit, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score",
+			"id", "cve_id", "description", "severity", "cvss_score", "cvss_version",
 			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at", "match_method", "match_evidence",
@@ -775,7 +775,7 @@ func TestSBOMHandler_GetVulnerabilities_OffsetAtCap_F27(t *testing.T) {
 	mock.ExpectQuery(`FROM vulnerabilities v.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, VulnsDefaultLimit, VulnsMaxOffset).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"id", "cve_id", "description", "severity", "cvss_score", "cvss_version", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at", "match_method", "match_evidence",
 		}))
@@ -840,7 +840,7 @@ func TestSBOMHandler_GetVulnerabilities_TotalCountHeader_F28(t *testing.T) {
 	mock.ExpectQuery(`FROM vulnerabilities v.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, VulnsDefaultLimit, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"id", "cve_id", "description", "severity", "cvss_score", "cvss_version", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at", "match_method", "match_evidence",
 		}))
@@ -926,14 +926,14 @@ func TestSBOMHandler_GetVulnerabilities_DistinctRows_F29(t *testing.T) {
 	mock.ExpectQuery(`FROM vulnerabilities v .*WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, VulnsDefaultLimit, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score",
+			"id", "cve_id", "description", "severity", "cvss_score", "cvss_version",
 			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at", "match_method", "match_evidence",
 		}).
-			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, 0.0, 0.0, "NVD",
+			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, nil, 0.0, 0.0, "NVD",
 				false, nil, nil, nil, now, now, nil, nil).
-			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, 0.0, 0.0, "NVD",
+			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, nil, 0.0, 0.0, "NVD",
 				false, nil, nil, nil, now, now, nil, nil))
 
 	sbomService := service.NewSbomService(

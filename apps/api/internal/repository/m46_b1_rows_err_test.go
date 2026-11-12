@@ -54,14 +54,14 @@ func TestComponentRepository_ListBySbom_RowsErrSurfaced(t *testing.T) {
 func componentVulnRows() *sqlmock.Rows {
 	now := time.Now()
 	return sqlmock.NewRows([]string{
-		"id", "cve_id", "description", "severity", "cvss_score",
+		"id", "cve_id", "description", "severity", "cvss_score", "cvss_version",
 		"epss_score", "epss_percentile", "source",
 		"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 		"published_at", "updated_at", "match_method", "match_evidence",
 	}).
-		AddRow(uuid.New(), "CVE-2024-0001", "d1", "HIGH", 7.5,
+		AddRow(uuid.New(), "CVE-2024-0001", "d1", "HIGH", 7.5, nil,
 			0.5, 0.9, "NVD", false, nil, nil, nil, now, now, nil, nil).
-		AddRow(uuid.New(), "CVE-2024-0002", "d2", "LOW", 1.0,
+		AddRow(uuid.New(), "CVE-2024-0002", "d2", "LOW", 1.0, nil,
 			0.0, 0.0, "NVD", false, nil, nil, nil, now, now, nil, nil).
 		RowError(1, errMidIteration)
 }
@@ -294,14 +294,14 @@ func TestKEVRepository_GetKEVVulnerabilities_RowsErrSurfaced(t *testing.T) {
 	now := time.Now()
 
 	rows := sqlmock.NewRows([]string{
-		"id", "cve_id", "description", "severity", "cvss_score",
+		"id", "cve_id", "description", "severity", "cvss_score", "cvss_version",
 		"epss_score", "epss_percentile", "epss_updated_at",
 		"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 		"source", "published_at", "updated_at",
 	}).
-		AddRow(uuid.New(), "CVE-2024-0001", "d1", "HIGH", 7.5,
+		AddRow(uuid.New(), "CVE-2024-0001", "d1", "HIGH", 7.5, nil,
 			nil, nil, nil, true, now, now, false, "NVD", now, now).
-		AddRow(uuid.New(), "CVE-2024-0002", "d2", "LOW", 1.0,
+		AddRow(uuid.New(), "CVE-2024-0002", "d2", "LOW", 1.0, nil,
 			nil, nil, nil, true, now, now, false, "NVD", now, now).
 		RowError(1, errMidIteration)
 	mock.ExpectQuery(`WHERE s\.project_id = \$1 AND v\.in_kev = true`).
@@ -320,8 +320,8 @@ func expectSearchByCVEHeadRow(mock sqlmock.Sqlmock, cveID string, vulnID uuid.UU
 	mock.ExpectQuery(`FROM vulnerabilities\s+WHERE cve_id = \$1`).
 		WithArgs(cveID).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "cvss_score", "epss_score", "severity",
-		}).AddRow(vulnID, cveID, "d1", 7.5, 0.5, "HIGH"))
+			"id", "cve_id", "description", "cvss_score", "cvss_version", "epss_score", "severity",
+		}).AddRow(vulnID, cveID, "d1", 7.5, nil, 0.5, "HIGH"))
 }
 
 func TestSearchRepository_SearchByCVE_AffectedRowsErrSurfaced(t *testing.T) {
@@ -376,10 +376,10 @@ func TestVulnerabilityRepository_ListByProject_RowsErrSurfaced(t *testing.T) {
 	now := time.Now()
 
 	rows := sqlmock.NewRows([]string{
-		"id", "cve_id", "description", "severity", "cvss_score", "source", "published_at", "updated_at",
+		"id", "cve_id", "description", "severity", "cvss_score", "cvss_version", "source", "published_at", "updated_at",
 	}).
-		AddRow(uuid.New(), "CVE-2024-0001", "d1", "HIGH", 7.5, "NVD", now, now).
-		AddRow(uuid.New(), "CVE-2024-0002", "d2", "LOW", 1.0, "NVD", now, now).
+		AddRow(uuid.New(), "CVE-2024-0001", "d1", "HIGH", 7.5, nil, "NVD", now, now).
+		AddRow(uuid.New(), "CVE-2024-0002", "d2", "LOW", 1.0, nil, "NVD", now, now).
 		RowError(1, errMidIteration)
 	mock.ExpectQuery(`WHERE s\.project_id = \$1\s+ORDER BY v\.cvss_score DESC`).
 		WithArgs(projectID).

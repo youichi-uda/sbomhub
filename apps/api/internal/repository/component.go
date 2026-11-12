@@ -226,7 +226,7 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 	// NVD "Awaiting Analysis" rows are real); cvss_score/published_at/
 	// updated_at scan into the model's pointer fields (no sentinels).
 	query := `
-		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score,
+		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score, v.cvss_version,
 		       v.epss_score, v.epss_percentile,
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
@@ -251,7 +251,7 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 		var epssScore, epssPercentile sql.NullFloat64
 		var best sql.NullString
 		var evidence []byte
-		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
+		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore, &v.CVSSVersion,
 			&epssScore, &epssPercentile,
 			&v.Source,
 			&v.InKEV, &v.KEVDateAdded, &v.KEVDueDate, &v.KEVRansomwareUse,
@@ -368,7 +368,7 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 	// stay distinct — same change as GetVulnerabilities above.
 	// M46 B2: same NULL-safe read shape as GetVulnerabilities above.
 	query := `
-		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score,
+		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score, v.cvss_version,
 		       v.epss_score, v.epss_percentile,
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
@@ -397,7 +397,7 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 		var epssScore, epssPercentile sql.NullFloat64
 		var best sql.NullString
 		var evidence []byte
-		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
+		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore, &v.CVSSVersion,
 			&epssScore, &epssPercentile,
 			&v.Source,
 			&v.InKEV, &v.KEVDateAdded, &v.KEVDueDate, &v.KEVRansomwareUse,

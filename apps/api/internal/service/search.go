@@ -115,6 +115,7 @@ func (s *SearchService) SearchByCVE(ctx context.Context, cveID string) (*model.C
 			Description:        vuln.Description,
 			Severity:           vuln.Severity,
 			CVSSScore:          vuln.CVSSScore,
+			CVSSVersion:        vuln.CVSSVersion,
 			AffectedProjects:   []model.AffectedProject{},
 			UnaffectedProjects: []model.UnaffectedProject{},
 		}, nil

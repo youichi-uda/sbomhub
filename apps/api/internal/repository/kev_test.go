@@ -31,7 +31,7 @@ func TestGetKEVVulnerabilities_ZeroRowsReturnsNonNilSlice(t *testing.T) {
 	// Positional Scan order of the vulnerabilities projection (irrelevant to the
 	// zero-row assertion, kept accurate to document the query shape).
 	cols := []string{
-		"id", "cve_id", "description", "severity", "cvss_score",
+		"id", "cve_id", "description", "severity", "cvss_score", "cvss_version",
 		"epss_score", "epss_percentile", "epss_updated_at",
 		"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 		"source", "published_at", "updated_at",

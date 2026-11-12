@@ -186,6 +186,7 @@ GET /api/v1/projects/:id/vulnerabilities
       "id": "CVE-2024-1234",
       "severity": "high",
       "cvss_score": 8.5,
+      "cvss_version": "3.1",
       "epss_score": 0.15,
       "component": "lodash",
       "version": "4.17.20",
@@ -213,6 +214,16 @@ the upstream version, so distro backports are not taken into account.
 configurations could not be checked against the version. Keyword
 methods are name-text matches and should be triaged as candidates, not as
 confirmed findings. See `docs/UPGRADE.md` §13.
+
+**CVSS version (M71).** `cvss_version` is the CVSS version `cvss_score` and
+`severity` were taken from: `"3.1"`, `"3.0"`, `"4.0"` or `"2.0"` (the rule is in
+`docs/UPGRADE.md` §20). It is omitted when the version is unknown: no usable
+assessment, a version the feed states but SBOMHub does not recognise, or a row
+not re-derived since migration 069. It can be present without `cvss_score`, for
+an assessment that states a rating but no usable score. The same field is
+returned by `GET /api/v1/search/cve`, `GET /api/v1/search/component`,
+`GET /api/v1/vulnerabilities/:cve_id/impact`, `GET /api/v1/vulnerabilities/:cve_id/paths`,
+`GET /api/v1/projects/:id/kev` and the MCP equivalents.
 
 ---
 

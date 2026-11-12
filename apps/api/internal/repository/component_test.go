@@ -338,9 +338,9 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 			name:   "successful get vulnerabilities",
 			sbomID: sbomID,
 			setupMock: func() {
-				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method", "match_evidence"}).
-					AddRow(vulnID1, "CVE-2023-1234", "Critical vulnerability in lodash", "CRITICAL", 9.8, 0.42, 0.88, "NVD", true, now, now, false, now, now, nil, nil).
-					AddRow(vulnID2, "CVE-2023-5678", "High severity XSS vulnerability", "HIGH", 7.5, nil, nil, "NVD", false, nil, nil, nil, now, now, nil, nil)
+				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "cvss_version", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method", "match_evidence"}).
+					AddRow(vulnID1, "CVE-2023-1234", "Critical vulnerability in lodash", "CRITICAL", 9.8, nil, 0.42, 0.88, "NVD", true, now, now, false, now, now, nil, nil).
+					AddRow(vulnID2, "CVE-2023-5678", "High severity XSS vulnerability", "HIGH", 7.5, nil, nil, nil, "NVD", false, nil, nil, nil, now, now, nil, nil)
 				mock.ExpectQuery(`SELECT v.id, v.cve_id, COALESCE\(v.description, ''\), COALESCE\(v.severity, ''\), v.cvss_score`).
 					WithArgs(sbomID).
 					WillReturnRows(rows)
@@ -382,7 +382,7 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 			name:   "no vulnerabilities found",
 			sbomID: uuid.New(),
 			setupMock: func() {
-				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method", "match_evidence"})
+				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "cvss_version", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method", "match_evidence"})
 				mock.ExpectQuery(`SELECT v.id, v.cve_id, COALESCE\(v.description, ''\), COALESCE\(v.severity, ''\), v.cvss_score`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnRows(rows)
@@ -678,14 +678,14 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_DistinctByVulnID_F29(t 
 	mock.ExpectQuery(`FROM vulnerabilities v .*WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, 50, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score",
+			"id", "cve_id", "description", "severity", "cvss_score", "cvss_version",
 			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at", "match_method", "match_evidence",
 		}).
-			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, 0.0, 0.0, "NVD",
+			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, nil, 0.0, 0.0, "NVD",
 				false, nil, nil, nil, now, now, nil, nil).
-			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, 0.0, 0.0, "NVD",
+			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, nil, 0.0, 0.0, "NVD",
 				false, nil, nil, nil, now, now, nil, nil))
 
 	got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0, "cvss")
@@ -757,11 +757,11 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_SortOrderBy_F446(t *tes
 			mock.ExpectQuery(`FROM vulnerabilities v .*WHERE EXISTS.*`+tt.wantOrderBy+`.*LIMIT \$2 OFFSET \$3`).
 				WithArgs(sbomID, 50, 0).
 				WillReturnRows(sqlmock.NewRows([]string{
-					"id", "cve_id", "description", "severity", "cvss_score",
+					"id", "cve_id", "description", "severity", "cvss_score", "cvss_version",
 					"epss_score", "epss_percentile", "source",
 					"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 					"published_at", "updated_at", "match_method", "match_evidence",
-				}).AddRow(vulnID, "CVE-2024-EPSS", "epss-sorted vuln", "CRITICAL", 9.1,
+				}).AddRow(vulnID, "CVE-2024-EPSS", "epss-sorted vuln", "CRITICAL", 9.1, nil,
 					0.55, 0.97, "NVD", false, nil, nil, nil, now, now, nil, nil))
 
 			got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0, tt.sortBy)
@@ -805,13 +805,13 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_UnscoredEPSSNil(t *test
 	mock.ExpectQuery(`FROM vulnerabilities v .*WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, 50, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score",
+			"id", "cve_id", "description", "severity", "cvss_score", "cvss_version",
 			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at", "match_method", "match_evidence",
-		}).AddRow(uuid.New(), "CVE-2024-NULL", "un-scored vuln", "LOW", 3.1,
+		}).AddRow(uuid.New(), "CVE-2024-NULL", "un-scored vuln", "LOW", 3.1, nil,
 			nil, nil, "NVD", false, nil, nil, nil, now, now, nil, nil).
-			AddRow(uuid.New(), "CVE-2024-ZERO", "really ~0% vuln", "LOW", 3.1,
+			AddRow(uuid.New(), "CVE-2024-ZERO", "really ~0% vuln", "LOW", 3.1, nil,
 				0.0, 0.0, "NVD", false, nil, nil, nil, now, now, nil, nil))
 
 	got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0, "epss")
@@ -853,16 +853,16 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_UnscoredEPSSNil(t *test
 // statement to a single spaced line, and it is checked against both retired
 // sentinel spellings so it cannot be vacuous.
 func TestComponentRepository_EPSSColumnsAreBare(t *testing.T) {
-	bare := regexp.MustCompile(`(?is)v\.cvss_score,\s*v\.epss_score,\s*v\.epss_percentile,`)
-	if bare.MatchString("v.cvss_score, 0::numeric, 0::numeric,") {
+	bare := regexp.MustCompile(`(?is)v\.cvss_score,\s*v\.cvss_version,\s*v\.epss_score,\s*v\.epss_percentile,`)
+	if bare.MatchString("v.cvss_score, v.cvss_version, 0::numeric, 0::numeric,") {
 		t.Fatalf("pattern is vacuous: it also matches the old 0::numeric sentinels")
 	}
-	if bare.MatchString("v.cvss_score, COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),") {
+	if bare.MatchString("v.cvss_score, v.cvss_version, COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),") {
 		t.Fatalf("pattern is vacuous: it also matches the COALESCE sentinel form")
 	}
 
 	cols := []string{
-		"id", "cve_id", "description", "severity", "cvss_score",
+		"id", "cve_id", "description", "severity", "cvss_score", "cvss_version",
 		"epss_score", "epss_percentile", "source",
 		"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 		"published_at", "updated_at",

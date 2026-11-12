@@ -21,16 +21,16 @@ func TestM70GetVulnerabilities_ProjectsDistroLabelsAndEvidence(t *testing.T) {
 	repo := NewComponentRepository(db)
 	now := time.Now()
 	ev := []byte(`{"source":"osv","source_id":"secret-hash","status":"fixed","basis":"later_releases","release":"Debian:11","package":"openssl","installed":"1.1.1k-1","fixed":"1.1.1k-1","records":["DEBIAN-CVE-2021-3449"],"fetched_at":"2026-11-09T00:00:00Z","prior_method":"nvd_cpe_unverified","wm_source":"secret-hash","wm_rev":"r","wm_by_source":{"secret-hash":"r"}}`)
-	cols := []string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source",
+	cols := []string{"id", "cve_id", "description", "severity", "cvss_score", "cvss_version", "epss_score", "epss_percentile", "source",
 		"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at", "match_method", "match_evidence"}
 	mock.ExpectQuery(`WHEN 'distro_fixed' THEN -1`).
 		WillReturnRows(sqlmock.NewRows(cols).
-			AddRow(uuid.New(), "CVE-2021-3711", "d", "CRITICAL", 9.8, nil, nil, "NVD", false, nil, nil, nil, now, now, "distro_affected", ev).
-			AddRow(uuid.New(), "CVE-2021-3712", "d", "HIGH", 7.4, nil, nil, "NVD", false, nil, nil, nil, now, now, "distro_unfixed", ev).
-			AddRow(uuid.New(), "CVE-2021-3449", "d", "MEDIUM", 5.9, nil, nil, "NVD", false, nil, nil, nil, now, now, "distro_fixed", ev).
+			AddRow(uuid.New(), "CVE-2021-3711", "d", "CRITICAL", 9.8, "3.1", nil, nil, "NVD", false, nil, nil, nil, now, now, "distro_affected", ev).
+			AddRow(uuid.New(), "CVE-2021-3712", "d", "HIGH", 7.4, "3.1", nil, nil, "NVD", false, nil, nil, nil, now, now, "distro_unfixed", ev).
+			AddRow(uuid.New(), "CVE-2021-3449", "d", "MEDIUM", 5.9, "3.1", nil, nil, "NVD", false, nil, nil, nil, now, now, "distro_fixed", ev).
 			// Evidence under a non-distro method is never projected.
-			AddRow(uuid.New(), "CVE-2021-0001", "d", "LOW", 2.0, nil, nil, "NVD", false, nil, nil, nil, now, now, "nvd_cpe", ev).
-			AddRow(uuid.New(), "CVE-2021-0002", "d", "LOW", 2.0, nil, nil, "NVD", false, nil, nil, nil, now, now, "distro_fixed", nil))
+			AddRow(uuid.New(), "CVE-2021-0001", "d", "LOW", 2.0, "3.1", nil, nil, "NVD", false, nil, nil, nil, now, now, "nvd_cpe", ev).
+			AddRow(uuid.New(), "CVE-2021-0002", "d", "LOW", 2.0, "3.1", nil, nil, "NVD", false, nil, nil, nil, now, now, "distro_fixed", nil))
 
 	got, err := repo.GetVulnerabilitiesPaginated(context.Background(), uuid.New(), 10, 0, "cvss")
 	if err != nil {

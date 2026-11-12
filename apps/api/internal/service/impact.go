@@ -75,6 +75,7 @@ func buildCVEImpact(cveID string, meta *model.CVEImpactMeta, affected []model.Im
 		CVEID:                cveID,
 		Severity:             meta.Severity,
 		CVSSScore:            meta.CVSSScore,
+		CVSSVersion:          meta.CVSSVersion,
 		EPSSScore:            meta.EPSSScore,
 		InKEV:                meta.InKEV,
 		AffectedProjectCount: len(affected),

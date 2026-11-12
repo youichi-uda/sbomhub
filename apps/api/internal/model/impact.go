@@ -19,6 +19,12 @@ type CVEImpact struct {
 	// CVSSScore is nil for un-scored CVEs (no 0-sentinel — CVSS 0.0 is a
 	// real "None" score; see model.Vulnerability.CVSSScore, M46 wave 4).
 	CVSSScore *float64 `json:"cvss_score,omitempty"`
+	// CVSSVersion is the CVSS version cvss_score (and severity) were taken
+	// from: "3.1", "3.0", "4.0" or "2.0" (M67, migration 069). Omitted when
+	// unknown — no usable assessment, an unrecognised feed version, or a row
+	// not re-derived since 069. It can be present without cvss_score (an
+	// assessment that states a rating but no usable score).
+	CVSSVersion *string `json:"cvss_version,omitempty"`
 	// EPSSScore is nil when FIRST.org has no score for this CVE. No
 	// 0-sentinel — see model.TopRisk.EPSSScore (M47 W4).
 	EPSSScore *float64 `json:"epss_score,omitempty"`
@@ -62,6 +68,9 @@ type CVEImpactMeta struct {
 	// carried through so CVEImpact / CVEPathsResponse can omit it instead
 	// of presenting a 0.0 sentinel (M46 wave 4).
 	CVSSScore *float64
+	// CVSSVersion is the bare nullable cvss_version column (M71), carried
+	// through to CVEImpact / CVEPathsResponse beside CVSSScore.
+	CVSSVersion *string
 	// EPSSScore is the bare nullable column, carried through so CVEImpact /
 	// CVEPathsResponse can omit it instead of presenting a 0.0 sentinel
 	// (M47 W4, same treatment CVSSScore got in M46 wave 4).

@@ -39,6 +39,13 @@ export interface Vulnerability {
    * Critical look safe (M46 B2).
    */
   cvss_score?: number;
+  /**
+   * The CVSS version cvss_score / severity were taken from (M67 rule, exposed
+   * in M71). Absent when unknown: no usable assessment, an unrecognised feed
+   * version, or a row not re-derived since migration 069. May be present
+   * without cvss_score (a rating stated without a usable score).
+   */
+  cvss_version?: "3.1" | "3.0" | "4.0" | "2.0";
   /** Absent when the upstream feed carried no timestamp (M46 B2). */
   published_at?: string;
   /** Absent when the upstream feed carried no timestamp (M46 B2). */
