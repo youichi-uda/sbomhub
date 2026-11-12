@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -754,5 +755,32 @@ func TestM72YoungHoldFollowsModeSwitches(t *testing.T) {
 	}
 	if s := state(c); s != ScanStateCompleted {
 		t.Fatalf("marked completed: %s", s)
+	}
+}
+
+// Codex M72 eviction R4 Low-1: with no hold (immediate scripts), a key whose
+// born time is ahead of Redis's clock (the clock stepped back) still reads
+// completed.
+func TestM72ImmediateIgnoresClockStepBack(t *testing.T) {
+	rdb := m72Redis(t)
+	store := &redisScanStatusStore{client: rdb, ttl: time.Hour, lease: ScanStatusLease}
+	store.initScripts(DefaultScanDeadline + 5*time.Minute)
+	store.noEvict.Store(true)
+	ctx := context.Background()
+	id := uuid.New()
+	if err := store.begin(ctx, id, 1); err != nil {
+		t.Fatal(err)
+	}
+	// born 10 minutes in the future: now - born < 0
+	future := time.Now().Add(10 * time.Minute).UnixMicro()
+	sec, usec := future/1_000_000, future%1_000_000
+	if err := rdb.HSet(ctx, scanStatusKeys(id)[0], "born", fmt.Sprintf("%d%06d", sec, usec)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id, 1, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); v.state != ScanStateCompleted {
+		t.Fatalf("clock stepped back, no hold: %s, want completed", v.state)
 	}
 }

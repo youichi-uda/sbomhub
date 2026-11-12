@@ -275,7 +275,9 @@ local function publish(now)
   -- a real eviction whose runs have not rejoined.
   local b = born_ms()
   local held = redis.call('HGET', K, 'young_hold') == '1'
-  if b and (now - b < YOUNG or (held and now - b < YOUNG_SPAN)) then
+  -- YOUNG > 0 guards: with no hold (YOUNG 0) a Redis clock step back must
+  -- not make a negative age count as young (Codex M72 eviction R4 Low-1).
+  if b and ((YOUNG > 0 and now - b < YOUNG) or (held and now - b < YOUNG_SPAN)) then
     redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated', now, 'young_hold', '1')
     return
   end
@@ -499,7 +501,7 @@ elseif not changed and idle and yh == 'c' then
   -- completed young under the immediate scripts: hold it now if these
   -- scripts hold and the key is still young
   local b = born_ms()
-  if b and now - b < YOUNG then changed = true end
+  if YOUNG > 0 and b and now - b < YOUNG then changed = true end
 elseif not changed and idle and redis.call('HGET', K, 'state') == 'running' then
   -- running with no active run and none just swept: interrupted, without a
   -- run to revive.
