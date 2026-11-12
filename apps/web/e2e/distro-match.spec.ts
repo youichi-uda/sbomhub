@@ -50,6 +50,9 @@ async function openVulnerabilities(page: Page, locale: 'en' | 'ja'): Promise<voi
 }
 
 test.describe('M70 distro labels', () => {
+  // Fixed zone so the localized evidence timestamps are exact (M71).
+  test.use({ timezoneId: 'Asia/Tokyo' });
+
   test.beforeAll(async ({ request }) => {
     const project = await createProject(request, uniqueName('Distro Match Project'));
     projectId = project.id;
@@ -112,6 +115,61 @@ test.describe('M70 distro labels', () => {
       await page.screenshot({ path: test.info().outputPath(`distro-badges-${locale}.png`), fullPage: true });
     });
 
+    // M71: the explanation was only a `title` on a non-focusable span.
+    test(`badge explanation is reachable by keyboard, touch and screen readers (${locale})`, async ({ page }) => {
+      await openVulnerabilities(page, locale);
+      const entry = page.locator(`[data-vuln-cve-id="${DISTRO.fixed}"]`);
+      const badge = entry.getByTestId('distro-match-badge');
+      const hint = entry.getByTestId('distro-match-hint');
+
+      // The accessible description is there before anything is opened.
+      await expect(badge).toHaveAccessibleDescription(m.distroFixedHint);
+      await expect(badge).not.toHaveAttribute('title');
+      await expect(hint).toBeHidden();
+
+      // Keyboard: focus shows it, Escape hides it.
+      await badge.focus();
+      await expect(badge).toBeFocused();
+      await expect(hint).toBeVisible();
+      await expect(hint).toHaveText(m.distroFixedHint);
+      await expect(hint).toHaveAttribute('role', 'tooltip');
+      await page.keyboard.press('Escape');
+      await expect(hint).toBeHidden();
+      // Tab moves focus on to the next control.
+      await badge.focus();
+      await page.keyboard.press('Tab');
+      await expect(badge).not.toBeFocused();
+      await expect(hint).toBeHidden();
+
+      // A mouse click shows it too (and keeps it while hovered).
+      await page.locator('h1').first().click();
+      await expect(hint).toBeHidden();
+      await badge.click();
+      await expect(hint).toBeVisible();
+
+      // The high-confidence badge carries its own explanation.
+      const affected = page.locator(`[data-vuln-cve-id="${DISTRO.affected}"]`).getByTestId('distro-match-badge');
+      await expect(affected).toHaveAccessibleDescription(m.highConfidenceHint);
+    });
+
+    test(`badge explanation opens on tap and closes on a tap elsewhere (${locale})`, async ({ browser, baseURL }) => {
+      const context = await browser.newContext({ baseURL, hasTouch: true, timezoneId: 'Asia/Tokyo' });
+      const page = await context.newPage();
+      try {
+        await openVulnerabilities(page, locale);
+        const entry = page.locator(`[data-vuln-cve-id="${DISTRO.fixed}"]`);
+        const hint = entry.getByTestId('distro-match-hint');
+        await expect(hint).toBeHidden();
+        await entry.getByTestId('distro-match-badge').tap();
+        await expect(hint).toBeVisible();
+        await expect(hint).toHaveText(m.distroFixedHint);
+        await page.locator('h1').first().tap();
+        await expect(hint).toBeHidden();
+      } finally {
+        await context.close();
+      }
+    });
+
     test(`evidence view shows OSV records, release, basis and the end-of-life caveat (${locale})`, async ({ page }) => {
       await openVulnerabilities(page, locale);
 
@@ -131,7 +189,18 @@ test.describe('M70 distro labels', () => {
       await expect(panel.getByTestId('distro-evidence-basis')).toHaveText(m.basisLaterReleases);
       await expect(panel.getByTestId('distro-evidence-source-url')).toHaveText('https://api.osv.dev');
       await expect(panel.getByTestId('distro-evidence-mirror-note')).toHaveCount(0);
-      await expect(panel.getByTestId('distro-evidence-data-modified')).toHaveText('2026-11-09T00:00:00Z');
+      // M71: shown in the viewer's locale and zone, not as the raw ISO string
+      // (the browser runs in Asia/Tokyo, see test.use above).
+      const modified = panel.getByTestId('distro-evidence-data-modified');
+      await expect(modified.locator('time')).toHaveAttribute('datetime', '2026-11-09T00:00:00Z');
+      await expect(modified).toHaveText(
+        locale === 'en' ? /^Nov 9, 2026, 9:00:00\sAM GMT\+9$/ : /^2026\/11\/09 9:00:00 JST$/,
+      );
+      const fetched = panel.getByTestId('distro-evidence-fetched-at');
+      await expect(fetched.locator('time')).toHaveAttribute('datetime', '2026-11-10T00:00:00Z');
+      await expect(fetched).toHaveText(
+        locale === 'en' ? /^Nov 10, 2026, 9:00:00\sAM GMT\+9$/ : /^2026\/11\/10 9:00:00 JST$/,
+      );
       await expect(panel.getByRole('link', { name: 'DEBIAN-CVE-2020-8203' })).toHaveAttribute(
         'href',
         'https://osv.dev/vulnerability/DEBIAN-CVE-2020-8203',
