@@ -273,9 +273,11 @@ func (s slowStore) begin(ctx context.Context, id uuid.UUID, gen uint64) error {
 	return s.memStore.begin(ctx, id, gen)
 }
 
-func (s slowStore) heartbeat(ctx context.Context, id uuid.UUID, gen uint64) (bool, error) {
+// heartbeatMany costs one delay per call (one round trip), like the
+// pipelined Redis renewal.
+func (s slowStore) heartbeatMany(ctx context.Context, runs []runKey) ([]bool, error) {
 	time.Sleep(s.delay)
-	return s.memStore.heartbeat(ctx, id, gen)
+	return s.memStore.heartbeatMany(ctx, runs)
 }
 
 // Codex M72 R1 High-1: GetDetail raced Begin/Finish on the entry's map.
