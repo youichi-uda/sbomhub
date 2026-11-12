@@ -99,22 +99,17 @@ func (t *ScanTracker) enqueueLocked(sbomID uuid.UUID, ev *sharedEvent) {
 func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedEvent) {
 	tail := q.events[len(q.events)-1]
 	if tail.kind != evMerge || tail.applying {
-		tail = &sharedEvent{kind: evMerge, merged: &mergeSet{}, at: time.Now(), done: make(chan struct{})}
+		tail = &sharedEvent{kind: evMerge, merged: newMergeSet(), at: time.Now(), done: make(chan struct{})}
 		q.events = append(q.events, tail)
 		slog.Warn("scan status: shared writes of the SBOM are backing up; coalescing them",
 			"sbom_id", sbomID, "queued", len(q.events))
 	}
 	m := tail.merged
-	room := len(m.begins)+len(m.finishes) < maxMergeRuns
 	switch ev.kind {
 	case evBegin, evRejoin:
-		if room {
-			m.begins = append(m.begins, ev.gen)
-		}
+		m.begin(ev.gen)
 	case evFinish:
-		if room {
-			m.finishes = append(m.finishes, ev.gen)
-		}
+		m.finish(ev.gen)
 		if ev.msg != "" {
 			m.addFailure(ev.msg, ev.reasons)
 		}
@@ -213,7 +208,7 @@ func (t *ScanTracker) waitBegin(ev *sharedEvent) {
 	if ev == nil {
 		return
 	}
-	timer := time.NewTimer(beginWait)
+	timer := time.NewTimer(t.beginWait)
 	defer timer.Stop()
 	select {
 	case <-ev.done:
@@ -270,15 +265,13 @@ func (t *ScanTracker) heartbeatLoop() {
 // run whose SBOM has no queued write, in pipelined batches; false when there
 // is nothing left to do (the loop then ends). A live run older than
 // retention + lease is dropped (a scan that never finished, e.g. an upload
-// whose transaction rolled back), and so is a queued write older than
-// retention.
+// whose transaction rolled back).
 func (t *ScanTracker) heartbeatPass() bool {
 	t.qMu.Lock()
+	// Queued writes are never discarded for their age (Codex M72 R6
+	// High-2/3): one may carry a failure, and the head may be in flight. The
+	// queue is bounded by queueCap plus one merge event.
 	for id, q := range t.queues {
-		for len(q.events) > 0 && time.Since(q.events[0].at) > t.retention {
-			close(q.events[0].done)
-			q.events = q.events[1:]
-		}
 		if len(q.events) == 0 && !q.draining {
 			delete(t.queues, id)
 			continue
@@ -328,6 +321,19 @@ func (t *ScanTracker) heartbeatPass() bool {
 		t.qMu.Unlock()
 	}
 	return true
+}
+
+// kickQueues restarts the drain of every stalled queue (the heartbeat loop
+// does it every pass).
+func (t *ScanTracker) kickQueues() {
+	t.qMu.Lock()
+	defer t.qMu.Unlock()
+	for id, q := range t.queues {
+		if len(q.events) > 0 && !q.draining {
+			q.draining = true
+			go t.drain(id)
+		}
+	}
 }
 
 // pendingShared reports whether this process has writes of sbomID that have

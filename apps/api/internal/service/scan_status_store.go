@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"time"
@@ -384,10 +385,15 @@ func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen
 	return n == 1, err
 }
 
-// mergeSet is a queue overflow's coalesced writes.
+// mergeSet is a queue overflow's coalesced writes, as their NET effect (Codex
+// M72 R6 High-1): the runs that began and are still live, the runs that
+// finished whose begin was written before, and the failures. A run that began
+// and finished inside the overflow leaves only its failure. Its size is
+// therefore bounded by the runs live at once plus the queue before it, not by
+// how many writes were folded in.
 type mergeSet struct {
-	begins   []uint64
-	finishes []uint64
+	begins   map[uint64]bool
+	finishes map[uint64]bool
 	failures []mergeFailure
 }
 
@@ -396,11 +402,19 @@ type mergeFailure struct {
 	reasons []string
 }
 
-// maxMergeRuns bounds the run ids one overflow keeps; beyond it a begin is
-// dropped (the run rejoins on its next heartbeat) and a finish leaves its run
-// to be swept as interrupted — conservative either way. Failures are kept
-// whatever the count (their set is bounded by the marker vocabulary).
-const maxMergeRuns = 4096
+func newMergeSet() *mergeSet {
+	return &mergeSet{begins: map[uint64]bool{}, finishes: map[uint64]bool{}}
+}
+
+func (m *mergeSet) begin(gen uint64) { m.begins[gen] = true }
+
+func (m *mergeSet) finish(gen uint64) {
+	if m.begins[gen] {
+		delete(m.begins, gen)
+		return
+	}
+	m.finishes[gen] = true
+}
 
 func (m *mergeSet) addFailure(msg string, reasons []string) {
 	for i := range m.failures {
@@ -417,7 +431,9 @@ func (m *mergeSet) addFailure(msg string, reasons []string) {
 }
 
 func (m *mergeSet) clone() *mergeSet {
-	c := &mergeSet{begins: slices.Clone(m.begins), finishes: slices.Clone(m.finishes)}
+	c := newMergeSet()
+	maps.Copy(c.begins, m.begins)
+	maps.Copy(c.finishes, m.finishes)
 	for _, f := range m.failures {
 		c.failures = append(c.failures, mergeFailure{f.msg, slices.Clone(f.reasons)})
 	}
@@ -425,10 +441,10 @@ func (m *mergeSet) clone() *mergeSet {
 }
 
 func (m *mergeSet) json() string {
-	gens := func(g []uint64) []string {
-		out := make([]string, len(g))
-		for i, v := range g {
-			out[i] = genString(v)
+	gens := func(set map[uint64]bool) []string {
+		out := make([]string, 0, len(set))
+		for _, g := range slices.Sorted(maps.Keys(set)) {
+			out = append(out, genString(g))
 		}
 		return out
 	}

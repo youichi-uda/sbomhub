@@ -108,12 +108,12 @@ func (m *memStore) rejoin(ctx context.Context, id uuid.UUID, gen uint64) error {
 }
 
 func (m *memStore) merge(ctx context.Context, id uuid.UUID, ms *mergeSet) error {
-	for _, g := range ms.begins {
+	for g := range ms.begins {
 		if err := m.rejoin(ctx, id, g); err != nil {
 			return err
 		}
 	}
-	for _, g := range ms.finishes {
+	for g := range ms.finishes {
 		if _, err := m.finish(ctx, id, g, "", nil); err != nil {
 			return err
 		}
@@ -483,10 +483,10 @@ func (g *groupStore) merge(ctx context.Context, id uuid.UUID, ms *mergeSet) erro
 		if g.runs[id] == nil {
 			g.runs[id] = map[uint64]bool{}
 		}
-		for _, b := range ms.begins {
+		for b := range ms.begins {
 			g.runs[id][b] = true
 		}
-		for _, f := range ms.finishes {
+		for f := range ms.finishes {
 			delete(g.runs[id], f)
 		}
 		if len(ms.failures) > 0 {
@@ -722,5 +722,50 @@ func TestM72R5_OverflowKeepsFailures(t *testing.T) {
 	settle(t, a, id)
 	if st, _, _ := trackerOn(store, time.Hour).GetDetail(id); st != ScanStateFailed {
 		t.Fatalf("after overflow: %s, want failed", st)
+	}
+}
+
+// maxMergeRunsForTest exceeds the pre-R6 per-merge run cap.
+const maxMergeRunsForTest = 4100
+
+// Codex M72 R6 High-1: a merge keeps every run still live, however many runs
+// were folded into it; Redis must show the long scan running afterwards.
+func TestM72R6_MergeKeepsEveryLiveRun(t *testing.T) {
+	store := newGroupStore()
+	store.setDown(true)
+	a := trackerOn(store, time.Hour)
+	a.queueCap = 2
+	a.beginWait = time.Millisecond
+	id := uuid.New()
+	a.Finish(id, a.Begin(id), nil, "")         // fills the queue (begin, finish)
+	for i := 0; i < maxMergeRunsForTest; i++ { // runs that start and end while backlogged
+		a.Finish(id, a.Begin(id), nil, "")
+	}
+	a.Begin(id) // the long scan, still running
+	store.setDown(false)
+	a.kickQueues()
+	settle(t, a, id)
+	if st, _, _ := trackerOn(store, time.Hour).GetDetail(id); st != ScanStateRunning {
+		t.Fatalf("after the backlog: %s, want running (the long scan is live)", st)
+	}
+}
+
+// Codex M72 R6 High-2/3: a queued write is never discarded for its age (a
+// failure would be lost, and pruning the in-flight head could panic).
+func TestM72R6_OldQueuedWritesAreKept(t *testing.T) {
+	store := newGroupStore()
+	store.setDown(true)
+	a := trackerOn(store, time.Hour)
+	a.retention = 20 * time.Millisecond
+	a.beginWait = time.Millisecond
+	id := uuid.New()
+	a.Finish(id, a.Begin(id), []string{ScanReasonFetchFailed}, "nvd: scan failed (fetch_failed)")
+	time.Sleep(50 * time.Millisecond)
+	a.heartbeatPass()
+	store.setDown(false)
+	a.kickQueues()
+	settle(t, a, id)
+	if st, _, _ := trackerOn(store, time.Hour).GetDetail(id); st != ScanStateFailed {
+		t.Fatalf("an old queued failure: %s, want failed", st)
 	}
 }
