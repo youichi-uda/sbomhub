@@ -24,7 +24,7 @@ func TestM71TextGuardParamsRunsInsideCORS(t *testing.T) {
 	}
 	s := string(src)
 	cors := strings.Index(s, "e.Use(middleware.CORSWithConfig(")
-	guard := strings.Index(s, "e.Use(appmw.TextGuardParams())")
+	guard := strings.Index(s, "e.Use(appmw.TextGuardParams(")
 	if cors < 0 || guard < 0 {
 		t.Fatalf("could not find the e.Use lines (cors=%d guard=%d)", cors, guard)
 	}
@@ -48,5 +48,34 @@ func TestM71TextGuard400CarriesCORSHeaders(t *testing.T) {
 	}
 	if got := rec.Header().Get(echo.HeaderAccessControlAllowOrigin); got != "http://localhost:3000" {
 		t.Fatalf("Access-Control-Allow-Origin = %q on the guard's 400", got)
+	}
+}
+
+// The opaque share-link password names the two public routes by their full
+// template; a route renamed without updating the exemption would silently
+// refuse those passwords again.
+func TestM71OpaquePasswordRoutesExist(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(src)
+	for _, want := range []string{
+		`api.GET("/public/:token", publicLinkHandler.PublicGet`,
+		`api.GET("/public/:token/download", publicLinkHandler.PublicDownload`,
+		`api := e.Group("/api/v1")`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("main.go no longer contains %s", want)
+		}
+	}
+	want := map[string]bool{"/api/v1/public/:token": true, "/api/v1/public/:token/download": true}
+	if len(textGuardOpaqueParams()) != len(want) {
+		t.Fatalf("textGuardOpaqueParams = %+v", textGuardOpaqueParams())
+	}
+	for _, o := range textGuardOpaqueParams() {
+		if !want[o.Route] || o.Key != "password" {
+			t.Errorf("unexpected opaque param %+v", o)
+		}
 	}
 }

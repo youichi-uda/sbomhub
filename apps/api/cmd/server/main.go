@@ -455,6 +455,19 @@ func evaluateAppRoleRLS(role string, bypassRLS, superuser bool, cfg *config.Conf
 	)
 }
 
+// textGuardOpaqueParams are the query values appmw.TextGuardParams does not
+// check (M71 Codex R3): the share-link password on the two public routes. It
+// is only bcrypt-compared, never sent to PostgreSQL, and a link created before
+// M66 may have one containing U+0000. Route is the full registered template.
+// (A function, not a var: the M52P route gate expands main.go identifiers
+// textually, and route literals inside the e.Use argument confuse it.)
+func textGuardOpaqueParams() []appmw.OpaqueQueryParam {
+	return []appmw.OpaqueQueryParam{
+		{Route: "/api/v1/public/:token", Key: "password"},
+		{Route: "/api/v1/public/:token/download", Key: "password"},
+	}
+}
+
 func main() {
 	// Load .env file if it exists (for local development)
 	_ = godotenv.Load()
@@ -1126,8 +1139,10 @@ func main() {
 	// string with 400 before any group middleware (auth, TenantTx, audit) or
 	// handler sees them; PostgreSQL cannot store them (they used to be 500s).
 	// Inside CORS (Codex R2), so an allowed cross-origin caller can read the
-	// 400 instead of a CORS failure.
-	e.Use(appmw.TextGuardParams())
+	// 400 instead of a CORS failure. The share-link password is exempt on the
+	// two public routes (Codex R3): it is only bcrypt-compared, and a link
+	// created before M66 may have one containing U+0000.
+	e.Use(appmw.TextGuardParams(textGuardOpaqueParams()...))
 
 	// Webhook endpoints (no auth required)
 	e.POST("/api/webhooks/clerk", clerkWebhookHandler.Handle)

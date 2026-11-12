@@ -132,7 +132,7 @@ func TestM71TextGuardParams_QueryScanDoesNotMaterialise(t *testing.T) {
 	rec := httptest.NewRecorder()
 	// A fresh context per run: echo caches the parsed query on the context.
 	allocs := testing.AllocsPerRun(5, func() {
-		if err := checkRequestParams(e.NewContext(req, rec)); err != nil {
+		if err := checkRequestParams(e.NewContext(req, rec), nil); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -164,7 +164,7 @@ func TestM71TextGuardParams_ScannerMatchesParseQuery(t *testing.T) {
 		e := echo.New()
 		req := httptest.NewRequest(http.MethodGet, "/search", nil)
 		req.URL.RawQuery = tc.raw
-		err := checkRequestParams(e.NewContext(req, httptest.NewRecorder()))
+		err := checkRequestParams(e.NewContext(req, httptest.NewRecorder()), nil)
 		if (err != nil) != tc.refused {
 			t.Errorf("%q: err = %v, want refused=%v", tc.raw, err, tc.refused)
 		}
@@ -195,8 +195,67 @@ func TestM71TextGuardParams_ScannerAgreesWithParseQuery(t *testing.T) {
 				}
 			}
 		}
-		if got := checkRawQuery(raw) != nil; got != want {
+		if got := checkRawQuery(raw, nil) != nil; got != want {
 			t.Fatalf("%q: scanner refused=%v, ParseQuery-based check refused=%v", raw, got, want)
+		}
+	}
+}
+
+// Codex R3 (Medium): a share-link password is only bcrypt-compared, never sent
+// to PostgreSQL, and links created before M66 may have one containing U+0000.
+// On the route that declares it opaque the value passes; its key, the other
+// parameters, and the same key on any other route are still checked.
+func TestM71TextGuardParams_OpaqueQueryParam(t *testing.T) {
+	e := echo.New()
+	e.Use(TextGuardParams(OpaqueQueryParam{Route: "/public/:token", Key: "password"}))
+	h := func(c echo.Context) error { return c.String(http.StatusOK, c.QueryParam("password")) }
+	e.GET("/public/:token", h)
+	e.GET("/other", h)
+	for _, tc := range []struct {
+		target string
+		want   int
+	}{
+		{"/public/tok?password=a%00b", http.StatusOK},
+		{"/public/tok?password=%FF", http.StatusOK},
+		{"/public/tok?password=a%00b&x=%00", http.StatusBadRequest},
+		{"/public/a%00b?password=ok", http.StatusBadRequest},
+		{"/other?password=a%00b", http.StatusBadRequest},
+	} {
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.target, nil))
+		if rec.Code != tc.want {
+			t.Errorf("%s: status %d, want %d (body %s)", tc.target, rec.Code, tc.want, rec.Body.String())
+		}
+		if tc.want == http.StatusOK && rec.Body.String() != mustUnescapeQuery(t, tc.target) {
+			t.Errorf("%s: handler saw %q", tc.target, rec.Body.String())
+		}
+	}
+}
+
+func mustUnescapeQuery(t *testing.T, target string) string {
+	t.Helper()
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Query().Get("password")
+}
+
+// Codex R3 (Low): above net/url's parameter cap url.ParseQuery hands handlers
+// (and the audit log) nothing, so the guard must not refuse what nobody reads;
+// at the cap it checks every pair.
+func TestM71TextGuardParams_ParameterCap(t *testing.T) {
+	build := func(pairs int) string {
+		return strings.Repeat("a=b&", pairs-1) + "z=%00"
+	}
+	for _, tc := range []struct {
+		pairs   int
+		refused bool
+	}{{10000, true}, {10001, false}} {
+		raw := build(tc.pairs)
+		vals, _ := url.ParseQuery(raw)
+		if got := checkRawQuery(raw, nil) != nil; got != tc.refused {
+			t.Errorf("%d pairs: refused=%v, want %v (ParseQuery returned %d keys)", tc.pairs, got, tc.refused, len(vals))
 		}
 	}
 }

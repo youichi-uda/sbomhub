@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -41,10 +42,21 @@ import (
 //
 // The response names the parameter and the reason, never the value. A query
 // key is named only when it is itself a short plain identifier.
-func TextGuardParams() echo.MiddlewareFunc {
+//
+// opaque lists query values that are never text to the database (Codex R3):
+// on that route, that key's value is not checked. Its key and every other
+// parameter still are.
+func TextGuardParams(opaque ...OpaqueQueryParam) echo.MiddlewareFunc {
+	skip := make(map[string]map[string]bool, len(opaque))
+	for _, o := range opaque {
+		if skip[o.Route] == nil {
+			skip[o.Route] = map[string]bool{}
+		}
+		skip[o.Route][o.Key] = true
+	}
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			if err := checkRequestParams(c); err != nil {
+			if err := checkRequestParams(c, skip[c.Path()]); err != nil {
 				return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 			}
 			return next(c)
@@ -52,9 +64,20 @@ func TextGuardParams() echo.MiddlewareFunc {
 	}
 }
 
+// OpaqueQueryParam names one query parameter, on one route (the route
+// template as registered, c.Path()), whose value TextGuardParams does not
+// check: a secret that is only compared or hashed and never stored or sent to
+// PostgreSQL. The share-link password is the one case: it is bcrypt-compared,
+// and a link created before M66 can have one containing U+0000.
+type OpaqueQueryParam struct {
+	Route string
+	Key   string
+}
+
 // checkRequestParams returns the first refusal (wrapping
-// validation.ErrInvalidText), or nil.
-func checkRequestParams(c echo.Context) error {
+// validation.ErrInvalidText), or nil. Values of the keys in opaque are not
+// checked.
+func checkRequestParams(c echo.Context, opaque map[string]bool) error {
 	names, values := c.ParamNames(), c.ParamValues()
 	for i, name := range names {
 		if i >= len(values) {
@@ -64,8 +87,12 @@ func checkRequestParams(c echo.Context) error {
 			return err
 		}
 	}
-	return checkRawQuery(c.Request().URL.RawQuery)
+	return checkRawQuery(c.Request().URL.RawQuery, opaque)
 }
+
+// maxQueryParams is net/url's default cap on query parameters (Go 1.26+):
+// above it url.ParseQuery decodes nothing and handlers see no parameters.
+const maxQueryParams = 10000
 
 // checkRawQuery checks every pair url.ParseQuery would decode, without
 // building url.Values (Codex R2): the guard runs before authentication, and
@@ -75,10 +102,20 @@ func checkRequestParams(c echo.Context) error {
 //
 // It sees what a handler's c.QueryParam would see: a pair url.ParseQuery
 // drops (it contains ';', or a key or value is not a valid escape) is skipped,
-// '+' decodes to a space. It does not stop at net/url's 10,000-parameter cap
-// (above which ParseQuery hands handlers nothing): checking more is harmless,
-// and a GODEBUG raising the cap must not open a gap.
-func checkRawQuery(raw string) error {
+// '+' decodes to a space. Above net/url's parameter cap the values are taken
+// from url.ParseQuery itself (Codex R3): by default it decodes nothing, so
+// nothing is refused that no handler or audit row would read, and a GODEBUG
+// urlmaxqueryparams override is honoured exactly.
+func checkRawQuery(raw string, opaque map[string]bool) error {
+	if strings.Count(raw, "&")+1 > maxQueryParams {
+		vals, _ := url.ParseQuery(raw)
+		for k, vs := range vals {
+			if err := checkQueryPair(k, vs, opaque); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	var buf []byte
 	for raw != "" {
 		var pair string
@@ -100,13 +137,33 @@ func checkRawQuery(raw string) error {
 		if !textStorable(buf[:keyLen]) {
 			return validation.CheckTextField("a query parameter name", string(buf[:keyLen]), validation.TextRule{})
 		}
-		if val := buf[keyLen:]; !textStorable(val) {
+		if val := buf[keyLen:]; !textStorable(val) && !opaque[string(buf[:keyLen])] {
 			k := string(buf[:keyLen])
 			field := "a query parameter"
 			if PlainParamName(k) {
 				field = "query parameter " + strconv.Quote(k)
 			}
 			return validation.CheckTextField(field, string(val), validation.TextRule{})
+		}
+	}
+	return nil
+}
+
+// checkQueryPair checks one decoded key and its values.
+func checkQueryPair(key string, vals []string, opaque map[string]bool) error {
+	if err := validation.CheckTextField("a query parameter name", key, validation.TextRule{}); err != nil {
+		return err
+	}
+	if opaque[key] {
+		return nil
+	}
+	field := "a query parameter"
+	if PlainParamName(key) {
+		field = "query parameter " + strconv.Quote(key)
+	}
+	for _, v := range vals {
+		if err := validation.CheckTextField(field, v, validation.TextRule{}); err != nil {
+			return err
 		}
 	}
 	return nil
