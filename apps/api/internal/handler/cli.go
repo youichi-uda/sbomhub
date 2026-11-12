@@ -111,6 +111,13 @@ func (h *CLIHandler) Upload(c echo.Context) error {
 		})
 	}
 
+	// M71: the form is read directly (not through c.Bind), so its values get
+	// the text check the binder would have applied. The SBOM file part is
+	// binary and is not inspected.
+	if err := checkFormText(c); err != nil {
+		return respondBindError(c, err)
+	}
+
 	// Get project name from form
 	projectName := c.FormValue("project_name")
 	if projectName == "" {

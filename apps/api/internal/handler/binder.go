@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 
+	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
@@ -101,4 +104,74 @@ func isRefusedBody(err error) bool {
 	}
 	var he *echo.HTTPError
 	return errors.As(err, &he) && he.Code == http.StatusRequestEntityTooLarge
+}
+
+// TextGuardBinder is the API's echo.Binder (cmd/server sets e.Binder). It is
+// echo's DefaultBinder with one addition: before binding, an
+// application/x-www-form-urlencoded or multipart/form-data body has its
+// field names and values checked like a JSON body (checkFormText), so a form
+// value carrying U+0000 or invalid UTF-8 is refused with the same 400
+// ("form field \"x\" ...") instead of reaching PostgreSQL (M71).
+//
+// Path parameters and the query string, which DefaultBinder also binds, are
+// checked for every request by middleware.TextGuardParams; JSON bodies by
+// TextGuardJSONSerializer. Like the serializer, this runs only when a handler
+// calls c.Bind, i.e. after authentication.
+type TextGuardBinder struct {
+	echo.DefaultBinder
+}
+
+// NewTextGuardBinder returns the binder cmd/server installs.
+func NewTextGuardBinder() *TextGuardBinder { return &TextGuardBinder{} }
+
+// Bind implements echo.Binder.
+func (b *TextGuardBinder) Bind(i interface{}, c echo.Context) error {
+	if err := checkFormText(c); err != nil {
+		return err
+	}
+	return b.DefaultBinder.Bind(i, c)
+}
+
+// checkFormText checks the field names and values of a form body. A handler
+// that reads a form without c.Bind (c.FormValue / c.FormFile: CLIHandler.Upload)
+// calls it first. Non-form requests, and bodyless ones, pass untouched.
+//
+// Only value parts are text. A multipart file part (one with a filename) is
+// in MultipartForm.File, not in the values checked here, so binary file
+// content — an SBOM upload — is never inspected. The form is parsed exactly as
+// echo would parse it for the handler (c.FormParams, cached on the request),
+// so nothing is read twice. A body that does not parse is left for the
+// handler's own read to report.
+func checkFormText(c echo.Context) error {
+	req := c.Request()
+	if req.ContentLength == 0 {
+		return nil
+	}
+	ctype := req.Header.Get(echo.HeaderContentType)
+	if !strings.HasPrefix(ctype, echo.MIMEApplicationForm) && !strings.HasPrefix(ctype, echo.MIMEMultipartForm) {
+		return nil
+	}
+	params, err := c.FormParams()
+	if err != nil {
+		var he *echo.HTTPError
+		if errors.As(err, &he) && he.Code == http.StatusRequestEntityTooLarge {
+			return he
+		}
+		return nil
+	}
+	for key, vals := range params {
+		if terr := validation.CheckTextField("a form field name", key, validation.TextRule{}); terr != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, terr.Error()).SetInternal(terr)
+		}
+		field := "a form field"
+		if middleware.PlainParamName(key) {
+			field = "form field " + strconv.Quote(key)
+		}
+		for _, v := range vals {
+			if terr := validation.CheckTextField(field, v, validation.TextRule{}); terr != nil {
+				return echo.NewHTTPError(http.StatusBadRequest, terr.Error()).SetInternal(terr)
+			}
+		}
+	}
+	return nil
 }

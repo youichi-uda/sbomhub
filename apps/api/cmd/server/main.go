@@ -1072,6 +1072,10 @@ func main() {
 	// store them, so they used to surface as a 500 at the INSERT). See
 	// handler.TextGuardJSONSerializer.
 	e.JSONSerializer = handler.NewTextGuardJSONSerializer()
+	// M71: the same check for form / multipart values bound by c.Bind
+	// (handler.TextGuardBinder) and, below, for path parameters and the query
+	// string of every request (appmw.TextGuardParams).
+	e.Binder = handler.NewTextGuardBinder()
 
 	// Access log via slog (echo's middleware.Logger is deprecated). Same
 	// fields and error-handler timing as before, but the query string is no
@@ -1080,6 +1084,10 @@ func main() {
 	// text; see appmw.AccessLog.
 	e.Use(appmw.AccessLog(slog.Default()))
 	e.Use(middleware.Recover())
+	// M71: refuse U+0000 / invalid UTF-8 in path parameters and the query
+	// string with 400 before any group middleware (auth, TenantTx, audit) or
+	// handler sees them; PostgreSQL cannot store them (they used to be 500s).
+	e.Use(appmw.TextGuardParams())
 	// SECURITY: Limit request body size to prevent memory exhaustion DoS attacks
 	// 10MB should be sufficient for most SBOM files while preventing abuse
 	e.Use(middleware.BodyLimit("10M"))
