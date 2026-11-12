@@ -59,6 +59,7 @@ import {
   type ReportEditFormValues,
   type ReportSubmitFormValues,
 } from "@/lib/form-schemas/cra-report";
+import { formatTimestamp } from "@/lib/format-date";
 
 const DRAFT_TRUNCATE_LENGTH = 800;
 
@@ -217,21 +218,6 @@ function deadlineLabelKey(status: CRAReportDeadlineStatus): string {
     default:
       return status;
   }
-}
-
-/**
- * Format an RFC3339 timestamp (awareness_time) for a muted read-only line.
- * Mirrors submission-timeline.tsx's formatSubmittedAt: falls back to the raw
- * string if unparseable so a malformed value stays inspectable rather than
- * rendering "Invalid Date".
- */
-function formatTimestamp(value: string, locale: string): string {
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString(locale, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
 }
 
 /**

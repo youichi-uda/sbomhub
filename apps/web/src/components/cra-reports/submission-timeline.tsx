@@ -22,23 +22,10 @@ import { Clock } from "lucide-react";
 
 import { CRASubmission } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
+import { formatTimestamp } from "@/lib/format-date";
 
 export interface SubmissionTimelineProps {
   submissions: CRASubmission[];
-}
-
-/**
- * Format an RFC3339 timestamp for display. Falls back to the raw string if
- * the value is unparseable so a malformed backend value stays inspectable
- * instead of rendering "Invalid Date".
- */
-function formatSubmittedAt(value: string, locale: string): string {
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleString(locale, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
 }
 
 export function SubmissionTimeline({ submissions }: SubmissionTimelineProps) {
@@ -84,7 +71,7 @@ export function SubmissionTimeline({ submissions }: SubmissionTimelineProps) {
                   {s.authority}
                 </span>
                 <span className="text-muted-foreground">
-                  {formatSubmittedAt(s.submitted_at, locale)}
+                  {formatTimestamp(s.submitted_at, locale)}
                 </span>
               </div>
               {s.reference_number ? (
