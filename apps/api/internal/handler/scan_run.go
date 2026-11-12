@@ -64,6 +64,17 @@ func runSBOMScan(ctx context.Context, db *sql.DB, tenantID, sbomID uuid.UUID, de
 
 	started := time.Now()
 	var out scanOutcome
+	// M72: at most SBOMHUB_SCAN_TENANT_CONCURRENCY scans of one tenant run at
+	// once, so one tenant's burst of scans cannot crowd out the others. The
+	// wait counts against this scan's own deadline.
+	release, err := service.AcquireTenantScanSlot(sctx, tenantID, sbomID)
+	if err != nil {
+		reasons := service.ScanReasons(err)
+		out.markers = append(out.markers, service.ScanFailureMarker("scan", reasons))
+		out.reasons = reasons
+		return out
+	}
+	defer release()
 	for _, st := range steps {
 		if st.scanner == nil {
 			continue

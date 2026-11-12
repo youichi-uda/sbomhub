@@ -518,6 +518,13 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("vulnerability scan deadline", "deadline", scanDeadline.String())
+	// M72: per-tenant scan concurrency.
+	scanTenantConcurrency, err := cfg.ScanTenantConcurrency()
+	if err != nil {
+		slog.Error("Refusing to start", "error", err)
+		os.Exit(1)
+	}
+	service.SetTenantScanConcurrency(scanTenantConcurrency)
 
 	// SECURITY (P0 #2 / Trust Rescue 9.1.1): Migrations and runtime use
 	// distinct DB roles. We open a short-lived migrator connection here, run
@@ -557,7 +564,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// M72: every Redis caller goes through one circuit breaker.
+	// M72: every Redis caller goes through the circuit breakers (one per
+	// caller class, internal/redis.BreakerClass).
 	breakerThreshold, breakerCooldown, err := cfg.RedisBreaker()
 	if err != nil {
 		slog.Error("Refusing to start", "error", err)
