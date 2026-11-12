@@ -674,8 +674,9 @@ type CVEInfo struct {
 	// and UPDATE — now carries nil, matching what
 	// service/jvn.go::convertJVNItemToVulnerability already did for JVN.
 	CVSSScore *float64
-	// CVSSVersion is the version CVSSScore was taken from (cvss.Select, M67);
-	// nil when unscored.
+	// CVSSVersion is the version of the assessment cvss.Select chose (M67).
+	// nil when no usable assessment was chosen; it can be set with a nil
+	// CVSSScore (an assessment that states a rating without a usable score).
 	CVSSVersion *string
 	// Canonical is true when the page this record came from was answered by
 	// NVD itself — no proxy, no redirect away from cveSyncAPIURL (M67,
