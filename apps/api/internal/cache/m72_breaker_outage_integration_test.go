@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -202,4 +203,52 @@ func TestM72BreakerOutageLatency(t *testing.T) {
 		}
 	}
 	t.Log(report.String())
+}
+
+// Codex M72 R11 Medium-2: a distro cache lookup is ONE Redis command, so a
+// fast first part cannot reset the breaker's count while the second part
+// keeps timing out.
+func TestM72DistroGetIsOneCommand(t *testing.T) {
+	url := os.Getenv("REDIS_URL")
+	if url == "" {
+		t.Skip("requires REDIS_URL")
+	}
+	opts, err := sbomredis.Options(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := goredis.NewClient(opts)
+	defer client.Close()
+	var n atomic.Int64
+	client.AddHook(countHook{&n})
+	c := NewDistroCache(client)
+	ctx := context.Background()
+	gen := c.NextGeneration(ctx)
+	if _, err := c.Set(ctx, "src", "Debian:12", "m72pkg", DistroCacheEntry{FetchedAt: time.Now(), Payload: []byte(`{}`), DataModified: "2026-01-01T00:00:00Z", Generation: gen}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Get(ctx, "src", "Debian:12", "m72pkg"); err != nil { // loads the script
+		t.Fatal(err)
+	}
+	n.Store(0)
+	e, err := c.Get(ctx, "src", "Debian:12", "m72pkg")
+	if err != nil || e == nil {
+		t.Fatalf("get: %v %v", e, err)
+	}
+	if got := n.Load(); got != 1 {
+		t.Fatalf("a distro cache lookup took %d Redis commands, want 1", got)
+	}
+}
+
+type countHook struct{ n *atomic.Int64 }
+
+func (h countHook) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+func (h countHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
+	return func(ctx context.Context, cmd goredis.Cmder) error { h.n.Add(1); return next(ctx, cmd) }
+}
+func (h countHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []goredis.Cmder) error {
+		h.n.Add(int64(len(cmds)))
+		return next(ctx, cmds)
+	}
 }

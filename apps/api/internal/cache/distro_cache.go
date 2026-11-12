@@ -101,6 +101,13 @@ redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
 redis.call('PEXPIRE', KEYS[2], ARGV[3])
 return 1`)
 
+// distroGet reads an entry (at most ARGV[1]+1 bytes) and its fence in one
+// command: {payload ("" when absent), fence (nil when absent)}.
+var distroGet = redis.NewScript(`
+local d = redis.call('GETRANGE', KEYS[1], 0, ARGV[1])
+local lg = redis.call('GET', KEYS[2])
+return {d, lg}`)
+
 // DistroCacheKey is the Redis key of (source, ecosystem, name). source is the
 // data source's endpoint (SBOMHUB_OSV_URL): two deployments pointed at
 // different mirrors share no entry (Codex M70 R2 Medium-6). A trailing '/' is
@@ -128,30 +135,34 @@ func (c *DistroCache) Get(ctx context.Context, source, ecosystem, name string) (
 	defer cancel()
 	// One bounded read (Codex M70 R4 Medium-4): GETRANGE returns at most
 	// DistroCacheMaxBytes+1 bytes whatever the stored value is, and a value
-	// longer than the bound is a miss.
+	// longer than the bound is a miss. The payload and its fence are read in
+	// ONE command (M72, Codex M72 R11 Medium-2): as two, a fast payload read
+	// reset the Redis circuit breaker's failure count every time before the
+	// fence read timed out, so a cache failing every lookup never opened it.
 	key := DistroCacheKey(source, ecosystem, name)
-	data, err := c.client.GetRange(ctx, key, 0, DistroCacheMaxBytes).Bytes()
-	if err != nil && err != redis.Nil {
-		return nil, fmt.Errorf("redis getrange error: %w", err)
+	res, err := distroGet.Run(ctx, c.client, []string{key, distroLatestGenKey(key)}, DistroCacheMaxBytes).Slice()
+	if err != nil {
+		return nil, fmt.Errorf("redis distro get error: %w", err)
 	}
+	if len(res) != 2 {
+		return nil, fmt.Errorf("redis distro get: unexpected reply of %d values", len(res))
+	}
+	data, _ := res[0].(string)
 	if len(data) == 0 || len(data) > DistroCacheMaxBytes {
 		return nil, nil
 	}
 	var e DistroCacheEntry
-	if err := json.Unmarshal(data, &e); err != nil || e.FetchedAt.IsZero() || len(e.Payload) == 0 {
+	if err := json.Unmarshal([]byte(data), &e); err != nil || e.FetchedAt.IsZero() || len(e.Payload) == 0 {
 		return nil, nil
 	}
 	// Kept by revision, but superseded when a LATER fetch completed with
 	// other data (a withdrawal lowers the revision): then it is a miss and
 	// the package is read again (Codex M70 R43 High-1).
-	lg, err := c.client.Get(ctx, distroLatestGenKey(key)).Result()
-	if err == redis.Nil {
+	lg, ok := res[1].(string)
+	if !ok {
 		// No fence (evicted, or expired): whether a later fetch saw other
 		// data is unknown, so it is a miss (Codex M70 R44 High-1).
 		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("redis get error: %w", err)
 	}
 	if lg > e.Generation {
 		return nil, nil
