@@ -271,10 +271,11 @@ func TestM72R4_RejoinKeepsTheGroupsInterruptions(t *testing.T) {
 	keys := scanStatusKeys(id)
 	rdb.HDel(context.Background(), keys[0], "l:"+genString(g))
 	rdb.HSet(context.Background(), keys[0], "lost_dropped", time.Now().UnixMilli())
-	live.heartbeatPass() // inactive -> rejoin
-	if st, _, _ := detail(reader, id, live); st != ScanStateRunning {
-		t.Fatalf("after rejoin: %s, want running", st)
-	}
+	live.heartbeatPass() // inactive -> rejoin (written out of line since R20)
+	waitFor(t, "the rejoin", func() bool {
+		st, _, _ := detail(reader, id, live)
+		return st == ScanStateRunning
+	})
 	live.Finish(id, g, nil, "")
 	st, msg, _ := detail(reader, id, live)
 	if st != ScanStateFailed || msg != "scan: scan failed (interrupted)" {

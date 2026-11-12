@@ -385,8 +385,10 @@ func (t *ScanTracker) GetDetailVersion(sbomID uuid.UUID) (ScanState, string, []s
 			slog.Debug("scan status: shared store unavailable, answering from this process", "sbom_id", sbomID, "error", err)
 			return t.localVersioned(sbomID, true)
 		case !view.found && t.pendingShared(sbomID):
-			// Its own writes have not landed yet: memory is newest.
-			return t.localVersioned(sbomID, false)
+			// Its own writes have not landed yet. Memory is newer, but a
+			// local "completed" could hide another replica's run that was in
+			// the missing entry (Codex M72 R20 High-2): it reads running.
+			return t.localPending(sbomID)
 		case !view.found:
 			// No entry (never written, expired, or evicted): a local
 			// "completed" may be stale — another replica's run would be in
@@ -395,12 +397,23 @@ func (t *ScanTracker) GetDetailVersion(sbomID uuid.UUID) (ScanState, string, []s
 		case view.state == ScanStateRunning:
 			return view.state, "", nil, view.version
 		case t.pendingShared(sbomID):
-			return t.localVersioned(sbomID, false)
+			return t.localPending(sbomID)
 		}
 		return view.state, view.errMsg, view.reasons, view.version
 	}
 	// Transitions kept racing the read: the safe local answer.
 	return t.localVersioned(sbomID, true)
+}
+
+// localPending is the local answer while this process's writes of sbomID are
+// pending: a local "completed" reads running until the writes land and Redis
+// answers for every replica (Codex M72 R20 High-2). failed is safe.
+func (t *ScanTracker) localPending(sbomID uuid.UUID) (ScanState, string, []string, string) {
+	state, msg, reasons, version := t.localVersioned(sbomID, false)
+	if state == ScanStateCompleted {
+		return ScanStateRunning, "", nil, version
+	}
+	return state, msg, reasons, version
 }
 
 // localVersioned is this process's answer with its entry revision as the

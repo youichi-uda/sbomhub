@@ -452,10 +452,13 @@ func (t *ScanTracker) heartbeatPass() bool {
 			// Not active in Redis although alive (its lease ran out and its
 			// identity was dropped, or a new group started): rejoin the
 			// current group, keeping its outcomes (Codex M72 R4 High-3).
-			// One pending rejoin per run (Codex M72 R14 Medium-4).
+			// One rejoin in flight per run (Codex M72 R14 Medium-4), written
+			// at once rather than behind the SBOM's backlog (Codex M72 R20
+			// High-1: an evicted key must see its live runs again within the
+			// young-key window).
 			if lr := t.live[k]; lr != nil && !lr.rejoinPending {
 				lr.rejoinPending = true
-				t.enqueueLocked(k.sbom, &sharedEvent{kind: evRejoin, gen: k.gen})
+				go t.rejoinNow(k, lr)
 			}
 		}
 		t.qMu.Unlock()
@@ -473,6 +476,25 @@ func (t *ScanTracker) kickQueues() {
 			t.startDrainLocked(id, q)
 		}
 	}
+}
+
+// rejoinNow writes run k's rejoin out of line. If the run finished
+// meanwhile (its finish may have landed first), its removal is queued again
+// behind that finish, as for a late intent.
+func (t *ScanTracker) rejoinNow(k runKey, lr *liveRun) {
+	err := t.shared.rejoin(context.Background(), k.sbom, k.gen)
+	t.qMu.Lock()
+	defer t.qMu.Unlock()
+	lr.rejoinPending = false
+	if err != nil {
+		t.logSharedError("scan status: rejoin failed; retrying on the next heartbeat", k.sbom, err)
+		return
+	}
+	if t.live[k] != lr {
+		t.enqueueLocked(k.sbom, &sharedEvent{kind: evFinish, gen: k.gen})
+		return
+	}
+	lr.acked = true
 }
 
 // pendingShared reports whether this process has writes of sbomID that have

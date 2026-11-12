@@ -297,8 +297,10 @@ func newStatusScripts(maxRunAge time.Duration) *statusScripts {
 }
 
 // scanStatusYoung: a status key younger than this does not read completed
-// (one heartbeat plus slack; see publish in scanStatusLua).
-const scanStatusYoung = ScanStatusHeartbeat + 15*time.Second
+// (see publish in scanStatusLua): two heartbeats plus slack, so a live run of
+// an evicted key rejoins in time even if one renewal attempt fails (its
+// rejoin is written out of line, Codex M72 R20 High-1).
+const scanStatusYoung = 2*ScanStatusHeartbeat + 15*time.Second
 
 func newStatusScriptsYoung(maxRunAge, young time.Duration) *statusScripts {
 	prelude := fmt.Sprintf("local INTERRUPTED_MSG = %q\nlocal INTERRUPTED_REASON = %q\nlocal MAX_LOST = %d\nlocal MAX_RUN_AGE = %d\nlocal YOUNG = %d\n",

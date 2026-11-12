@@ -1227,3 +1227,69 @@ func TestM72R19_LateIntentIsCleanedUp(t *testing.T) {
 		t.Fatal("a late intent left the finished run active in the store")
 	}
 }
+
+// inactiveStore reports every run inactive on renewal and fails finishes
+// (a backlog that does not drain); it records rejoins.
+type inactiveStore struct {
+	*memStore
+	rejoins atomic.Int32
+}
+
+func (s *inactiveStore) heartbeatMany(_ context.Context, runs []runKey) ([]bool, error) {
+	return make([]bool, len(runs)), nil
+}
+
+func (s *inactiveStore) finish(context.Context, uuid.UUID, uint64, string, []string) (bool, error) {
+	return false, errStoreDown
+}
+
+func (s *inactiveStore) rejoin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	s.rejoins.Add(1)
+	return s.memStore.rejoin(ctx, id, gen)
+}
+
+// Codex M72 R20 High-1: a live run found missing (its key was evicted)
+// rejoins at once, not behind its SBOM's backlog.
+func TestM72R20_RejoinDoesNotWaitBehindTheBacklog(t *testing.T) {
+	store := &inactiveStore{memStore: newMemStore()}
+	a := trackerOn(store, time.Hour)
+	id := uuid.New()
+	live := a.Begin(id)
+	settle(t, a, id)
+	a.Finish(id, a.Begin(id), nil, "") // its finish keeps failing: a backlog
+	waitFor(t, "the backlog to stall", func() bool {
+		a.qMu.Lock()
+		defer a.qMu.Unlock()
+		q := a.queues[id]
+		return q != nil && len(q.events) > 0 && !q.draining
+	})
+	_ = live
+	a.heartbeatPass()
+	waitFor(t, "the rejoin", func() bool { return store.rejoins.Load() > 0 })
+}
+
+// Codex M72 R20 High-2: while this process's writes of an SBOM are pending,
+// its local "completed" is never the answer (another replica's run may be in
+// the entry that is missing or not yet updated).
+func TestM72R20_PendingWritesNeverYieldLocalCompleted(t *testing.T) {
+	store := newMemStore()
+	a := trackerOn(store, time.Hour)
+	id := uuid.New()
+	gen := a.Begin(id)
+	settle(t, a, id)
+	store.setDown(true)
+	a.Finish(id, gen, nil, "") // pending
+	waitFor(t, "the finish to stall", func() bool {
+		a.qMu.Lock()
+		defer a.qMu.Unlock()
+		q := a.queues[id]
+		return q != nil && !q.draining
+	})
+	store.setDown(false)
+	store.mu.Lock()
+	delete(store.state, id) // the entry was evicted
+	store.mu.Unlock()
+	if st, _, _ := a.GetDetail(id); st == ScanStateCompleted {
+		t.Fatal("local completed returned while its finish is pending and the shared entry is missing")
+	}
+}
