@@ -205,6 +205,9 @@ export function nextConfigHeaders({ reportOnly }) {
       has: [{ type: "header", key: "sec-fetch-dest", value: "(document|iframe|frame|embed|object)" }],
       headers: csp,
     },
+    // ...or by a client that sends no Fetch Metadata at all (Codex M71 R3
+    // Low). Such a client is not a current browser loading a worker.
+    { source: "/_next/static/:path*", missing: [{ type: "header", key: "sec-fetch-dest" }], headers: csp },
   ];
 }
 

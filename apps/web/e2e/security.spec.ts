@@ -391,6 +391,9 @@ test.describe('Security Tests', () => {
             const doc = await request.get('/_next/static/does-not-exist-m71.js', { headers: { 'sec-fetch-dest': 'document' } });
             expect(doc.status()).toBe(404);
             expect(doc.headers()[CSP_HEADER]).toBe("default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+            // No Fetch Metadata at all (older clients): treated as a document.
+            const bare = await request.get('/_next/static/does-not-exist-m71.js');
+            expect(bare.headers()[CSP_HEADER]).toBe("default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
             const worker = await request.get('/_next/static/does-not-exist-m71.js', { headers: { 'sec-fetch-dest': 'worker' } });
             expect(worker.headers()[CSP_HEADER]).toBeUndefined();
 

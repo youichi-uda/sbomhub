@@ -239,9 +239,9 @@ describe("paths the proxy never sees get a no-script CSP from next.config (Codex
   const toRe = (source) =>
     // path-to-regexp subset used here: ":path*" and ":path(<regex>)"
     new RegExp("^" + source.replace(/:path\*/g, ".*").replace(/:path\((.*)\)$/, "$1") + "$");
-  // Unconditional rules only; the /_next/static rule is gated on a request
+  // Unconditional rules only; the /_next/static rules are gated on a request
   // header (pinned separately below).
-  const covered = (p) => cspRules.some((r) => !r.has && toRe(r.source).test(p));
+  const covered = (p) => cspRules.some((r) => !r.has && !r.missing && toRe(r.source).test(p));
 
   test("static headers on every route", () => {
     assert.deepEqual(rules[0], { source: "/:path*", headers: buildSecurityHeaders() });
@@ -266,6 +266,11 @@ describe("paths the proxy never sees get a no-script CSP from next.config (Codex
     const re = new RegExp(`^${r.has[0].value}$`);
     for (const d of ["document", "iframe"]) assert.ok(re.test(d), d);
     for (const d of ["worker", "sharedworker", "serviceworker", "script", "style", "image", "empty"]) assert.ok(!re.test(d), d);
+  });
+  test("/_next/static also gets it when the client sends no Fetch Metadata (Codex M71 R3 Low)", () => {
+    const r = cspRules.find((x) => x.source === "/_next/static/:path*" && x.missing);
+    assert.ok(r, "rule present");
+    assert.deepEqual(r.missing, [{ type: "header", key: "sec-fetch-dest" }]);
   });
   test("report-only switch applies to the fallback too", () => {
     const ro = nextConfigHeaders({ reportOnly: true });
