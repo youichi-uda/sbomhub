@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -417,4 +418,34 @@ func countLost(t *testing.T, rdb *redis.Client, id uuid.UUID) int64 {
 		}
 	}
 	return n
+}
+
+// Codex M72 R12 Medium-2: a lease renewal pass does not load its script every
+// time (one SCRIPT LOAD per pass shared the pass's deadline and reset the
+// breaker's count); it loads only after NOSCRIPT.
+func TestM72R12_RenewalDoesNotReloadItsScript(t *testing.T) {
+	rdb := m72Redis(t)
+	var single atomic.Int64
+	rdb.AddHook(singleCmdHook{&single})
+	a := process(rdb, 0, time.Hour)
+	for i := 0; i < 5; i++ {
+		a.Begin(uuid.New())
+	}
+	a.heartbeatPass() // may load once
+	single.Store(0)
+	a.heartbeatPass()
+	if n := single.Load(); n != 0 {
+		t.Fatalf("a renewal pass issued %d non-pipelined commands (a script load), want 0", n)
+	}
+}
+
+// singleCmdHook counts commands sent outside a pipeline.
+type singleCmdHook struct{ n *atomic.Int64 }
+
+func (h singleCmdHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (h singleCmdHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error { h.n.Add(1); return next(ctx, cmd) }
+}
+func (h singleCmdHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
 }

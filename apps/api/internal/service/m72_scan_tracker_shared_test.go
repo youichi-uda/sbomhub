@@ -892,3 +892,42 @@ func TestM72R8_RecoveredQueuesAllDrainAfterOnePass(t *testing.T) {
 		settle(t, a, id)
 	}
 }
+
+// gaugeStore tracks how many store calls run at once.
+type gaugeStore struct {
+	*memStore
+	cur, peak atomic.Int32
+	delay     time.Duration
+}
+
+func (g *gaugeStore) begin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	n := g.cur.Add(1)
+	for {
+		p := g.peak.Load()
+		if n <= p || g.peak.CompareAndSwap(p, n) {
+			break
+		}
+	}
+	time.Sleep(g.delay)
+	g.cur.Add(-1)
+	return g.memStore.begin(ctx, id, gen)
+}
+
+// Codex M72 R12 Medium-4: the first drains of many SBOMs share the bounded
+// worker pool too, so a burst cannot start one Redis call per SBOM at once.
+func TestM72R12_InitialDrainsAreBounded(t *testing.T) {
+	store := &gaugeStore{memStore: newMemStore(), delay: 50 * time.Millisecond}
+	a := trackerOn(store, time.Hour)
+	a.beginWait = time.Millisecond
+	ids := make([]uuid.UUID, 200)
+	for i := range ids {
+		ids[i] = uuid.New()
+		a.Begin(ids[i])
+	}
+	for _, id := range ids {
+		settle(t, a, id)
+	}
+	if p := store.peak.Load(); p > maxDrainWorkers {
+		t.Fatalf("%d store calls at once, want <= %d", p, maxDrainWorkers)
+	}
+}

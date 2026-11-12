@@ -521,19 +521,33 @@ func (s *redisScanStatusStore) merge(ctx context.Context, sbomID uuid.UUID, m *m
 }
 
 func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey) ([]bool, error) {
-	ctx, cancel := s.opCtx(ctx)
-	defer cancel()
-	if err := s.scripts.heartbeat.Load(ctx, s.client).Err(); err != nil {
-		return nil, err
+	// EVALSHA in one pipeline; the script is loaded only after NOSCRIPT, each
+	// round trip under its own bound (Codex M72 R12 Medium-2: loading it every
+	// pass shared the pass's deadline, and its success reset the breaker's
+	// count each time).
+	run := func() ([]*redis.Cmd, error) {
+		octx, cancel := s.opCtx(ctx)
+		defer cancel()
+		cmds := make([]*redis.Cmd, len(runs))
+		_, err := s.client.Pipelined(octx, func(p redis.Pipeliner) error {
+			for i, r := range runs {
+				cmds[i] = s.scripts.heartbeat.EvalSha(octx, p, scanStatusKeys(r.sbom),
+					genString(r.gen), s.lease.Milliseconds(), s.ttl.Milliseconds())
+			}
+			return nil
+		})
+		return cmds, err
 	}
-	cmds := make([]*redis.Cmd, len(runs))
-	_, err := s.client.Pipelined(ctx, func(p redis.Pipeliner) error {
-		for i, r := range runs {
-			cmds[i] = s.scripts.heartbeat.EvalSha(ctx, p, scanStatusKeys(r.sbom),
-				genString(r.gen), s.lease.Milliseconds(), s.ttl.Milliseconds())
+	cmds, err := run()
+	if err != nil && redis.HasErrorPrefix(err, "NOSCRIPT") {
+		lctx, cancel := s.opCtx(ctx)
+		lerr := s.scripts.heartbeat.Load(lctx, s.client).Err()
+		cancel()
+		if lerr != nil {
+			return nil, lerr
 		}
-		return nil
-	})
+		cmds, err = run()
+	}
 	if err != nil {
 		return nil, err
 	}

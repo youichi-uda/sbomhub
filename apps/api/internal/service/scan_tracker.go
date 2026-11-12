@@ -67,7 +67,10 @@ type ScanTracker struct {
 	// order.
 	queues map[uuid.UUID]*sbomQueue
 	// live: this process's active runs (lease renewal), with their start.
-	live       map[runKey]*liveRun
+	live map[runKey]*liveRun
+	// ready: queues waiting for a drain worker; workers: running workers.
+	ready      []uuid.UUID
+	workers    int
 	queueCap   int           // maxQueuedWrites; smaller in tests
 	beginWait  time.Duration // beginWait; shorter in tests
 	hbActive   bool

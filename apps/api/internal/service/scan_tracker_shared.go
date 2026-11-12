@@ -102,8 +102,7 @@ func (t *ScanTracker) enqueueLocked(sbomID uuid.UUID, ev *sharedEvent) {
 	ev.done = make(chan struct{})
 	q.events = append(q.events, ev)
 	if !q.draining {
-		q.draining = true
-		go t.drain(sbomID)
+		t.startDrainLocked(sbomID, q)
 	}
 	t.ensureHeartbeatLocked()
 }
@@ -135,6 +134,34 @@ func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedE
 	// ev itself is never queued: a Begin waiting on it waits on the merge.
 	ev.at = tail.at
 	ev.done = tail.done
+}
+
+// startDrainLocked hands sbomID's queue to the drain workers: at most
+// maxDrainWorkers drain at once, process-wide, whether a queue's first write
+// or a retry (Codex M72 R12 Medium-4). t.qMu is held.
+func (t *ScanTracker) startDrainLocked(sbomID uuid.UUID, q *sbomQueue) {
+	q.draining = true
+	t.ready = append(t.ready, sbomID)
+	if t.workers < maxDrainWorkers {
+		t.workers++
+		go t.drainWorker()
+	}
+}
+
+// drainWorker drains ready queues until none is left.
+func (t *ScanTracker) drainWorker() {
+	for {
+		t.qMu.Lock()
+		if len(t.ready) == 0 {
+			t.workers--
+			t.qMu.Unlock()
+			return
+		}
+		id := t.ready[0]
+		t.ready = t.ready[1:]
+		t.qMu.Unlock()
+		t.drain(id)
+	}
 }
 
 // drain applies sbomID's queued writes in order until the queue is empty or a
@@ -322,21 +349,7 @@ func (t *ScanTracker) heartbeatPass() bool {
 	}
 	slices.SortFunc(stalled, func(x, y uuid.UUID) int { return t.queues[x].lastWrite.Compare(t.queues[y].lastWrite) })
 	for _, id := range stalled {
-		t.queues[id].draining = true
-	}
-	if len(stalled) > 0 {
-		work := make(chan uuid.UUID, len(stalled))
-		for _, id := range stalled {
-			work <- id
-		}
-		close(work)
-		for range min(len(stalled), maxDrainWorkers) {
-			go func() {
-				for id := range work {
-					t.drain(id)
-				}
-			}()
-		}
+		t.startDrainLocked(id, t.queues[id])
 	}
 	var renew []runKey
 	for k, lr := range t.live {
@@ -388,8 +401,7 @@ func (t *ScanTracker) kickQueues() {
 	defer t.qMu.Unlock()
 	for id, q := range t.queues {
 		if len(q.events) > 0 && !q.draining {
-			q.draining = true
-			go t.drain(id)
+			t.startDrainLocked(id, q)
 		}
 	}
 }
