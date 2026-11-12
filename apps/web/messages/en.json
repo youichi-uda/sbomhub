@@ -1542,5 +1542,28 @@
     "lastFireError": "Error",
     "autoTriggerTitle": "M11-4 limitation",
     "autoTriggerNote": "Auto-trigger on SBOM ingest is not yet implemented (M12 follow-up). The test-fire button verifies the configuration."
+  },
+  "MatchMethod": {
+    "distroAffected": "Affected per distribution",
+    "distroAffectedUpgrade": "Affected per distribution — upgrade to {fixed}",
+    "distroUnfixed": "Affected per distribution — no fix released",
+    "distroFixed": "Fixed by distribution — review",
+    "highConfidenceHint": "High confidence: the distribution's own data says the installed package version is affected.",
+    "distroFixedHint": "The distribution's data says the installed version already contains the fix. This finding is still open and still counted until a person reviews the evidence.",
+    "distroFixedReview": "Not resolved automatically. The distribution's data says the installed version already contains the fix, but this finding stays open and counted. Check the evidence below; if it holds, record a VEX statement (not_affected) yourself.",
+    "showEvidence": "Show evidence",
+    "hideEvidence": "Hide evidence",
+    "noEvidence": "No evidence was recorded for this label.",
+    "source": "Source",
+    "release": "Release",
+    "basis": "Basis",
+    "basisRelease": "The data names this release",
+    "basisLaterReleases": "Inferred from later releases",
+    "package": "Package",
+    "installed": "Installed",
+    "fixed": "Fixed version",
+    "fetchedAt": "Fetched",
+    "records": "OSV records",
+    "laterReleasesCaveat": "{release} is an end-of-life Debian release that the distribution data no longer lists. This verdict was inferred from later releases ({releases}), following Debian's rule that a release without its own note is fixed at the later fix version. Confirm it before relying on it."
   }
 }

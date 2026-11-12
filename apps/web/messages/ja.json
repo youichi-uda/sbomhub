@@ -1542,5 +1542,28 @@
     "lastFireError": "エラー",
     "autoTriggerTitle": "M11-4 制限事項",
     "autoTriggerNote": "現状、SBOM 取り込み時の自動発火は未実装です (M12 で対応)。テスト送信ボタンで設定検証は可能です。"
+  },
+  "MatchMethod": {
+    "distroAffected": "ディストリ判定: 影響あり",
+    "distroAffectedUpgrade": "ディストリ判定: 影響あり — {fixed} へ更新",
+    "distroUnfixed": "ディストリ判定: 影響あり (修正未提供)",
+    "distroFixed": "ディストリで修正済み — 要確認",
+    "highConfidenceHint": "確度: 高。ディストリビューション自身のデータで、導入中のパッケージ版が影響を受けると判定されています。",
+    "distroFixedHint": "ディストリビューションのデータでは、導入中の版に修正が含まれています。人が根拠を確認するまで、この検出は未解決のまま件数に含まれます。",
+    "distroFixedReview": "自動では解決扱いにしません。ディストリビューションのデータでは導入中の版に修正が含まれていますが、この検出は未解決のまま件数に含まれます。下の根拠を確認し、妥当であればご自身で VEX (not_affected) を登録してください。",
+    "showEvidence": "根拠を表示",
+    "hideEvidence": "根拠を隠す",
+    "noEvidence": "このラベルの根拠は記録されていません。",
+    "source": "データ元",
+    "release": "リリース",
+    "basis": "判定根拠",
+    "basisRelease": "このリリースのデータ",
+    "basisLaterReleases": "後続リリースからの推定",
+    "package": "パッケージ",
+    "installed": "導入版",
+    "fixed": "修正版",
+    "fetchedAt": "取得日時",
+    "records": "OSV レコード",
+    "laterReleasesCaveat": "{release} はサポート終了済みの Debian リリースで、ディストリビューションのデータに掲載されていません。この判定は後続リリース ({releases}) のデータから推定したものです (個別の記載がないリリースは後続の修正版で修正済みとみなす Debian の規則)。利用前に確認してください。"
   }
 }

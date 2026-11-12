@@ -12,6 +12,7 @@ import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXSta
 import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Bell, Key, Plus, Copy, Check } from "lucide-react";
 import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
 import { KEVBadge } from "@/components/vulnerability/kev-badge";
+import { DistroEvidencePanel, DistroMatchBadge } from "@/components/vulnerability/distro-match";
 import { EOLBadge } from "@/components/component/eol-badge";
 import { DependencyPathPanel } from "@/components/component/dependency-path";
 import { LoadError } from "@/components/ui/load-error";
@@ -734,7 +735,7 @@ export default function ProjectDetailPage() {
                     className="border rounded-lg p-4"
                   >
                     <div className="flex items-start justify-between mb-2">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         {/* M13-3 F175 #89: the canonical CVE-ID display for
                             a vulnerability entry. The RemediationPanel
                             collapsible button below ALSO renders {cveId}
@@ -785,8 +786,14 @@ export default function ProjectDetailPage() {
                           kevDueDate={vuln.kev_due_date}
                           kevRansomwareUse={vuln.kev_ransomware_use}
                         />
+                        {/* M70: distro label (UPGRADE.md §21). NVD / JVN
+                            labels are not rendered here. */}
+                        <DistroMatchBadge
+                          method={vuln.match_method}
+                          evidence={vuln.match_evidence}
+                        />
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex shrink-0 items-center gap-2">
                         <span className="text-sm text-muted-foreground">
                           {/* M46 B2: cvss_score is absent for un-scored
                               CVEs — render "—", never 0.0. */}
@@ -831,6 +838,10 @@ export default function ProjectDetailPage() {
                     <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
                       {vuln.description}
                     </p>
+                    <DistroEvidencePanel
+                      method={vuln.match_method}
+                      evidence={vuln.match_evidence}
+                    />
                     <RemediationPanel
                       cveId={vuln.cve_id}
                       severity={vuln.severity}
