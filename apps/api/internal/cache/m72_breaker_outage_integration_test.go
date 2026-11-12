@@ -24,8 +24,9 @@ import (
 //
 // Needs REDIS_URL and M72_REDIS_CONTAINER (the container behind it, which
 // the test stops and restarts — never point it at a shared Redis). It logs
-// the measurements; it asserts only that the breaker cuts the outage cost by
-// a wide margin and that Redis is used again after it comes back.
+// the measurements; it asserts that without the breaker every call pays the
+// outage, that with it each breaker class pays for at most threshold calls
+// plus a probe or two, and that Redis is used again after it comes back.
 
 const (
 	m72Components = 20 // cache lookups of one simulated scan
@@ -46,6 +47,18 @@ func pct(d []time.Duration, p float64) time.Duration {
 	s := slices.Clone(d)
 	slices.Sort(s)
 	return s[int(float64(len(s)-1)*p)]
+}
+
+// paid counts the calls that waited on the outage (refused dials take
+// ~400ms here, hung reads the full bound) rather than failing fast.
+func paid(lat []time.Duration) int {
+	n := 0
+	for _, d := range lat {
+		if d > 50*time.Millisecond {
+			n++
+		}
+	}
+	return n
 }
 
 func docker(t *testing.T, args ...string) {
@@ -170,11 +183,18 @@ func TestM72BreakerOutageLatency(t *testing.T) {
 				x.r.reqTotal.Round(time.Millisecond), pct(x.r.reqLat, .5).Round(time.Microsecond), pct(x.r.reqLat, .99).Round(time.Microsecond),
 				x.r.recovery.Round(time.Millisecond))
 		}
-		if mode == "pause" {
-			// The case the breaker exists for: a hung Redis.
-			if after.scanTotal*3 > before.scanTotal || after.reqTotal*3 > before.reqTotal {
-				t.Errorf("pause: the breaker did not cut the outage cost by 3x: scan %s -> %s, requests %s -> %s",
-					before.scanTotal, after.scanTotal, before.reqTotal, after.reqTotal)
+		// Without the breaker every call pays the outage; with it, each
+		// class pays for at most threshold calls plus one probe per elapsed
+		// cool-down (the cache and the rate limiter are separate classes).
+		for _, w := range []struct {
+			name          string
+			before, after []time.Duration
+		}{{"scan", before.scanLat, after.scanLat}, {"requests", before.reqLat, after.reqLat}} {
+			if paid(w.before) != len(w.before) {
+				t.Errorf("%s %s without breaker: only %d of %d calls paid the outage", mode, w.name, paid(w.before), len(w.before))
+			}
+			if max := sbomredis.DefaultBreakerThreshold + 2; paid(w.after) > max {
+				t.Errorf("%s %s with breaker: %d calls paid the outage, want <= %d", mode, w.name, paid(w.after), max)
 			}
 		}
 		if after.recovery > sbomredis.DefaultBreakerCooldown+5*time.Second {
