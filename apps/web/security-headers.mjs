@@ -183,9 +183,9 @@ export const FALLBACK_CSP = "default-src 'none'; base-uri 'none'; form-action 'n
 
 /**
  * next.config `headers()`: the static headers on every route, plus
- * FALLBACK_CSP on the prefixes outside the proxy matcher. /_next/static is
- * left bare (a worker script's own CSP would restrict that worker); pages
- * must not get it either, since two CSPs are both enforced.
+ * FALLBACK_CSP on the prefixes outside the proxy matcher. /_next/static gets
+ * it only on document loads (a worker script's own CSP would restrict that
+ * worker); pages must not get it either, since two CSPs are both enforced.
  */
 export function nextConfigHeaders({ reportOnly }) {
   const csp = [{ key: cspHeaderName(reportOnly), value: FALLBACK_CSP }];
@@ -197,6 +197,14 @@ export function nextConfigHeaders({ reportOnly }) {
     { source: "/_vercel/:path*", headers: csp },
     { source: "/_next", headers: csp },
     { source: "/_next/:path((?!static/).*)", headers: csp },
+    // A missing /_next/static file is answered with the HTML 404 too. Only
+    // when it is loaded as a document / frame (Codex M71 R2 Low), so a
+    // worker script's fetch never picks up this policy.
+    {
+      source: "/_next/static/:path*",
+      has: [{ type: "header", key: "sec-fetch-dest", value: "(document|iframe|frame|embed|object)" }],
+      headers: csp,
+    },
   ];
 }
 

@@ -239,7 +239,9 @@ describe("paths the proxy never sees get a no-script CSP from next.config (Codex
   const toRe = (source) =>
     // path-to-regexp subset used here: ":path*" and ":path(<regex>)"
     new RegExp("^" + source.replace(/:path\*/g, ".*").replace(/:path\((.*)\)$/, "$1") + "$");
-  const covered = (p) => cspRules.some((r) => toRe(r.source).test(p));
+  // Unconditional rules only; the /_next/static rule is gated on a request
+  // header (pinned separately below).
+  const covered = (p) => cspRules.some((r) => !r.has && toRe(r.source).test(p));
 
   test("static headers on every route", () => {
     assert.deepEqual(rules[0], { source: "/:path*", headers: buildSecurityHeaders() });
@@ -251,11 +253,20 @@ describe("paths the proxy never sees get a no-script CSP from next.config (Codex
     test(`covers ${p}`, () => assert.ok(covered(p), p));
   }
   // Pages get the nonce CSP from the proxy; a second, stricter CSP here would
-  // block them. /_next/static stays bare so a worker script is not
-  // restricted by a document policy.
+  // block them. /_next/static is not covered unconditionally, so a worker
+  // script is not restricted by a document policy.
   for (const p of ["/", "/en", "/en/projects", "/apisomething", "/public/x", "/_next/static/chunks/a.js"]) {
     test(`leaves ${p} alone`, () => assert.ok(!covered(p), p));
   }
+  test("/_next/static gets it only for document / frame loads (Codex M71 R2 Low)", () => {
+    const r = cspRules.find((x) => x.source === "/_next/static/:path*");
+    assert.ok(r, "rule present");
+    assert.deepEqual(r.has, [{ type: "header", key: "sec-fetch-dest", value: "(document|iframe|frame|embed|object)" }]);
+    // A worker / script fetch (sec-fetch-dest: worker / script) does not match.
+    const re = new RegExp(`^${r.has[0].value}$`);
+    for (const d of ["document", "iframe"]) assert.ok(re.test(d), d);
+    for (const d of ["worker", "sharedworker", "serviceworker", "script", "style", "image", "empty"]) assert.ok(!re.test(d), d);
+  });
   test("report-only switch applies to the fallback too", () => {
     const ro = nextConfigHeaders({ reportOnly: true });
     assert.ok(ro.some((r) => r.headers.some((h) => h.key === "Content-Security-Policy-Report-Only")));

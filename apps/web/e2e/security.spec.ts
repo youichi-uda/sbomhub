@@ -386,6 +386,14 @@ test.describe('Security Tests', () => {
                 );
                 expect(res.headers()['x-frame-options'], path).toBe('DENY');
             }
+            // A missing /_next/static file opened as a document (Codex M71 R2
+            // Low); a script / worker fetch of /_next/static stays bare.
+            const doc = await request.get('/_next/static/does-not-exist-m71.js', { headers: { 'sec-fetch-dest': 'document' } });
+            expect(doc.status()).toBe(404);
+            expect(doc.headers()[CSP_HEADER]).toBe("default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+            const worker = await request.get('/_next/static/does-not-exist-m71.js', { headers: { 'sec-fetch-dest': 'worker' } });
+            expect(worker.headers()[CSP_HEADER]).toBeUndefined();
+
             // A page gets exactly one policy: the proxy's nonce policy.
             const page = await request.get('/en/projects');
             expect(page.headers()[CSP_HEADER]).toMatch(/^default-src 'self'; script-src 'self' 'nonce-[^']+' 'strict-dynamic'/);
