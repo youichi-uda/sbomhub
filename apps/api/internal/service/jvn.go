@@ -735,9 +735,10 @@ func (s *JVNService) searchKeyword(ctx context.Context, keyword string, extraPag
 			// be discarded in favour of a low one that happened to come
 			// earlier in the feed (Codex M55 R3, High) — a severity-gated
 			// CI check would then pass on the milder of the two. Keep the
-			// more severe.
+			// one that outranks the other under the shared rule: CVSS
+			// version first (M67), then the more severe rating.
 			if at, dup := seenCVEs[v.CVEID]; dup {
-				if jvnMoreSevere(v, res.Vulns[at]) {
+				if jvnOutranks(v, res.Vulns[at]) {
 					res.Vulns[at] = v
 				}
 				continue
@@ -1021,8 +1022,10 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 	return page, nil
 }
 
-// jvnMoreSevere reports whether a should replace b as the record kept for a CVE
-// that two advisories both describe.
+// jvnOutranks reports whether a should replace b as the record kept for a CVE
+// that two advisories both describe. (Named jvnMoreSevere until M67, when the
+// version began to decide first — an incumbent v2 HIGH/10.0 is replaced by a
+// v3.0 MEDIUM/5.3.)
 //
 // It is cvss.Outranks (M67): the CVSS VERSION each advisory's assessment was
 // taken from decides first (v3.1 > v3.0 > v4.0 > v2), the same rule every
@@ -1031,7 +1034,7 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 // CVSS versions, which JVN mixes. A rated advisory beats an unrated one, and a
 // scored one beats an unscored one at equal rating. Equality keeps the
 // incumbent, so the result does not depend on arrival order.
-func jvnMoreSevere(a, b model.Vulnerability) bool {
+func jvnOutranks(a, b model.Vulnerability) bool {
 	return cvss.Outranks(jvnSelection(a), jvnSelection(b))
 }
 

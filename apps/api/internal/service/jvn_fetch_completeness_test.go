@@ -1226,8 +1226,9 @@ func TestM55JVN_R8Regressions(t *testing.T) {
 	})
 
 	t.Run("a v3 CRITICAL still beats a higher-scored v2 HIGH", func(t *testing.T) {
-		// The property the removed version-preference stage existed for.
-		// It survives because the comparison leads with the rating.
+		// The property the removed M55 version-preference stage existed for.
+		// Since M67 it holds because the version decides first (v3.1 over
+		// v2); the rating would have given the same answer here.
 		got := svc.convertJVNItemToVulnerability(JVNItem{
 			Identifier: "JVNDB-2024-000011",
 			CVSS: []JVNCVSS{
@@ -1446,13 +1447,13 @@ func TestM55JVN_DuplicateCVEKeepsTheMoreSevere(t *testing.T) {
 		return model.Vulnerability{CVEID: "CVE-2021-44228", CVSSScore: score, Severity: sev}
 	}
 
-	if !jvnMoreSevere(mk(&high, "CRITICAL"), mk(&low, "LOW")) {
+	if !jvnOutranks(mk(&high, "CRITICAL"), mk(&low, "LOW")) {
 		t.Error("a critical assessment did not displace a low one")
 	}
-	if jvnMoreSevere(mk(&low, "LOW"), mk(&high, "CRITICAL")) {
+	if jvnOutranks(mk(&low, "LOW"), mk(&high, "CRITICAL")) {
 		t.Error("a low assessment displaced a critical one")
 	}
-	if !jvnMoreSevere(mk(&low, "LOW"), mk(nil, "UNKNOWN")) {
+	if !jvnOutranks(mk(&low, "LOW"), mk(nil, "UNKNOWN")) {
 		t.Error("a scored advisory did not displace an unscored one")
 	}
 	// At equal version rank the severity LABEL outranks the raw score
@@ -1462,19 +1463,19 @@ func TestM55JVN_DuplicateCVEKeepsTheMoreSevere(t *testing.T) {
 	// and is pinned with real versions in TestM67JVN_DuplicateCVEUsesTheVersionRule.
 	v2high := 10.0
 	v3crit := 9.8
-	if jvnMoreSevere(mk(&v2high, "HIGH"), mk(&v3crit, "CRITICAL")) {
+	if jvnOutranks(mk(&v2high, "HIGH"), mk(&v3crit, "CRITICAL")) {
 		t.Error("a HIGH/10.0 displaced a CRITICAL/9.8; raw scores were compared across versions")
 	}
-	if !jvnMoreSevere(mk(&v3crit, "CRITICAL"), mk(&v2high, "HIGH")) {
+	if !jvnOutranks(mk(&v3crit, "CRITICAL"), mk(&v2high, "HIGH")) {
 		t.Error("a CRITICAL/9.8 did not displace a HIGH/10.0")
 	}
-	if jvnMoreSevere(mk(nil, "UNKNOWN"), mk(&low, "LOW")) {
+	if jvnOutranks(mk(nil, "UNKNOWN"), mk(&low, "LOW")) {
 		t.Error("an unscored advisory displaced a scored one")
 	}
-	if !jvnMoreSevere(mk(nil, "HIGH"), mk(nil, "MEDIUM")) {
+	if !jvnOutranks(mk(nil, "HIGH"), mk(nil, "MEDIUM")) {
 		t.Error("with no scores, the severity label did not decide")
 	}
-	if jvnMoreSevere(mk(&high, "CRITICAL"), mk(&high, "CRITICAL")) {
+	if jvnOutranks(mk(&high, "CRITICAL"), mk(&high, "CRITICAL")) {
 		t.Error("an equal assessment displaced the incumbent; arrival order must not matter")
 	}
 }
@@ -1566,7 +1567,7 @@ func TestM55JVN_WorstCVSSIsStored(t *testing.T) {
 
 // TestM55JVN_DuplicateCVEAcrossPagesKeepsTheMoreSevere drives the same rule
 // through the REAL paging path (Codex M55 R4, High: the unit test called
-// jvnMoreSevere directly, so reverting the searchKeyword wiring to
+// jvnOutranks directly, so reverting the searchKeyword wiring to
 // first-entry-wins left it green).
 func TestM55JVN_DuplicateCVEAcrossPagesKeepsTheMoreSevere(t *testing.T) {
 	now := time.Now()

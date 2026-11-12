@@ -63,17 +63,17 @@ func TestM67JVN_DuplicateCVEUsesTheVersionRule(t *testing.T) {
 	v2 := 10.0
 	a := model.Vulnerability{CVEID: "CVE-2026-0001", CVSSScore: &v3, Severity: "MEDIUM", CVSSVersion: v("3.0")}
 	b := model.Vulnerability{CVEID: "CVE-2026-0001", CVSSScore: &v2, Severity: "HIGH", CVSSVersion: v("2.0")}
-	if !jvnMoreSevere(a, b) {
+	if !jvnOutranks(a, b) {
 		t.Error("a v3.0 advisory did not displace a v2 one")
 	}
-	if jvnMoreSevere(b, a) {
+	if jvnOutranks(b, a) {
 		t.Error("a v2 advisory displaced a v3.0 one")
 	}
 	// The M55 R4 case with real versions: v3.1 CRITICAL 9.8 vs v2 HIGH 10.0.
 	v31crit, v2high := 9.8, 10.0
 	c := model.Vulnerability{CVEID: "CVE-2026-0001", CVSSScore: &v31crit, Severity: "CRITICAL", CVSSVersion: v("3.1")}
 	d := model.Vulnerability{CVEID: "CVE-2026-0001", CVSSScore: &v2high, Severity: "HIGH", CVSSVersion: v("2.0")}
-	if !jvnMoreSevere(c, d) || jvnMoreSevere(d, c) {
+	if !jvnOutranks(c, d) || jvnOutranks(d, c) {
 		t.Error("a v2 HIGH/10.0 displaced, or was not displaced by, a v3.1 CRITICAL/9.8")
 	}
 }
@@ -135,6 +135,17 @@ func TestM67NVD_MissingBaseScoreIsNotZero(t *testing.T) {
 			  "cvssMetricV40":[{"type":"Secondary","cvssData":{"baseScore":9.8,"baseSeverity":"CRITICAL"}}]}`,
 			cvss.V40, ptrF(9.8), "CRITICAL"},
 		{"lone absent score", `{"cvssMetricV31":[{"type":"Primary","cvssData":{}}]}`, "", nil, "UNKNOWN"},
+		// Codex M67 R5, High: cvssData ITSELF absent / null, not just baseScore.
+		{"absent cvssData beside a valid v4.0",
+			`{"cvssMetricV31":[{"type":"Primary"}],
+			  "cvssMetricV40":[{"type":"Secondary","cvssData":{"baseScore":9.8,"baseSeverity":"CRITICAL"}}]}`,
+			cvss.V40, ptrF(9.8), "CRITICAL"},
+		{"null cvssData beside a valid v4.0",
+			`{"cvssMetricV31":[{"type":"Primary","cvssData":null}],
+			  "cvssMetricV40":[{"type":"Secondary","cvssData":{"baseScore":9.8,"baseSeverity":"CRITICAL"}}]}`,
+			cvss.V40, ptrF(9.8), "CRITICAL"},
+		{"absent cvssData, v2 rating on the metric", `{"cvssMetricV2":[{"type":"Primary","baseSeverity":"HIGH"}]}`,
+			cvss.V2, nil, "HIGH"},
 		{"absent score with a stated rating keeps the rating",
 			`{"cvssMetricV31":[{"type":"Primary","cvssData":{"baseSeverity":"HIGH"}}]}`, cvss.V31, nil, "HIGH"},
 		{"a real 0.0 stays 0.0", `{"cvssMetricV31":[{"type":"Primary","cvssData":{"baseScore":0.0,"baseSeverity":"NONE"}}]}`,
