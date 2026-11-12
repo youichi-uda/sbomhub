@@ -338,3 +338,47 @@ func TestM72R8_RetriedBeginOfALostRunRejoins(t *testing.T) {
 		t.Fatalf("%s %q, want failed (interrupted): the dead run's interruption was erased", st, msg)
 	}
 }
+
+// Codex M72 R10 High-1: a new group does not erase the tombstone of a run
+// swept as interrupted that may still be alive (a suspended process). Until
+// that run rejoins or finishes — or is older than any scan can run — the
+// SBOM reads failed (interrupted), not completed.
+func TestM72R10_NewGroupKeepsLiveTombstones(t *testing.T) {
+	rdb := m72Redis(t)
+	suspended := process(rdb, 40*time.Millisecond, time.Hour)
+	other := process(rdb, 0, time.Hour)
+	reader := process(rdb, 0, time.Hour)
+	id := uuid.New()
+	ga := suspended.Begin(id)
+	time.Sleep(80 * time.Millisecond)
+	detail(reader, id, suspended) // A swept as interrupted
+	other.Finish(id, other.Begin(id), nil, "")
+	if st, msg, _ := detail(reader, id, other); st != ScanStateFailed || msg != "scan: scan failed (interrupted)" {
+		t.Fatalf("B completed while A may still run: %s %q, want failed (interrupted)", st, msg)
+	}
+	suspended.Finish(id, ga, nil, "") // A resumes and finishes
+	if st, _, _ := detail(reader, id, suspended); st != ScanStateCompleted {
+		t.Fatalf("after A finished: %s, want completed", st)
+	}
+
+	// A tombstone older than any scan can run no longer taints new scans.
+	short := process(rdb, 40*time.Millisecond, time.Hour)
+	setMaxRunAge(short, 150*time.Millisecond)
+	sweeper := process(rdb, 0, time.Hour)
+	setMaxRunAge(sweeper, 150*time.Millisecond)
+	id2 := uuid.New()
+	dead := process(rdb, 40*time.Millisecond, time.Hour)
+	dead.Begin(id2)
+	time.Sleep(80 * time.Millisecond)
+	detail(sweeper, id2, dead) // swept: a tombstone
+	time.Sleep(200 * time.Millisecond)
+	short.Finish(id2, short.Begin(id2), nil, "")
+	if st, msg, _ := detail(reader, id2, short); st != ScanStateCompleted {
+		t.Fatalf("with only an expired tombstone: %s %q, want completed", st, msg)
+	}
+}
+
+// setMaxRunAge rebuilds tr's scripts for a different tombstone age.
+func setMaxRunAge(tr *ScanTracker, d time.Duration) {
+	tr.shared.(*redisScanStatusStore).scripts = newStatusScripts(d)
+}

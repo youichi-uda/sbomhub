@@ -90,7 +90,8 @@ func scanStatusKeys(sbomID uuid.UUID) []string {
 
 // scanStatusLua is shared by every script. KEYS[1] the hash, KEYS[2] the
 // active runs, KEYS[3] the runs swept as interrupted (ZSET gen -> sweep time,
-// at most MAX_LOST newest; hash field lost_dropped=1 once one was dropped).
+// at most MAX_LOST newest; hash field lost_dropped = when one was dropped).
+// Tombstones outlive a new group and expire after MAX_RUN_AGE.
 //
 // outcomes holds only FAILURES, once per distinct marker (their reasons
 // merged), so it is bounded by the marker vocabulary (Codex M72 R2 High-3);
@@ -139,8 +140,15 @@ local function mark_lost(g, now)
   local n = redis.call('ZCARD', L)
   if n > MAX_LOST then
     redis.call('ZREMRANGEBYRANK', L, 0, n - MAX_LOST - 1)
-    redis.call('HSET', K, 'lost_dropped', '1')
+    redis.call('HSET', K, 'lost_dropped', now)
   end
+end
+-- Tombstones older than any scan can run (deadline + 5m) cannot belong to a
+-- live run any more; they stop tainting the SBOM (Codex M72 R10 High-1).
+local function prune_lost(now)
+  redis.call('ZREMRANGEBYSCORE', L, '-inf', '(' .. (now - MAX_RUN_AGE))
+  local ld = tonumber(redis.call('HGET', K, 'lost_dropped') or '')
+  if ld and ld < now - MAX_RUN_AGE then redis.call('HDEL', K, 'lost_dropped') end
 end
 local function sweep(now, except)
   local lost = redis.call('ZRANGEBYSCORE', R, '-inf', '(' .. now)
@@ -156,6 +164,7 @@ local function sweep(now, except)
   return n
 end
 local function publish(now)
+  prune_lost(now)
   if redis.call('ZCARD', R) > 0 then
     redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated', now)
     return
@@ -175,7 +184,7 @@ local function publish(now)
       add(e.m, rs)
     end
   end
-  if redis.call('ZCARD', L) > 0 or redis.call('HGET', K, 'lost_dropped') == '1' then
+  if redis.call('ZCARD', L) > 0 or redis.call('HEXISTS', K, 'lost_dropped') == 1 then
     add(INTERRUPTED_MSG, {INTERRUPTED_REASON})
   end
   if #msgs > 0 then
@@ -193,14 +202,24 @@ local function expire(ttl)
 end
 `
 
-func scanStatusScript(body string) *redis.Script {
-	prelude := fmt.Sprintf("local INTERRUPTED_MSG = %q\nlocal INTERRUPTED_REASON = %q\nlocal MAX_LOST = %d\n",
-		scanInterruptedMarker, ScanReasonInterrupted, scanStatusMaxLost)
-	return redis.NewScript(prelude + scanStatusLua + body)
+// statusScripts are the store's Lua scripts, built for its MAX_RUN_AGE.
+type statusScripts struct {
+	begin, finish, merge, heartbeat, rejoin, mark, get *redis.Script
+}
+
+func newStatusScripts(maxRunAge time.Duration) *statusScripts {
+	prelude := fmt.Sprintf("local INTERRUPTED_MSG = %q\nlocal INTERRUPTED_REASON = %q\nlocal MAX_LOST = %d\nlocal MAX_RUN_AGE = %d\n",
+		scanInterruptedMarker, ScanReasonInterrupted, scanStatusMaxLost, maxRunAge.Milliseconds())
+	mk := func(body string) *redis.Script { return redis.NewScript(prelude + scanStatusLua + body) }
+	return &statusScripts{
+		begin: mk(scanStatusBeginLua), finish: mk(scanStatusFinishLua), merge: mk(scanStatusMergeLua),
+		heartbeat: mk(scanStatusHeartbeatLua), rejoin: mk(scanStatusRejoinLua), mark: mk(scanStatusMarkLua),
+		get: mk(scanStatusGetLua),
+	}
 }
 
 // ARGV: gen, lease ms, ttl ms.
-var scanStatusBegin = scanStatusScript(`
+const scanStatusBeginLua = `
 local now = nowms()
 sweep(now, nil)
 -- A begin of a run already swept as interrupted (a retried write) rejoins
@@ -212,13 +231,18 @@ if redis.call('ZREM', L, ARGV[1]) == 1 then
   return 1
 end
 if redis.call('ZCARD', R) == 0 then
-  redis.call('DEL', K, L)
+  -- A new group. Runs swept as interrupted may still be alive (a suspended
+  -- process): their tombstones are kept, so the SBOM does not read completed
+  -- while one of them could still be writing (Codex M72 R10 High-1).
+  local ld = redis.call('HGET', K, 'lost_dropped')
+  redis.call('DEL', K)
+  if ld then redis.call('HSET', K, 'lost_dropped', ld) end
   save_outcomes({})
 end
 redis.call('ZADD', R, now + tonumber(ARGV[2]), ARGV[1])
 redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated', now)
 expire(ARGV[3])
-return 1`)
+return 1`
 
 // ARGV: gen, ttl ms, error marker (empty = completed), reasons JSON.
 // Returns 1 if the run was active or swept as interrupted, 2 if Redis did not
@@ -226,7 +250,7 @@ return 1`)
 // failure is recorded EITHER WAY (Codex M72 R5 High-2): a failure is never
 // dropped, at worst it is attributed to a later group — a conservative
 // "failed", never a false "completed".
-var scanStatusFinish = scanStatusScript(`
+const scanStatusFinishLua = `
 local now = nowms()
 local active = redis.call('ZREM', R, ARGV[1]) == 1
 sweep(now, ARGV[1])
@@ -237,13 +261,13 @@ add_failure(ARGV[3], rs)
 publish(now)
 expire(ARGV[2])
 if active or wasLost then return 1 end
-return 2`)
+return 2`
 
 // ARGV: JSON {"b": [gen...], "f": [gen...], "x": [[marker, [reason...]]...]},
 // lease ms, ttl ms. The coalesced writes of a queue that overflowed: runs
 // that began (joined to the current group, never a new one), runs that
 // finished, and the failures among them (Codex M72 R5 High-3).
-var scanStatusMerge = scanStatusScript(`
+const scanStatusMergeLua = `
 local now = nowms()
 local ok, m = pcall(cjson.decode, ARGV[1])
 if not ok or type(m) ~= 'table' then return redis.error_reply('bad merge') end
@@ -271,11 +295,11 @@ if type(m.x) == 'table' then
 end
 publish(now)
 expire(ARGV[3])
-return 1`)
+return 1`
 
 // ARGV: gen, lease ms, ttl ms. Returns 1 while the run is (again) active, 0
 // when it was superseded.
-var scanStatusHeartbeat = scanStatusScript(`
+const scanStatusHeartbeatLua = `
 local now = nowms()
 if redis.call('ZSCORE', R, ARGV[1]) then
   redis.call('ZADD', R, 'XX', now + tonumber(ARGV[2]), ARGV[1])
@@ -289,41 +313,41 @@ if redis.call('ZREM', L, ARGV[1]) == 1 then
   expire(ARGV[3])
   return 1
 end
-return 0`)
+return 0`
 
 // ARGV: gen, lease ms, ttl ms. A run that is alive but no longer active in
 // Redis (its lease ran out and its identity was dropped from the capped lost
 // set, or a new group started meanwhile) joins the CURRENT group again: unlike
 // Begin it never starts a new group, so the group's failures and
 // interruptions are kept (Codex M72 R4 High-3).
-var scanStatusRejoin = scanStatusScript(`
+const scanStatusRejoinLua = `
 local now = nowms()
 sweep(now, ARGV[1])
 redis.call('ZREM', L, ARGV[1])
 redis.call('ZADD', R, now + tonumber(ARGV[2]), ARGV[1])
 publish(now)
 expire(ARGV[3])
-return 1`)
+return 1`
 
 // ARGV: state, error, reasons JSON, ttl ms. A terminal state set outside a
 // run (MarkFailed / MarkCompleted): ends every run of the group.
-var scanStatusMark = scanStatusScript(`
+const scanStatusMarkLua = `
 redis.call('DEL', R, L)
 redis.call('HDEL', K, 'lost_dropped')
 redis.call('HSET', K, 'state', ARGV[1], 'error', ARGV[2], 'reasons', ARGV[3], 'updated', nowms())
 save_outcomes({})
 expire(ARGV[4])
-return 1`)
+return 1`
 
 // Returns false (nil) when there is no entry, else {state, error, reasons}.
-var scanStatusGet = scanStatusScript(`
+const scanStatusGetLua = `
 if redis.call('EXISTS', K) == 0 then return false end
 local now = nowms()
 local changed = sweep(now, nil) > 0
 if not changed and redis.call('HGET', K, 'state') == 'running' and redis.call('ZCARD', R) == 0 then
   -- running with no active run and none just swept (the runs key itself was
   -- lost): interrupted, without a run to revive.
-  redis.call('HSET', K, 'lost_dropped', '1')
+  redis.call('HSET', K, 'lost_dropped', now)
   changed = true
 end
 if changed then
@@ -333,7 +357,7 @@ if changed then
   local ttl = redis.call('PTTL', K)
   if ttl > 0 then redis.call('PEXPIRE', L, ttl) end
 end
-return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]'}`)
+return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]'}`
 
 // scanStatusStore is what the tracker needs from shared storage.
 type scanStatusStore interface {
@@ -353,9 +377,10 @@ type scanStatusStore interface {
 }
 
 type redisScanStatusStore struct {
-	client *redis.Client
-	ttl    time.Duration
-	lease  time.Duration
+	client  *redis.Client
+	ttl     time.Duration
+	lease   time.Duration
+	scripts *statusScripts
 }
 
 func (s *redisScanStatusStore) opCtx(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -381,14 +406,14 @@ func reasonsJSON(reasons []string) string {
 func (s *redisScanStatusStore) begin(ctx context.Context, sbomID uuid.UUID, gen uint64) error {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	return scanStatusBegin.Run(ctx, s.client, scanStatusKeys(sbomID),
+	return s.scripts.begin.Run(ctx, s.client, scanStatusKeys(sbomID),
 		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
 func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) (bool, error) {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	n, err := scanStatusFinish.Run(ctx, s.client, scanStatusKeys(sbomID),
+	n, err := s.scripts.finish.Run(ctx, s.client, scanStatusKeys(sbomID),
 		genString(gen), s.ttl.Milliseconds(), errMsg, reasonsJSON(reasons)).Int()
 	return n == 1, err
 }
@@ -474,20 +499,20 @@ func (m *mergeSet) json() string {
 func (s *redisScanStatusStore) merge(ctx context.Context, sbomID uuid.UUID, m *mergeSet) error {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	return scanStatusMerge.Run(ctx, s.client, scanStatusKeys(sbomID),
+	return s.scripts.merge.Run(ctx, s.client, scanStatusKeys(sbomID),
 		m.json(), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
 func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey) ([]bool, error) {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	if err := scanStatusHeartbeat.Load(ctx, s.client).Err(); err != nil {
+	if err := s.scripts.heartbeat.Load(ctx, s.client).Err(); err != nil {
 		return nil, err
 	}
 	cmds := make([]*redis.Cmd, len(runs))
 	_, err := s.client.Pipelined(ctx, func(p redis.Pipeliner) error {
 		for i, r := range runs {
-			cmds[i] = scanStatusHeartbeat.EvalSha(ctx, p, scanStatusKeys(r.sbom),
+			cmds[i] = s.scripts.heartbeat.EvalSha(ctx, p, scanStatusKeys(r.sbom),
 				genString(r.gen), s.lease.Milliseconds(), s.ttl.Milliseconds())
 		}
 		return nil
@@ -509,21 +534,21 @@ func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey)
 func (s *redisScanStatusStore) rejoin(ctx context.Context, sbomID uuid.UUID, gen uint64) error {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	return scanStatusRejoin.Run(ctx, s.client, scanStatusKeys(sbomID),
+	return s.scripts.rejoin.Run(ctx, s.client, scanStatusKeys(sbomID),
 		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
 func (s *redisScanStatusStore) mark(ctx context.Context, sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) error {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	return scanStatusMark.Run(ctx, s.client, scanStatusKeys(sbomID),
+	return s.scripts.mark.Run(ctx, s.client, scanStatusKeys(sbomID),
 		string(state), errMsg, reasonsJSON(reasons), s.ttl.Milliseconds()).Err()
 }
 
 func (s *redisScanStatusStore) get(ctx context.Context, sbomID uuid.UUID) (ScanState, string, []string, bool, error) {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
-	v, err := scanStatusGet.Run(ctx, s.client, scanStatusKeys(sbomID)).StringSlice()
+	v, err := s.scripts.get.Run(ctx, s.client, scanStatusKeys(sbomID)).StringSlice()
 	if errors.Is(err, redis.Nil) {
 		return ScanStateUnknown, "", nil, false, nil
 	}

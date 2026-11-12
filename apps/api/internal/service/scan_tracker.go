@@ -52,6 +52,10 @@ type ScanTracker struct {
 	mu        sync.RWMutex
 	entries   map[uuid.UUID]scanEntry
 	retention time.Duration
+	// maxRunAge (M72) is how long a scan can possibly run: its deadline plus
+	// the final write's 5 minutes. A tombstone of an interrupted run older
+	// than that cannot belong to a live run.
+	maxRunAge time.Duration
 	revSeq    uint64
 
 	// shared (M72) is the Redis store; nil keeps the tracker in-memory only.
@@ -124,6 +128,7 @@ func NewScanTracker() *ScanTracker {
 	return &ScanTracker{
 		entries:    make(map[uuid.UUID]scanEntry),
 		retention:  1 * time.Hour,
+		maxRunAge:  DefaultScanDeadline + 5*time.Minute,
 		queues:     map[uuid.UUID]*sbomQueue{},
 		live:       map[runKey]*liveRun{},
 		queueCap:   maxQueuedWrites,
@@ -136,7 +141,8 @@ func NewScanTracker() *ScanTracker {
 // every API process on that Redis. Call it before the tracker is used.
 func (t *ScanTracker) WithRedis(client *redis.Client) *ScanTracker {
 	if client != nil {
-		t.shared = &redisScanStatusStore{client: client, ttl: t.retention, lease: ScanStatusLease}
+		t.shared = &redisScanStatusStore{client: client, ttl: t.retention, lease: ScanStatusLease,
+			scripts: newStatusScripts(t.maxRunAge)}
 	}
 	return t
 }
@@ -167,6 +173,9 @@ func NewScanTrackerFor(scanDeadline time.Duration) *ScanTracker {
 	t := NewScanTracker()
 	if r := scanDeadline + 15*time.Minute; r > t.retention {
 		t.retention = r
+	}
+	if scanDeadline > 0 {
+		t.maxRunAge = scanDeadline + 5*time.Minute
 	}
 	return t
 }
