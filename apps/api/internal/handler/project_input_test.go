@@ -248,7 +248,7 @@ func TestCLIUpload_RejectsInvalidProjectNameAndSBOMTextWith400(t *testing.T) {
 	cases := []struct {
 		name, project, sbom, want string
 	}{
-		{"NUL in multipart project_name", "a\x00b", `{"bomFormat":"CycloneDX","specVersion":"1.5"}`, "name must not contain a NUL character"},
+		{"NUL in multipart project_name", "a\x00b", `{"bomFormat":"CycloneDX","specVersion":"1.5"}`, `form field "project_name" must not contain a NUL character`}, // M71: refused by checkFormText before the name rules
 		{"300-char project_name", strings.Repeat("p", 300), `{"bomFormat":"CycloneDX","specVersion":"1.5"}`, "at most 255 characters"},
 	}
 	for _, tc := range cases {

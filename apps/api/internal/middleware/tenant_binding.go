@@ -660,7 +660,7 @@ var preTenantTxMiddleware = map[string]PreTenantTxRule{
 	// -----------------------------------------------------------------
 	// The global middleware (echo's own, plus appmw.AccessLog which wraps
 	// echo's RequestLogger). `e.Use` applies these to every route
-	// however it was registered, so they are the first four entries of all
+	// however it was registered, so they are the first five entries of all
 	// 181 chains and are unbound on every one of them.
 	// -----------------------------------------------------------------
 	"appmw.AccessLog": {
@@ -673,6 +673,12 @@ var preTenantTxMiddleware = map[string]PreTenantTxRule{
 		Kind: PreTenantTxNamesNoTable,
 		Why: "echo's panic recovery. It calls next(c) inside a defer/recover and, on a " +
 			"panic, logs a stack trace and answers 500. No handle, no statement.",
+	},
+	"appmw.TextGuardParams": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "text_guard.go (M71). It reads the matched path parameters and the parsed " +
+			"query string from the echo context and answers 400 for U+0000 / invalid " +
+			"UTF-8. No handle, no statement.",
 	},
 	"middleware.BodyLimit": {
 		Kind: PreTenantTxNamesNoTable,
