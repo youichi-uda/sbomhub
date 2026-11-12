@@ -2271,7 +2271,8 @@ func main() {
 	// Uses NVDService with Redis cache for efficient API usage
 	vulnScanJob := scheduler.NewVulnerabilityScanJobFull(db, nvdService, notificationService).
 		WithScanDeadline(scanDeadline).
-		WithDistroScanner(distroService)
+		WithDistroScanner(distroService).
+		WithScanTracker(scanTracker)
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
