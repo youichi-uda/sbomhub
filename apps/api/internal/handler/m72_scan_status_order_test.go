@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	appmw "github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
@@ -28,6 +29,7 @@ func TestM72ScanStatus_StateIsReadBeforeTheCounts(t *testing.T) {
 	defer db.Close()
 	projectID, sbomID := uuid.New(), uuid.New()
 	// The count query is slow; the scan finishes while it runs.
+	mock.ExpectQuery("in project").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectQuery("sbom").WillDelayFor(300 * time.Millisecond).WillReturnRows(
 		sqlmock.NewRows([]string{"id", "project_id", "format", "version", "raw_data", "created_at"}).
 			AddRow(sbomID.String(), projectID.String(), "cyclonedx", "1.5", []byte(`{}`), time.Now()))
@@ -50,6 +52,7 @@ func TestM72ScanStatus_StateIsReadBeforeTheCounts(t *testing.T) {
 	c := e.NewContext(req, rec)
 	c.SetParamNames("id", "sbom_id")
 	c.SetParamValues(projectID.String(), sbomID.String())
+	c.Set(appmw.ContextKeyTenantID, uuid.New())
 	if err := h.ScanStatus(c); err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +75,7 @@ func TestM72ScanStatus_TransitionDuringTheCountsReadsRunning(t *testing.T) {
 	}
 	defer db.Close()
 	projectID, sbomID := uuid.New(), uuid.New()
+	mock.ExpectQuery("in project").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectQuery("sbom").WillDelayFor(300 * time.Millisecond).WillReturnRows(
 		sqlmock.NewRows([]string{"id", "project_id", "format", "version", "raw_data", "created_at"}).
 			AddRow(sbomID.String(), projectID.String(), "cyclonedx", "1.5", []byte(`{}`), time.Now()))
@@ -92,6 +96,7 @@ func TestM72ScanStatus_TransitionDuringTheCountsReadsRunning(t *testing.T) {
 	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
 	c.SetParamNames("id", "sbom_id")
 	c.SetParamValues(projectID.String(), sbomID.String())
+	c.Set(appmw.ContextKeyTenantID, uuid.New())
 	if err := h.ScanStatus(c); err != nil {
 		t.Fatal(err)
 	}
