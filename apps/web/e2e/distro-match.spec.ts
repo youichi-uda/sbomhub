@@ -86,8 +86,13 @@ test.describe('M70 distro labels', () => {
     const ev = fixed.match_evidence as Record<string, unknown>;
     expect(ev.basis).toBe('later_releases');
     expect(ev.records).toEqual(['DEBIAN-CVE-2020-8203', 'DLA-0000-1']);
-    expect(ev).not.toHaveProperty('source_id');
-    expect(ev).not.toHaveProperty('prior_method');
+    expect(ev.source_url).toBe('https://api.osv.dev');
+    // The seed stores these internal fields with the link; the list must
+    // project the public DistroEvidence fields only.
+    for (const internal of ['source_id', 'prior_method', 'wm_source', 'wm_rev', 'wm_by_source']) {
+      expect(ev).not.toHaveProperty(internal);
+    }
+    expect(JSON.stringify(vulns)).not.toContain('e2e-internal-source-hash');
   });
 
   for (const locale of ['en', 'ja'] as const) {
@@ -112,15 +117,19 @@ test.describe('M70 distro labels', () => {
       // distro_fixed with basis = later_releases
       const fixedEntry = page.locator(`[data-vuln-cve-id="${DISTRO.fixed}"]`);
       await expect(fixedEntry.getByTestId('distro-evidence-panel')).toHaveCount(0);
-      const toggle = fixedEntry.getByRole('button', { name: m.showEvidence });
+      const toggle = fixedEntry.getByRole('button', { name: m.showEvidenceFor.replace('{cve}', DISTRO.fixed) });
       await expect(toggle).toHaveAttribute('aria-expanded', 'false');
       await toggle.click();
       const panel = fixedEntry.getByTestId('distro-evidence-panel');
       await expect(panel).toBeVisible();
-      await expect(fixedEntry.getByRole('button', { name: m.hideEvidence })).toHaveAttribute('aria-expanded', 'true');
+      await expect(
+        fixedEntry.getByRole('button', { name: m.hideEvidenceFor.replace('{cve}', DISTRO.fixed) }),
+      ).toHaveAttribute('aria-expanded', 'true');
       await expect(panel.getByText(m.distroFixedReview)).toBeVisible();
       await expect(panel.getByTestId('distro-evidence-release')).toHaveText('Debian:10');
       await expect(panel.getByTestId('distro-evidence-basis')).toHaveText(m.basisLaterReleases);
+      await expect(panel.getByTestId('distro-evidence-source-url')).toHaveText('https://api.osv.dev');
+      await expect(panel.getByTestId('distro-evidence-mirror-note')).toHaveCount(0);
       await expect(panel.getByRole('link', { name: 'DEBIAN-CVE-2020-8203' })).toHaveAttribute(
         'href',
         'https://osv.dev/vulnerability/DEBIAN-CVE-2020-8203',
@@ -136,11 +145,18 @@ test.describe('M70 distro labels', () => {
 
       // distro_affected with basis = release: no caveat, no review note
       const affectedEntry = page.locator(`[data-vuln-cve-id="${DISTRO.affected}"]`);
-      await affectedEntry.getByRole('button', { name: m.showEvidence }).click();
+      await affectedEntry.getByRole('button', { name: m.showEvidenceFor.replace('{cve}', DISTRO.affected) }).click();
       const affectedPanel = affectedEntry.getByTestId('distro-evidence-panel');
       await expect(affectedPanel.getByTestId('distro-evidence-basis')).toHaveText(m.basisRelease);
       await expect(affectedPanel.getByTestId('distro-evidence-later-releases')).toHaveCount(0);
       await expect(affectedPanel.getByText(m.distroFixedReview)).toHaveCount(0);
+
+      // distro_unfixed from a mirror endpoint: the osv.dev links are flagged
+      const unfixedEntry = page.locator(`[data-vuln-cve-id="${DISTRO.unfixed}"]`);
+      await unfixedEntry.getByRole('button', { name: m.showEvidenceFor.replace('{cve}', DISTRO.unfixed) }).click();
+      await expect(unfixedEntry.getByTestId('distro-evidence-mirror-note')).toHaveText(
+        m.mirrorRecordsNote.replace('{source}', 'https://osv.mirror.example'),
+      );
     });
   }
 });

@@ -839,6 +839,7 @@ export default function ProjectDetailPage() {
                       {vuln.description}
                     </p>
                     <DistroEvidencePanel
+                      cveId={vuln.cve_id}
                       method={vuln.match_method}
                       evidence={vuln.match_evidence}
                     />

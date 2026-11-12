@@ -617,13 +617,16 @@ BEGIN
                 -- evidence in model.DistroEvidence's shape. The versions
                 -- and record ids are synthetic. A pkg:generic purl is never
                 -- a distro package, so an internet-connected scan leaves
-                -- these labels alone.
+                -- these labels alone. The distro_fixed row also carries the
+                -- internal fields the scan stores (source_id, prior_method,
+                -- watermark) so the spec can assert the API never projects
+                -- them; the distro_unfixed row names a mirror endpoint.
                 ('pkg:generic/sbomhub-e2e/vuln-fixture-distro@1.0.0',   'CVE-2021-23337', 'distro_affected',
                  '{"source":"osv","status":"affected","basis":"release","release":"Debian:12","package":"node-lodash","installed":"4.17.21+dfsg-1","fixed":"4.17.21+dfsg-2","records":["DEBIAN-CVE-2021-23337"],"fetched_at":"2026-11-10T00:00:00Z"}'::jsonb),
                 ('pkg:generic/sbomhub-e2e/vuln-fixture-distro@1.0.0',   'CVE-2021-45046', 'distro_unfixed',
-                 '{"source":"osv","status":"unfixed","basis":"release","release":"Debian:12","package":"apache-log4j2","installed":"2.14.1-1","records":["DEBIAN-CVE-2021-45046"],"fetched_at":"2026-11-10T00:00:00Z"}'::jsonb),
+                 '{"source":"osv","status":"unfixed","basis":"release","release":"Debian:12","package":"apache-log4j2","installed":"2.14.1-1","records":["DEBIAN-CVE-2021-45046"],"fetched_at":"2026-11-10T00:00:00Z","source_url":"https://osv.mirror.example"}'::jsonb),
                 ('pkg:generic/sbomhub-e2e/vuln-fixture-distro@1.0.0',   'CVE-2020-8203',  'distro_fixed',
-                 '{"source":"osv","status":"fixed","basis":"later_releases","release":"Debian:10","ecosystems":["Debian:11","Debian:12"],"package":"node-lodash","installed":"4.17.15+dfsg-3","fixed":"4.17.15+dfsg-2","records":["DEBIAN-CVE-2020-8203","DLA-0000-1"],"fetched_at":"2026-11-10T00:00:00Z"}'::jsonb)
+                 '{"source":"osv","status":"fixed","basis":"later_releases","release":"Debian:10","ecosystems":["Debian:11","Debian:12"],"package":"node-lodash","installed":"4.17.15+dfsg-3","fixed":"4.17.15+dfsg-2","records":["DEBIAN-CVE-2020-8203","DLA-0000-1"],"fetched_at":"2026-11-10T00:00:00Z","source_url":"https://api.osv.dev","data_modified":"2026-11-09T00:00:00Z","source_id":"e2e-internal-source-hash","prior_method":"nvd_keyword","wm_source":"e2e-internal-source-hash","wm_rev":"2026-11-09T00:00:00Z","wm_by_source":{"e2e-internal-source-hash":"2026-11-09T00:00:00Z"}}'::jsonb)
            ) AS f(purl, cve_id, method, evidence)
       JOIN vulnerabilities v ON v.cve_id = f.cve_id
      WHERE f.purl = NEW.purl

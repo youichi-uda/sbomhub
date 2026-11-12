@@ -16,6 +16,7 @@
 //     the badge still shows (a label is never hidden for lack of evidence).
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 
 import {
@@ -36,6 +37,8 @@ const affectedEv = {
   fixed: "3.0.11-1~deb12u2",
   records: ["DEBIAN-CVE-2023-5678", "DSA-5532-1"],
   fetched_at: "2026-11-10T00:00:00Z",
+  source_url: "https://api.osv.dev",
+  data_modified: "2026-11-09T12:00:00Z",
 };
 
 const fixedLaterEv = {
@@ -186,7 +189,7 @@ describe("distroEvidenceView", () => {
   });
 
   test("an id that is not a token is kept as text without a link", () => {
-    const v = distroEvidenceView("distro_unfixed", { records: ["DSA-1", "bad id"] });
+    const v = distroEvidenceView("distro_unfixed", { status: "unfixed", release: "Debian:12", records: ["DSA-1", "bad id"] });
     assert.deepEqual(v.records, [
       { id: "DSA-1", url: "https://osv.dev/vulnerability/DSA-1" },
       { id: "bad id", url: null },
@@ -200,10 +203,61 @@ describe("distroEvidenceView", () => {
       inferredFromLaterReleases: false,
       laterReleases: [],
       records: [],
+      publicOsv: true,
     });
+  });
+
+  // Codex R1 Low-1: an object that is not recognisably DistroEvidence is
+  // "no evidence", not a table of dashes.
+  test("an empty or incoherent evidence object reads as no evidence", () => {
+    for (const ev of [
+      {},
+      { release: "Debian:12" },
+      { status: "fixed", records: ["DSA-1"] },
+      { status: "bogus", release: "Debian:12", records: ["DSA-1"] },
+      { status: "fixed", release: "Debian:12", records: [] },
+    ]) {
+      assert.equal(distroEvidenceView("distro_fixed", ev).hasEvidence, false, JSON.stringify(ev));
+    }
+  });
+
+  // Codex R1 Medium-2: the reviewer sees which endpoint and data revision the
+  // verdict used, and is told when the osv.dev links are not that endpoint.
+  test("source endpoint and data revision are shown; non-public sources are flagged", () => {
+    const pub = distroEvidenceView("distro_affected", affectedEv);
+    assert.equal(pub.sourceUrl, "https://api.osv.dev");
+    assert.equal(pub.dataModified, "2026-11-09T12:00:00Z");
+    assert.equal(pub.publicOsv, true);
+
+    const noUrl = distroEvidenceView("distro_affected", { ...affectedEv, source_url: undefined });
+    assert.equal(noUrl.publicOsv, true);
+
+    const mirror = distroEvidenceView("distro_affected", { ...affectedEv, source_url: "https://osv.mirror.example" });
+    assert.equal(mirror.sourceUrl, "https://osv.mirror.example");
+    assert.equal(mirror.publicOsv, false);
   });
 
   test("non-distro methods have no evidence view", () => {
     assert.equal(distroEvidenceView("nvd_cpe", affectedEv), null);
+  });
+});
+
+// Codex R1 Medium-1: the distro_fixed badge must lead with the review / still
+// open state in both locales, so a list scan never reads it as resolved.
+describe("distro_fixed badge wording", () => {
+  const load = (loc) =>
+    JSON.parse(readFileSync(new URL(`../../../messages/${loc}.json`, import.meta.url), "utf8")).MatchMethod;
+  test("en leads with Review and says the finding stays open", () => {
+    const m = load("en");
+    assert.match(m.distroFixed, /^Review required/);
+    assert.match(m.distroFixed, /still open/);
+  });
+  test("ja leads with 要確認 and says the finding stays open", () => {
+    const m = load("ja");
+    assert.match(m.distroFixed, /^要確認/);
+    assert.match(m.distroFixed, /未解決/);
+  });
+  test("both locales define the same keys", () => {
+    assert.deepEqual(Object.keys(load("en")).sort(), Object.keys(load("ja")).sort());
   });
 });

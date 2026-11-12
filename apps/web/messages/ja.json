@@ -1547,7 +1547,7 @@
     "distroAffected": "ディストリ判定: 影響あり",
     "distroAffectedUpgrade": "ディストリ判定: 影響あり — {fixed} へ更新",
     "distroUnfixed": "ディストリ判定: 影響あり (修正未提供)",
-    "distroFixed": "ディストリで修正済み — 要確認",
+    "distroFixed": "要確認 — ディストリでは修正済み (未解決のまま)",
     "highConfidenceHint": "確度: 高。ディストリビューション自身のデータで、導入中のパッケージ版が影響を受けると判定されています。",
     "distroFixedHint": "ディストリビューションのデータでは、導入中の版に修正が含まれています。人が根拠を確認するまで、この検出は未解決のまま件数に含まれます。",
     "distroFixedReview": "自動では解決扱いにしません。ディストリビューションのデータでは導入中の版に修正が含まれていますが、この検出は未解決のまま件数に含まれます。下の根拠を確認し、妥当であればご自身で VEX (not_affected) を登録してください。",
@@ -1564,6 +1564,11 @@
     "fixed": "修正版",
     "fetchedAt": "取得日時",
     "records": "OSV レコード",
-    "laterReleasesCaveat": "{release} はサポート終了済みの Debian リリースで、ディストリビューションのデータに掲載されていません。この判定は後続リリース ({releases}) のデータから推定したものです (個別の記載がないリリースは後続の修正版で修正済みとみなす Debian の規則)。利用前に確認してください。"
+    "laterReleasesCaveat": "{release} はサポート終了済みの Debian リリースで、ディストリビューションのデータに掲載されていません。この判定は後続リリース ({releases}) のデータから推定したものです (個別の記載がないリリースは後続の修正版で修正済みとみなす Debian の規則)。利用前に確認してください。",
+    "showEvidenceFor": "{cve} の根拠を表示",
+    "hideEvidenceFor": "{cve} の根拠を隠す",
+    "sourceUrl": "取得先",
+    "dataModified": "データ版",
+    "mirrorRecordsNote": "この判定は {source} のデータを使っています。レコードのリンクは公開版の osv.dev を開くため、内容が異なる場合があります。"
   }
 }

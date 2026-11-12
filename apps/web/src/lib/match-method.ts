@@ -77,6 +77,7 @@ export function parseDistroEvidence(raw: unknown): DistroEvidence | null {
   const o = raw as Record<string, unknown>;
   return {
     source: str(o.source),
+    source_url: str(o.source_url),
     status: str(o.status),
     basis: str(o.basis),
     release: str(o.release),
@@ -136,13 +137,42 @@ export interface DistroEvidenceView {
   fixed?: string;
   records: DistroEvidenceRecord[];
   fetchedAt?: string;
+  /** The endpoint ORIGIN the data came from (the API never sends more). */
+  sourceUrl?: string;
+  /** The data's own revision (newest OSV `modified` of the package). */
+  dataModified?: string;
+  /**
+   * true when the data came from OSV's public API (or the API did not say):
+   * the osv.dev record links then show the records the verdict used. false
+   * for a configured mirror, whose records may differ from osv.dev's.
+   */
+  publicOsv: boolean;
+}
+
+const PUBLIC_OSV_ORIGIN = "https://api.osv.dev";
+
+const DISTRO_STATUSES = new Set(["affected", "unfixed", "fixed"]);
+
+/**
+ * Evidence is usable only when it is recognisably DistroEvidence: a known
+ * status, a release and at least one record. Anything less (an empty object,
+ * a partial or corrupted document) is shown as "no evidence recorded" rather
+ * than as a table of dashes that looks like a verdict's basis.
+ */
+function coherent(ev: DistroEvidence): boolean {
+  return (
+    ev.status !== undefined &&
+    DISTRO_STATUSES.has(ev.status) &&
+    ev.release !== undefined &&
+    (ev.records?.length ?? 0) > 0
+  );
 }
 
 export function distroEvidenceView(method: unknown, evidence: unknown): DistroEvidenceView | null {
   if (!isDistroMatchMethod(method)) return null;
   const ev = parseDistroEvidence(evidence);
-  if (!ev) {
-    return { method, hasEvidence: false, inferredFromLaterReleases: false, laterReleases: [], records: [] };
+  if (!ev || !coherent(ev)) {
+    return { method, hasEvidence: false, inferredFromLaterReleases: false, laterReleases: [], records: [], publicOsv: true };
   }
   return {
     method,
@@ -157,5 +187,8 @@ export function distroEvidenceView(method: unknown, evidence: unknown): DistroEv
     fixed: ev.fixed,
     records: (ev.records ?? []).map((id) => ({ id, url: osvRecordUrl(id) })),
     fetchedAt: ev.fetched_at,
+    sourceUrl: ev.source_url,
+    dataModified: ev.data_modified,
+    publicOsv: ev.source_url === undefined || ev.source_url.replace(/\/+$/, "") === PUBLIC_OSV_ORIGIN,
   };
 }
