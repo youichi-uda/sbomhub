@@ -716,15 +716,34 @@ func TestM72YoungHoldFollowsModeSwitches(t *testing.T) {
 	if s := state(b); s != ScanStateRunning {
 		t.Fatalf("holding: %s, want running", s)
 	}
+	// A hold already in place is kept by the immediate scripts until the
+	// key is no longer young (Codex M72 eviction R2 Medium-1: it may stand
+	// for a real eviction whose runs have not rejoined).
 	store.noEvict.Store(true)
-	if s := state(b); s != ScanStateCompleted {
-		t.Fatalf("switched to immediate: %s, want completed", s)
+	if s := state(b); s != ScanStateRunning {
+		t.Fatalf("switched to immediate while held: %s, want running", s)
+	}
+	b2 := uuid.New()
+	store.noEvict.Store(false)
+	if err := store.begin(ctx, b2, 1); err != nil {
+		t.Fatal(err)
+	}
+	store.noEvict.Store(true)
+	if _, err := store.finish(ctx, b2, 1, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if s := state(b2); s != ScanStateCompleted {
+		t.Fatalf("finished under immediate, never held: %s, want completed", s)
 	}
 	// Once no longer young, completed in either mode.
 	time.Sleep(450 * time.Millisecond)
 	store.noEvict.Store(false)
 	if s := state(a); s != ScanStateCompleted {
 		t.Fatalf("aged out, holding: %s, want completed", s)
+	}
+	store.noEvict.Store(true)
+	if s := state(b); s != ScanStateCompleted {
+		t.Fatalf("held key aged out, immediate: %s, want completed", s)
 	}
 	// A direct mark is not re-held.
 	c := uuid.New()

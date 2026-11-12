@@ -26,3 +26,17 @@ func TestM72RedisCannotEvict(t *testing.T) {
 		}
 	}
 }
+
+// Codex M72 eviction R2 Low-1: the re-probe interval is measured on the
+// monotonic clock, so a wall-clock step back cannot postpone it.
+func TestM72ProbeIntervalIsMonotonic(t *testing.T) {
+	s := &redisScanStatusStore{}
+	s.probeAt.Store(monoNow() - int64(evictionProbeEvery) - 1)
+	if !s.probeDue() {
+		t.Fatal("probe not due after the interval")
+	}
+	s.probeAt.Store(monoNow())
+	if s.probeDue() {
+		t.Fatal("probe due right after one")
+	}
+}

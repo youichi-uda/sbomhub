@@ -270,8 +270,12 @@ local function publish(now)
   -- YOUNG is 0 while Redis cannot evict (the immediate scripts); such a
   -- young completion is marked 'c' so the holding scripts re-hold it if
   -- eviction becomes possible while the key is still young.
+  -- A hold already in place ('1') is kept until the key is no longer young
+  -- whichever scripts run (Codex M72 eviction R2 Medium-1): it may stand for
+  -- a real eviction whose runs have not rejoined.
   local b = born_ms()
-  if b and now - b < YOUNG then
+  local held = redis.call('HGET', K, 'young_hold') == '1'
+  if b and (now - b < YOUNG or (held and now - b < YOUNG_SPAN)) then
     redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated', now, 'young_hold', '1')
     return
   end
@@ -488,9 +492,9 @@ local runs_now, _, intents_now = fields()
 local idle = count(runs_now) == 0 and count(intents_now) == 0
 local yh = redis.call('HGET', K, 'young_hold')
 if not changed and idle and yh == '1' then
-  -- held as running while the key was young: re-evaluate
+  -- held as running while the key was young: re-evaluate once it is not
   local b = born_ms()
-  if not b or now - b >= YOUNG then changed = true end
+  if not b or (now - b >= YOUNG and now - b >= YOUNG_SPAN) then changed = true end
 elseif not changed and idle and yh == 'c' then
   -- completed young under the immediate scripts: hold it now if these
   -- scripts hold and the key is still young
@@ -576,25 +580,35 @@ func (s *redisScanStatusStore) sc() *statusScripts {
 	return s.scripts
 }
 
+// monoEpoch anchors monoNow: time.Since uses the monotonic clock, so a
+// wall-clock step cannot stall the re-probe (Codex M72 eviction R2 Low-1).
+var monoEpoch = time.Now()
+
+func monoNow() int64 { return int64(time.Since(monoEpoch)) }
+
+func (s *redisScanStatusStore) probeDue() bool {
+	at := s.probeAt.Load()
+	return at == 0 || monoNow()-at >= int64(evictionProbeEvery) // 0: never probed
+}
+
 // probeNow reads the eviction settings and waits for the answer (bounded by
 // the store's operation timeout): used once, before the first scan (Codex
 // M72 eviction R1 Medium-1).
 func (s *redisScanStatusStore) probeNow() {
-	s.probeAt.Store(time.Now().UnixNano())
+	s.probeAt.Store(monoNow())
 	s.noEvict.Store(s.probeNoEviction())
 }
 
 // maybeProbe re-reads the eviction settings in the background when the last
 // read is older than evictionProbeEvery. It never delays the caller.
 func (s *redisScanStatusStore) maybeProbe() {
-	now := time.Now().UnixNano()
-	if now-s.probeAt.Load() < int64(evictionProbeEvery) {
+	if !s.probeDue() {
 		return
 	}
 	if !s.probeBusy.CompareAndSwap(false, true) {
 		return
 	}
-	s.probeAt.Store(now)
+	s.probeAt.Store(monoNow())
 	go func() {
 		defer s.probeBusy.Store(false)
 		s.noEvict.Store(s.probeNoEviction())
