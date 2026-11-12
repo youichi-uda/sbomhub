@@ -723,6 +723,8 @@ func TestM72YoungHoldFollowsModeSwitches(t *testing.T) {
 	if s := state(b); s != ScanStateRunning {
 		t.Fatalf("switched to immediate while held: %s, want running", s)
 	}
+	// (Forcing noEvict here bypasses setNoEvict's grace span, which keeps the
+	// holding scripts after a real transition: this checks only the scripts.)
 	b2 := uuid.New()
 	store.noEvict.Store(false)
 	if err := store.begin(ctx, b2, 1); err != nil {

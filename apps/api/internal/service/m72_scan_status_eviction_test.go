@@ -40,3 +40,33 @@ func TestM72ProbeIntervalIsMonotonic(t *testing.T) {
 		t.Fatal("probe due right after one")
 	}
 }
+
+// Codex M72 eviction R3 Medium-1: a key created under the holding scripts
+// may stand for an eviction; when a later probe finds Redis can no longer
+// evict, the holding scripts stay in use for one young span, so such a key
+// cannot publish completed before its evicted runs could have rejoined. The
+// first probe (at startup) applies at once.
+func TestM72NoEvictTransitionKeepsHoldingForOneSpan(t *testing.T) {
+	hold, imm := &statusScripts{}, &statusScripts{}
+	s := &redisScanStatusStore{scripts: hold, immediate: imm}
+	s.setNoEvict(true, true)
+	if s.sc() != imm {
+		t.Fatal("initial no-eviction probe: holding scripts, want immediate")
+	}
+	s.setNoEvict(false, false)
+	if s.sc() != hold {
+		t.Fatal("eviction possible: immediate scripts, want holding")
+	}
+	s.setNoEvict(true, false)
+	if s.sc() != hold {
+		t.Fatal("right after Redis stopped evicting: immediate scripts, want holding for one span")
+	}
+	s.immediateFrom.Store(monoNow() - 1)
+	if s.sc() != imm {
+		t.Fatal("after the span: holding scripts, want immediate")
+	}
+	s.setNoEvict(true, false) // unchanged answer: no new grace
+	if s.sc() != imm {
+		t.Fatal("a repeated no-eviction answer restarted the grace")
+	}
+}

@@ -554,6 +554,11 @@ type redisScanStatusStore struct {
 	// noEvict: the last probe found maxmemory 0 or policy noeviction.
 	// Unknown (no probe yet, CONFIG refused, Redis down) counts as false.
 	noEvict atomic.Bool
+	// immediateFrom (monoNow): the immediate scripts are not used before it.
+	// Set one young span ahead when Redis stops being able to evict (Codex M72
+	// eviction R3 Medium-1: a key created under the holding scripts may stand
+	// for an eviction whose runs have not rejoined).
+	immediateFrom atomic.Int64
 	// probe enables the periodic CONFIG GET (off for stores built in tests).
 	probe     bool
 	probeAt   atomic.Int64
@@ -574,7 +579,7 @@ func (s *redisScanStatusStore) sc() *statusScripts {
 	if s.probe {
 		s.maybeProbe()
 	}
-	if s.immediate != nil && s.noEvict.Load() {
+	if s.immediate != nil && s.noEvict.Load() && monoNow() >= s.immediateFrom.Load() {
 		return s.immediate
 	}
 	return s.scripts
@@ -596,7 +601,17 @@ func (s *redisScanStatusStore) probeDue() bool {
 // M72 eviction R1 Medium-1).
 func (s *redisScanStatusStore) probeNow() {
 	s.probeAt.Store(monoNow())
-	s.noEvict.Store(s.probeNoEviction())
+	s.setNoEvict(s.probeNoEviction(), true)
+}
+
+// setNoEvict records a probe's answer. A later answer that turns "can evict
+// (or unknown)" into "cannot evict" delays the immediate scripts by one young
+// span; the initial answer applies at once.
+func (s *redisScanStatusStore) setNoEvict(v, initial bool) {
+	if v && !initial && !s.noEvict.Load() {
+		s.immediateFrom.Store(monoNow() + int64(scanStatusYoung))
+	}
+	s.noEvict.Store(v)
 }
 
 // maybeProbe re-reads the eviction settings in the background when the last
@@ -611,7 +626,7 @@ func (s *redisScanStatusStore) maybeProbe() {
 	s.probeAt.Store(monoNow())
 	go func() {
 		defer s.probeBusy.Store(false)
-		s.noEvict.Store(s.probeNoEviction())
+		s.setNoEvict(s.probeNoEviction(), false)
 	}()
 }
 
