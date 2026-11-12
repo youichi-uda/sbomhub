@@ -31,8 +31,8 @@ import (
 //
 //   - At most N scans of one tenant run at once in one API process (default 2;
 //     "off" disables the limit). Scans of other tenants never wait for them.
-//   - A scan that finds its tenant's slots taken waits, FIFO-ish (Go channel
-//     order), and the wait counts against its own scan deadline: the deadline
+//   - A scan that finds its tenant's slots taken waits, first come first
+//     served, and the wait counts against its own scan deadline: the deadline
 //     still bounds the whole scan from the moment it was requested, so the
 //     scan-status retention (deadline + 15m) stays sufficient. A scan whose
 //     deadline fires while it waits is reported failed (deadline_exceeded)
@@ -55,10 +55,13 @@ type TenantScanSlots struct {
 	slots map[uuid.UUID]*tenantSlot
 }
 
+// tenantSlot is one tenant's slots: how many are held, and the waiters in
+// arrival order. Everything is read and changed under TenantScanSlots.mu, so
+// the free-slot check, the reservation and the queue cap are one atomic step
+// (Codex M72 R2 High-2).
 type tenantSlot struct {
-	sem     chan struct{}
-	refs    int // holders + waiters; the entry is dropped at 0
-	waiting int
+	inUse   int
+	waiters []chan struct{}
 }
 
 // TenantScanQueueLimit is how many scans of one tenant may WAIT for a slot
@@ -80,63 +83,75 @@ func NewTenantScanSlots(limit int) *TenantScanSlots {
 // Limit is the configured per-tenant limit (0 = unlimited).
 func (s *TenantScanSlots) Limit() int { return s.limit }
 
-// Acquire waits for one of tenantID's slots. It returns the release function
-// (call exactly once) and how long it waited, or ctx's interruption
-// (ErrScanDeadlineExceeded / ErrScanCancelled) if ctx ended first.
+// Acquire takes one of tenantID's slots, waiting (first come, first served)
+// while ctx allows. It returns the release function (idempotent) and how long
+// it waited; ErrScanQueueFull when too many scans of the tenant already wait;
+// or ctx's interruption (ErrScanDeadlineExceeded / ErrScanCancelled).
 func (s *TenantScanSlots) Acquire(ctx context.Context, tenantID uuid.UUID) (func(), time.Duration, error) {
 	if s == nil || s.limit == 0 {
 		return func() {}, 0, nil
 	}
+	start := time.Now()
 	s.mu.Lock()
 	ts := s.slots[tenantID]
 	if ts == nil {
-		ts = &tenantSlot{sem: make(chan struct{}, s.limit)}
+		ts = &tenantSlot{}
 		s.slots[tenantID] = ts
 	}
-	free := len(ts.sem) < cap(ts.sem)
-	if !free && ts.waiting >= TenantScanQueueLimit(s.limit) {
+	if ts.inUse < s.limit {
+		ts.inUse++
 		s.mu.Unlock()
-		return nil, 0, fmt.Errorf("%d scans of the tenant already wait for a slot: %w", ts.waiting, ErrScanQueueFull)
+		return s.releaser(tenantID, ts), 0, nil
 	}
-	ts.refs++
-	ts.waiting++
+	if len(ts.waiters) >= TenantScanQueueLimit(s.limit) {
+		n := len(ts.waiters)
+		s.mu.Unlock()
+		return nil, 0, fmt.Errorf("%d scans of the tenant already wait for a slot: %w", n, ErrScanQueueFull)
+	}
+	ch := make(chan struct{})
+	ts.waiters = append(ts.waiters, ch)
 	s.mu.Unlock()
-	waited := func() {
-		s.mu.Lock()
-		ts.waiting--
-		s.mu.Unlock()
-	}
 
-	drop := func() {
-		s.mu.Lock()
-		ts.refs--
-		if ts.refs == 0 {
-			delete(s.slots, tenantID)
-		}
-		s.mu.Unlock()
-	}
-
-	start := time.Now()
 	select {
-	case ts.sem <- struct{}{}:
-		waited()
-	default:
-		select {
-		case ts.sem <- struct{}{}:
-			waited()
-		case <-ctx.Done():
-			waited()
-			drop()
-			return nil, time.Since(start), fmt.Errorf("waiting for a scan slot of the tenant: %w", scanInterruption(ctx))
+	case <-ch:
+		// A releasing scan handed its slot over (inUse unchanged).
+		return s.releaser(tenantID, ts), time.Since(start), nil
+	case <-ctx.Done():
+		s.mu.Lock()
+		for i, w := range ts.waiters {
+			if w == ch {
+				ts.waiters = append(ts.waiters[:i], ts.waiters[i+1:]...)
+				s.mu.Unlock()
+				return nil, time.Since(start), fmt.Errorf("waiting for a scan slot of the tenant: %w", scanInterruption(ctx))
+			}
 		}
+		s.mu.Unlock()
+		// Handed a slot just as ctx ended: pass it on.
+		s.releaser(tenantID, ts)()
+		return nil, time.Since(start), fmt.Errorf("waiting for a scan slot of the tenant: %w", scanInterruption(ctx))
 	}
+}
+
+// releaser returns the idempotent release of one held slot: it goes to the
+// first waiter, or back to the pool.
+func (s *TenantScanSlots) releaser(tenantID uuid.UUID, ts *tenantSlot) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			<-ts.sem
-			drop()
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if len(ts.waiters) > 0 {
+				ch := ts.waiters[0]
+				ts.waiters = ts.waiters[1:]
+				close(ch)
+				return
+			}
+			ts.inUse--
+			if ts.inUse == 0 && s.slots[tenantID] == ts {
+				delete(s.slots, tenantID)
+			}
 		})
-	}, time.Since(start), nil
+	}
 }
 
 // InUse reports how many of tenantID's slots are held (tests, logs).
@@ -147,7 +162,7 @@ func (s *TenantScanSlots) InUse(tenantID uuid.UUID) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if ts := s.slots[tenantID]; ts != nil {
-		return len(ts.sem)
+		return ts.inUse
 	}
 	return 0
 }
@@ -160,7 +175,7 @@ func (s *TenantScanSlots) Waiting(tenantID uuid.UUID) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if ts := s.slots[tenantID]; ts != nil {
-		return ts.waiting
+		return len(ts.waiters)
 	}
 	return 0
 }

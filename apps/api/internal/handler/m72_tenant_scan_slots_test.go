@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -193,5 +194,71 @@ func TestM72R1_TenantQueueIsBounded(t *testing.T) {
 		if o := <-waiters; o.failed() {
 			t.Fatalf("queued scan failed: %v", o.markers)
 		}
+	}
+}
+
+// Codex M72 R2 High-2: the queue cap must hold under a simultaneous burst
+// (the free-slot check and the reservation were not atomic).
+func TestM72R2_QueueCapHoldsUnderABurst(t *testing.T) {
+	s := service.NewTenantScanSlots(1)
+	tenant := uuid.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const n = 300
+	start := make(chan struct{})
+	var full, waiting atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, err := s.Acquire(ctx, tenant)
+			switch {
+			case errors.Is(err, service.ErrScanQueueFull):
+				full.Add(1)
+			case err == nil:
+				// holds a slot until cancel
+			default:
+				waiting.Add(1) // was waiting, cancelled at the end
+			}
+		}()
+	}
+	close(start)
+	waitUntil(t, func() bool { return int(full.Load())+s.Waiting(tenant)+s.InUse(tenant) == n })
+	if w := s.Waiting(tenant); w > service.TenantScanQueueLimit(1) {
+		t.Fatalf("%d waiters, cap %d", w, service.TenantScanQueueLimit(1))
+	}
+	if got, want := int(full.Load()), n-1-service.TenantScanQueueLimit(1); got != want {
+		t.Fatalf("queue_full for %d scans, want %d", got, want)
+	}
+	cancel()
+	wg.Wait()
+}
+
+// Slots are handed over FIFO and a cancelled waiter never leaks a slot.
+func TestM72R2_SlotHandOverAndCancelledWaiter(t *testing.T) {
+	s := service.NewTenantScanSlots(1)
+	tenant := uuid.New()
+	rel, _, _ := s.Acquire(context.Background(), tenant)
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { _, _, err := s.Acquire(ctx, tenant); errc <- err }()
+	waitUntil(t, func() bool { return s.Waiting(tenant) == 1 })
+	got := make(chan func(), 1)
+	go func() { r, _, _ := s.Acquire(context.Background(), tenant); got <- r }()
+	waitUntil(t, func() bool { return s.Waiting(tenant) == 2 })
+	cancel()
+	if err := <-errc; !errors.Is(err, service.ErrScanCancelled) {
+		t.Fatalf("cancelled waiter: %v", err)
+	}
+	rel()
+	r2 := <-got
+	if s.InUse(tenant) != 1 || s.Waiting(tenant) != 0 {
+		t.Fatalf("in use %d waiting %d", s.InUse(tenant), s.Waiting(tenant))
+	}
+	r2()
+	if s.InUse(tenant) != 0 {
+		t.Fatalf("slot leaked: in use %d", s.InUse(tenant))
 	}
 }
