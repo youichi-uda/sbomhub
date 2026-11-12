@@ -200,6 +200,22 @@ test.describe('IPA settings load failure (M71)', () => {
         await expect(page.getByRole('button', { name: IPA.saveSettings })).toBeVisible();
     });
 
+    // Codex M71 R2 Medium: an empty 2xx answer is not settings either.
+    for (const [label, fulfill] of [
+        ['204 No Content', { status: 204, body: '' }],
+        ['200 null', { status: 200, contentType: 'application/json', body: 'null' }],
+    ] as const) {
+        test(`should treat an empty answer (${label}) as a load failure`, async ({ page }) => {
+            await page.route(`${API_BASE_URL}/api/v1/settings/ipa`, (route) =>
+                route.request().method() === 'GET' ? route.fulfill(fulfill) : route.continue(),
+            );
+            await page.goto('/en/settings/ipa');
+            await expect(page.getByTestId('ipa-settings-load-error')).toContainText(IPA.loadFailed, { timeout: 15000 });
+            await expect(page.getByRole('switch')).toHaveCount(0);
+            await expect(page.getByRole('button', { name: IPA.saveSettings })).toHaveCount(0);
+        });
+    }
+
     test('should show the load error in Japanese too', async ({ page }) => {
         await page.route(`${API_BASE_URL}/api/v1/settings/ipa`, (route) =>
             route.request().method() === 'GET' ? route.abort() : route.continue(),

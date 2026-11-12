@@ -32,7 +32,13 @@ export default function IPASettingsPage() {
     queryKey: queryKeys.ipa.settings(),
     queryFn: async (): Promise<IPASyncSettings> => {
       try {
-        return await api.ipa.getSettings();
+        const settings = await api.ipa.getSettings();
+        // An empty 2xx answer (204, `null`) is not settings either: it
+        // would bring back the form of defaults (Codex M71 R2 Medium).
+        if (settings == null || typeof settings !== "object") {
+          throw new Error("IPA settings: empty response");
+        }
+        return settings;
       } catch (error) {
         // M71: a failed load is an error with Retry (M65 bug 10), not a form
         // of defaults that looked like "no settings" and saved nothing.
