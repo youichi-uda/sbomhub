@@ -58,6 +58,7 @@ type ScanTracker struct {
 	// than that cannot belong to a live run.
 	maxRunAge time.Duration
 	revSeq    uint64
+	lastSweep time.Time
 
 	// shared (M72) is the Redis store; nil keeps the tracker in-memory only.
 	shared scanStatusStore
@@ -103,12 +104,26 @@ type scanEntry struct {
 	rev uint64
 }
 
-// put stores e as sbomID's entry with a new revision. t.mu is held.
+// put stores e as sbomID's entry with a new revision. t.mu is held. Every
+// sweepEvery transitions it also drops entries older than retention with no
+// active run (Codex M72 R16 Medium-3): entries were dropped only when their
+// own SBOM was read, so unpolled ones (scheduled scans) stayed forever.
 func (t *ScanTracker) put(sbomID uuid.UUID, e scanEntry) {
 	t.revSeq++
 	e.rev = t.revSeq
 	t.entries[sbomID] = e
+	if t.revSeq%sweepEvery == 0 || time.Since(t.lastSweep) > t.retention {
+		t.lastSweep = time.Now()
+		for id, old := range t.entries {
+			if len(old.active) == 0 && time.Since(old.updatedAt) > t.retention {
+				delete(t.entries, id)
+			}
+		}
+	}
 }
+
+// sweepEvery: put sweeps expired entries at least every this many transitions.
+const sweepEvery = 1024
 
 // snapshot returns, atomically, whether a run of sbomID is active in this
 // process and the entry's revision.
