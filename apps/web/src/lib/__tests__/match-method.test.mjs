@@ -94,6 +94,10 @@ describe("distroBadge", () => {
       { fixed: "9.9.9" },
       { ...affectedEv, status: "fixed" },
       { ...affectedEv, records: [] },
+      // Codex R3 Low-1: no package / installed version
+      { status: "affected", release: "Debian:12", records: ["DSA-1"], fixed: "9999.0" },
+      { ...affectedEv, installed: undefined },
+      { ...affectedEv, package: undefined },
     ]) {
       assert.deepEqual(
         distroBadge("distro_affected", ev),
@@ -197,7 +201,7 @@ describe("distroEvidenceView", () => {
   });
 
   test("an id that is not a token is kept as text without a link", () => {
-    const v = distroEvidenceView("distro_unfixed", { status: "unfixed", release: "Debian:12", records: ["DSA-1", "bad id"] });
+    const v = distroEvidenceView("distro_unfixed", { status: "unfixed", release: "Debian:12", package: "p", installed: "1-1", records: ["DSA-1", "bad id"] });
     assert.deepEqual(v.records, [
       { id: "DSA-1", url: "https://osv.dev/vulnerability/DSA-1" },
       { id: "bad id", url: null },
@@ -251,6 +255,22 @@ describe("distroEvidenceView", () => {
     assert.equal(distroEvidenceView("distro_fixed", fixedLaterEv).hasEvidence, true);
   });
 
+  // Codex R3 Low-1: a later_releases verdict names the releases that decided it.
+  test("later_releases without deciding releases is no evidence", () => {
+    assert.equal(distroEvidenceView("distro_fixed", { ...fixedLaterEv, ecosystems: [] }).hasEvidence, false);
+    assert.equal(distroEvidenceView("distro_fixed", { ...fixedLaterEv, ecosystems: undefined }).hasEvidence, false);
+  });
+
+  // Codex R3 Low-2: equivalent spellings of the public origin are public.
+  test("public OSV origin is compared after URL normalisation", () => {
+    for (const u of ["https://api.osv.dev:443", "https://API.OSV.DEV", "https://api.osv.dev/"]) {
+      assert.equal(distroEvidenceView("distro_affected", { ...affectedEv, source_url: u }).publicOsv, true, u);
+    }
+    for (const u of ["https://api.osv.dev:8443", "http://api.osv.dev", "https://api.osv.dev.evil.example", "configured-endpoint", "https://user@api.osv.dev"]) {
+      assert.equal(distroEvidenceView("distro_affected", { ...affectedEv, source_url: u }).publicOsv, false, u);
+    }
+  });
+
   // Codex R2 Medium-2: only an explicit public endpoint is public.
   test("an absent endpoint is unknown, not public OSV", () => {
     const v = distroEvidenceView("distro_affected", { ...affectedEv, source_url: undefined });
@@ -274,6 +294,15 @@ describe("distro_fixed badge wording", () => {
     const m = load("en");
     assert.match(m.distroFixed, /^Review required/);
     assert.match(m.distroFixed, /still open/);
+  });
+  // Codex R3 Medium-1: the review note must not steer the reviewer to
+  // not_affected (UPGRADE.md §21: distro_fixed is not not_affected).
+  test("the review note does not prescribe not_affected", () => {
+    for (const loc of ["en", "ja"]) {
+      const m = load(loc);
+      assert.doesNotMatch(m.distroFixedReview, /not_affected/, loc);
+      assert.match(m.distroFixedReview, /fixed/, loc);
+    }
   });
   test("ja leads with 要確認 and says the finding stays open", () => {
     const m = load("ja");

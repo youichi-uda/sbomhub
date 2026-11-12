@@ -154,6 +154,21 @@ export interface DistroEvidenceView {
 
 const PUBLIC_OSV_ORIGIN = "https://api.osv.dev";
 
+/**
+ * Whether an evidence endpoint is OSV's public API, compared as a URL origin
+ * (scheme, lower-cased host, effective port), so `https://API.osv.dev:443/`
+ * matches and `https://api.osv.dev.example` or a credentialed URL does not.
+ */
+export function isPublicOsvOrigin(sourceUrl: string | undefined): boolean {
+  if (sourceUrl === undefined) return false;
+  try {
+    const u = new URL(sourceUrl);
+    return u.username === "" && u.password === "" && u.origin === PUBLIC_OSV_ORIGIN;
+  } catch {
+    return false;
+  }
+}
+
 const STATUS_FOR: Record<DistroMatchMethod, string> = {
   distro_affected: "affected",
   distro_unfixed: "unfixed",
@@ -177,8 +192,10 @@ export function validDistroEvidence(method: unknown, raw: unknown): DistroEviden
     !ev ||
     ev.status !== STATUS_FOR[method] ||
     ev.release === undefined ||
+    ev.package === undefined ||
+    ev.installed === undefined ||
     (ev.records?.length ?? 0) === 0 ||
-    (ev.basis === "later_releases" && ev.status !== "fixed")
+    (ev.basis === "later_releases" && (ev.status !== "fixed" || (ev.ecosystems?.length ?? 0) === 0))
   ) {
     return null;
   }
@@ -209,6 +226,6 @@ export function distroEvidenceView(method: unknown, evidence: unknown): DistroEv
     // Only an explicit public endpoint is public; an unrecorded one is
     // unknown and gets the same "osv.dev may differ" note as a mirror (Codex
     // R2 Medium-2).
-    publicOsv: ev.source_url !== undefined && ev.source_url.replace(/\/+$/, "") === PUBLIC_OSV_ORIGIN,
+    publicOsv: isPublicOsvOrigin(ev.source_url),
   };
 }

@@ -1550,7 +1550,7 @@
     "distroFixed": "Review required — distribution reports fixed, still open",
     "highConfidenceHint": "High confidence: the distribution's own data says the installed package version is affected.",
     "distroFixedHint": "The distribution's data says the installed version already contains the fix. This finding is still open and still counted until a person reviews the evidence.",
-    "distroFixedReview": "Not resolved automatically. The distribution's data says the installed version already contains the fix, but this finding stays open and counted. Check the evidence below; if it holds, record a VEX statement (not_affected) yourself.",
+    "distroFixedReview": "Not resolved automatically. The distribution's data says the installed version already contains the fix, but this finding stays open and counted. Check the evidence below; if it holds, record a VEX statement yourself with the status that fits (for a fix the distribution shipped, usually fixed).",
     "showEvidence": "Show evidence",
     "hideEvidence": "Hide evidence",
     "noEvidence": "No evidence was recorded for this label.",
