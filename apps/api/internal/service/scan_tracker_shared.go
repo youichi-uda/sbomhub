@@ -137,7 +137,7 @@ func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedE
 	m := tail.merged
 	switch ev.kind {
 	case evBegin, evRejoin:
-		m.begin(ev.gen)
+		m.begin(ev.gen, ev.kind == evBegin)
 	case evFinish:
 		m.finish(ev.gen)
 		if ev.msg != "" {
@@ -217,9 +217,11 @@ func (t *ScanTracker) drain(sbomID uuid.UUID) {
 		ev := q.events[0]
 		var merged *mergeSet
 		if ev.kind == evMerge {
-			// Frozen from now on: later overflow opens a new merge event.
+			// Frozen from now on (later overflow opens a new merge event),
+			// so it is read without the lock (Codex M72 R16 High-2: no copy
+			// under qMu).
 			ev.applying = true
-			merged = ev.merged.clone()
+			merged = ev.merged
 		}
 		t.qMu.Unlock()
 

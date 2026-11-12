@@ -477,6 +477,12 @@ func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen
 type mergeSet struct {
 	begins   map[uint64]bool
 	finishes map[uint64]bool
+	// fresh: runs whose FIRST write (their Begin) was folded into this merge.
+	// No earlier write of theirs is queued or applied, so when such a run also
+	// finishes inside the merge it leaves nothing but its failure (Codex M72
+	// R16 High-2) — the merge stays bounded by the runs live at once plus the
+	// writes queued before it, however many requests arrive.
+	fresh    map[uint64]bool
 	failures []mergeFailure
 }
 
@@ -486,16 +492,26 @@ type mergeFailure struct {
 }
 
 func newMergeSet() *mergeSet {
-	return &mergeSet{begins: map[uint64]bool{}, finishes: map[uint64]bool{}}
+	return &mergeSet{begins: map[uint64]bool{}, finishes: map[uint64]bool{}, fresh: map[uint64]bool{}}
 }
 
-func (m *mergeSet) begin(gen uint64) { m.begins[gen] = true }
+// begin folds a Begin (fresh: the run's first write) or a rejoin.
+func (m *mergeSet) begin(gen uint64, fresh bool) {
+	m.begins[gen] = true
+	if fresh {
+		m.fresh[gen] = true
+	}
+}
 
-// finish always records the removal (Codex M72 R14 Medium-4): even when the
-// run began inside this merge, an earlier queued write (a rejoin) may have
-// activated it in Redis.
+// finish folds a Finish. A run that began fresh inside this merge is netted
+// away; any other removal is always written (Codex M72 R14 Medium-4: an
+// earlier queued rejoin may have activated it in Redis).
 func (m *mergeSet) finish(gen uint64) {
 	delete(m.begins, gen)
+	if m.fresh[gen] {
+		delete(m.fresh, gen)
+		return
+	}
 	m.finishes[gen] = true
 }
 
@@ -511,16 +527,6 @@ func (m *mergeSet) addFailure(msg string, reasons []string) {
 		}
 	}
 	m.failures = append(m.failures, mergeFailure{msg, append([]string(nil), reasons...)})
-}
-
-func (m *mergeSet) clone() *mergeSet {
-	c := newMergeSet()
-	maps.Copy(c.begins, m.begins)
-	maps.Copy(c.finishes, m.finishes)
-	for _, f := range m.failures {
-		c.failures = append(c.failures, mergeFailure{f.msg, slices.Clone(f.reasons)})
-	}
-	return c
 }
 
 func (m *mergeSet) json() string {

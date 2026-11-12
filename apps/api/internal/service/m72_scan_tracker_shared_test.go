@@ -1069,7 +1069,7 @@ func TestM72R14_DrainLineIsFIFO(t *testing.T) {
 // activated it.
 func TestM72R14_MergeFinishAlwaysRemovesTheRun(t *testing.T) {
 	m := newMergeSet()
-	m.begin(7)
+	m.begin(7, false) // a rejoin: an earlier write of run 7 exists
 	m.finish(7)
 	if !m.finishes[7] || m.begins[7] {
 		t.Fatalf("begins %v finishes %v: the finish must still remove run 7", m.begins, m.finishes)
@@ -1105,5 +1105,57 @@ func TestM72R15_BurstOfBeginsAllLandBeforeReturning(t *testing.T) {
 	}
 	if missing > 0 {
 		t.Fatalf("%d of %d Begins returned before their write reached a responsive store", missing, n)
+	}
+}
+
+// Codex M72 R16 High-2: runs that begin AND finish inside one merge leave
+// nothing but their failure — the merge stays bounded however many requests
+// arrive during an outage.
+func TestM72R16_MergeNetsAwayRunsWhollyInside(t *testing.T) {
+	store := newGroupStore()
+	store.setDown(true)
+	a := trackerOn(store, time.Hour)
+	a.queueCap = 2
+	a.beginWait = time.Millisecond
+	id := uuid.New()
+	a.Finish(id, a.Begin(id), nil, "") // fills the queue
+	for i := 0; i < 500; i++ {
+		a.Finish(id, a.Begin(id), []string{ScanReasonQueueFull}, "scan: scan failed (queue_full)")
+	}
+	a.qMu.Lock()
+	q := a.queues[id]
+	tail := q.events[len(q.events)-1]
+	nb, nf := len(tail.merged.begins), len(tail.merged.finishes)
+	a.qMu.Unlock()
+	if nb+nf > 4 {
+		t.Fatalf("merge holds %d begins and %d finishes after 500 runs that began and ended inside it", nb, nf)
+	}
+	store.setDown(false)
+	a.kickQueues()
+	settle(t, a, id)
+	if st, _, _ := trackerOn(store, time.Hour).GetDetail(id); st != ScanStateFailed {
+		t.Fatalf("the merged failure was lost: %s", st)
+	}
+}
+
+// Codex M72 R16 Medium-3: terminal entries nobody polls are swept after
+// retention; active ones are kept.
+func TestM72R16_UnpolledEntriesAreSwept(t *testing.T) {
+	a := NewScanTracker()
+	a.retention = 20 * time.Millisecond
+	for i := 0; i < 100; i++ {
+		id := uuid.New()
+		a.Finish(id, a.Begin(id), nil, "")
+	}
+	running := uuid.New()
+	a.Begin(running)
+	time.Sleep(30 * time.Millisecond)
+	a.Finish(uuid.New(), a.Begin(uuid.New()), nil, "") // any later transition sweeps
+	a.mu.RLock()
+	n := len(a.entries)
+	_, kept := a.entries[running]
+	a.mu.RUnlock()
+	if n > 3 || !kept {
+		t.Fatalf("%d entries left (active kept: %v), want the 100 expired terminal ones swept", n, kept)
 	}
 }
