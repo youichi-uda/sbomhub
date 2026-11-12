@@ -580,6 +580,9 @@ ON CONFLICT (id) DO NOTHING;
 -- scan adds nothing on top and the counts stay deterministic:
 --   vuln-fixture-critical@1.0.0 -> CVE-2021-44228 + CVE-2021-45046 (CRITICAL, KEV)
 --   vuln-fixture-high@1.0.0     -> CVE-2021-23337 + CVE-2020-8203  (HIGH, not KEV)
+--   vuln-fixture-distro@1.0.0   -> CVE-2021-23337 distro_affected, CVE-2021-45046
+--                                  distro_unfixed, CVE-2020-8203 distro_fixed
+--                                  (M70 labels with evidence)
 -- Specs use apps/web/e2e/fixtures/vuln-project.ts rather than these
 -- literals.
 --
@@ -597,16 +600,31 @@ DROP TABLE IF EXISTS e2e_vuln_fixture;
 CREATE OR REPLACE FUNCTION e2e_link_fixture_vulns() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
-    INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at, match_method)
+    INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at, match_method, match_evidence)
     -- 'nvd_keyword', not 'nvd_cpe': this is a name match, and nvd_cpe
     -- claims a verified CPE match the fixture never established.
-    SELECT NEW.id, v.id, NOW(), 'nvd_keyword'
+    SELECT NEW.id, v.id, NOW(), f.method, f.evidence
       FROM (VALUES
-                ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', 'CVE-2021-44228'),
-                ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', 'CVE-2021-45046'),
-                ('pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',     'CVE-2021-23337'),
-                ('pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',     'CVE-2020-8203')
-           ) AS f(purl, cve_id)
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', 'CVE-2021-44228', 'nvd_keyword', NULL::jsonb),
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0', 'CVE-2021-45046', 'nvd_keyword', NULL::jsonb),
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',     'CVE-2021-23337', 'nvd_keyword', NULL::jsonb),
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',     'CVE-2020-8203',  'nvd_keyword', NULL::jsonb),
+                -- M70 distro labels (apps/web/e2e/distro-match.spec.ts).
+                -- The real writer is the scan's distro step
+                -- (apps/api/internal/service/distro_scan.go), which only
+                -- relabels deb / rpm packages from OSV data and so cannot
+                -- run hermetically; this row stands in for its WRITE, with
+                -- evidence in model.DistroEvidence's shape. The versions
+                -- and record ids are synthetic. A pkg:generic purl is never
+                -- a distro package, so an internet-connected scan leaves
+                -- these labels alone.
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-distro@1.0.0',   'CVE-2021-23337', 'distro_affected',
+                 '{"source":"osv","status":"affected","basis":"release","release":"Debian:12","package":"node-lodash","installed":"4.17.21+dfsg-1","fixed":"4.17.21+dfsg-2","records":["DEBIAN-CVE-2021-23337"],"fetched_at":"2026-11-10T00:00:00Z"}'::jsonb),
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-distro@1.0.0',   'CVE-2021-45046', 'distro_unfixed',
+                 '{"source":"osv","status":"unfixed","basis":"release","release":"Debian:12","package":"apache-log4j2","installed":"2.14.1-1","records":["DEBIAN-CVE-2021-45046"],"fetched_at":"2026-11-10T00:00:00Z"}'::jsonb),
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-distro@1.0.0',   'CVE-2020-8203',  'distro_fixed',
+                 '{"source":"osv","status":"fixed","basis":"later_releases","release":"Debian:10","ecosystems":["Debian:11","Debian:12"],"package":"node-lodash","installed":"4.17.15+dfsg-3","fixed":"4.17.15+dfsg-2","records":["DEBIAN-CVE-2020-8203","DLA-0000-1"],"fetched_at":"2026-11-10T00:00:00Z"}'::jsonb)
+           ) AS f(purl, cve_id, method, evidence)
       JOIN vulnerabilities v ON v.cve_id = f.cve_id
      WHERE f.purl = NEW.purl
     ON CONFLICT (component_id, vulnerability_id) DO NOTHING;

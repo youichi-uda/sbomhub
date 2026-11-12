@@ -21,6 +21,8 @@ export const API_BASE_URL =
 export const FIXTURE_PURLS = {
     critical: 'pkg:generic/sbomhub-e2e/vuln-fixture-critical@1.0.0',
     high: 'pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',
+    /** M70: linked with distro labels + evidence (distro-match.spec.ts only). */
+    distro: 'pkg:generic/sbomhub-e2e/vuln-fixture-distro@1.0.0',
 } as const;
 
 export interface FixtureCve {
