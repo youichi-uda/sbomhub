@@ -61,3 +61,45 @@ func TestM72ScanStatus_StateIsReadBeforeTheCounts(t *testing.T) {
 		t.Fatalf("status %v with counts read before the scan's findings: the state must be read first", body["status"])
 	}
 }
+
+// Codex M72 R13 High-1: a whole new scan that begins (and even completes)
+// while the counts are read makes the poll answer running, not the earlier
+// "completed" with counts from before that scan.
+func TestM72ScanStatus_TransitionDuringTheCountsReadsRunning(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(string, string) error { return nil })))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	projectID, sbomID := uuid.New(), uuid.New()
+	mock.ExpectQuery("sbom").WillDelayFor(300 * time.Millisecond).WillReturnRows(
+		sqlmock.NewRows([]string{"id", "project_id", "format", "version", "raw_data", "created_at"}).
+			AddRow(sbomID.String(), projectID.String(), "cyclonedx", "1.5", []byte(`{}`), time.Now()))
+	mock.ExpectQuery("vulns").WillReturnRows(sqlmock.NewRows([]string{"x"}))
+
+	tracker := service.NewScanTracker()
+	tracker.Finish(sbomID, tracker.Begin(sbomID), nil, "") // completed before the poll
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		tracker.Begin(sbomID) // a new scan starts during the count query
+	}()
+	h := &SbomHandler{
+		sbomService: service.NewSbomService(repository.NewSbomRepository(db), repository.NewComponentRepository(db)),
+		scanTracker: tracker,
+	}
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+	c.SetParamNames("id", "sbom_id")
+	c.SetParamValues(projectID.String(), sbomID.String())
+	if err := h.ScanStatus(c); err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if body["status"] != "running" {
+		t.Fatalf("status %v although a scan began during the count query", body["status"])
+	}
+}

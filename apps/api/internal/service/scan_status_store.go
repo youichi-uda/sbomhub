@@ -362,7 +362,8 @@ save_outcomes({})
 expire(ARGV[4])
 return 1`
 
-// Returns false (nil) when there is no entry, else {state, error, reasons}.
+// Returns false (nil) when there is no entry, else {state, error, reasons,
+// updated}.
 const scanStatusGetLua = `
 if redis.call('EXISTS', K) == 0 then return false end
 local now = nowms()
@@ -374,7 +375,17 @@ if not changed and redis.call('HGET', K, 'state') == 'running' and active_count(
   changed = true
 end
 if changed then publish(now) end
-return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]'}`
+return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]', redis.call('HGET', K, 'updated') or ''}`
+
+// statusView is one read of the shared status. version changes with every
+// write of it (Redis's "updated" time of the last change).
+type statusView struct {
+	state   ScanState
+	errMsg  string
+	reasons []string
+	version string
+	found   bool
+}
 
 // scanStatusStore is what the tracker needs from shared storage.
 type scanStatusStore interface {
@@ -390,7 +401,7 @@ type scanStatusStore interface {
 	// merge applies a coalesced overflow (see scanStatusMerge).
 	merge(ctx context.Context, sbomID uuid.UUID, m *mergeSet) error
 	mark(ctx context.Context, sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) error
-	get(ctx context.Context, sbomID uuid.UUID) (state ScanState, errMsg string, reasons []string, found bool, err error)
+	get(ctx context.Context, sbomID uuid.UUID) (statusView, error)
 }
 
 type redisScanStatusStore struct {
@@ -576,31 +587,32 @@ func (s *redisScanStatusStore) mark(ctx context.Context, sbomID uuid.UUID, state
 		string(state), errMsg, reasonsJSON(reasons), s.ttl.Milliseconds()).Err()
 }
 
-func (s *redisScanStatusStore) get(ctx context.Context, sbomID uuid.UUID) (ScanState, string, []string, bool, error) {
+func (s *redisScanStatusStore) get(ctx context.Context, sbomID uuid.UUID) (statusView, error) {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
 	v, err := s.scripts.get.Run(ctx, s.client, scanStatusKeys(sbomID)).StringSlice()
 	if errors.Is(err, redis.Nil) {
-		return ScanStateUnknown, "", nil, false, nil
+		return statusView{}, nil
 	}
 	if err != nil {
-		return ScanStateUnknown, "", nil, false, err
+		return statusView{}, err
 	}
-	if len(v) != 3 {
-		return ScanStateUnknown, "", nil, false, fmt.Errorf("scan status: unexpected reply of %d values", len(v))
+	if len(v) != 4 {
+		return statusView{}, fmt.Errorf("scan status: unexpected reply of %d values", len(v))
 	}
 	state := ScanState(v[0])
 	switch state {
 	case ScanStateRunning, ScanStateCompleted, ScanStateFailed:
 	default:
-		return ScanStateUnknown, "", nil, false, fmt.Errorf("scan status: unexpected state %q", v[0])
+		return statusView{}, fmt.Errorf("scan status: unexpected state %q", v[0])
 	}
+	view := statusView{state: state, version: "s" + v[3], found: true}
 	if state != ScanStateFailed {
-		return state, "", nil, true, nil
+		return view, nil
 	}
-	var reasons []string
-	if err := json.Unmarshal([]byte(v[2]), &reasons); err != nil {
-		reasons = nil
+	view.errMsg = v[1]
+	if err := json.Unmarshal([]byte(v[2]), &view.reasons); err != nil {
+		view.reasons = nil
 	}
-	return state, v[1], reasons, true, nil
+	return view, nil
 }

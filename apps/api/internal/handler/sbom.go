@@ -859,10 +859,10 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	// with the pre-commit counts. (The state is only returned below, after
 	// the SBOM was found in the caller's project.)
 	state := service.ScanStateUnknown
-	var errMsg string
+	var errMsg, version string
 	var reasons []string
 	if h.scanTracker != nil {
-		state, errMsg, reasons = h.scanTracker.GetDetail(sbomID)
+		state, errMsg, reasons, version = h.scanTracker.GetDetailVersion(sbomID)
 	}
 
 	vulns, err := h.sbomService.GetVulnerabilitiesBySbom(c.Request().Context(), projectID, sbomID)
@@ -877,6 +877,17 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to get scan status"})
 	}
 	summary := summariseVulnerabilities(vulns)
+
+	// A terminal state holds only if nothing happened to the status while
+	// the counts were read (Codex M72 R13 High-1): a scan that began — or
+	// even began and finished — meanwhile may have committed findings after
+	// the counts were taken. Then this poll answers running; the next one
+	// gets a consistent pair.
+	if h.scanTracker != nil && (state == service.ScanStateCompleted || state == service.ScanStateFailed) {
+		if _, _, _, v2 := h.scanTracker.GetDetailVersion(sbomID); v2 != version {
+			state, errMsg, reasons = service.ScanStateRunning, "", nil
+		}
+	}
 
 	resp := ScanStatusResponse{
 		Status:          string(state),

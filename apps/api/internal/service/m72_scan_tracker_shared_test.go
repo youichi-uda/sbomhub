@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 // It models the shared store's group semantics only as far as these tests
 // need: the last begin/finish/mark of an SBOM wins.
 type memStore struct {
+	version map[uuid.UUID]int
 	mu      sync.Mutex
 	down    bool
 	state   map[uuid.UUID]ScanState
@@ -29,7 +31,7 @@ type memStore struct {
 var errStoreDown = errors.New("store down")
 
 func newMemStore() *memStore {
-	return &memStore{state: map[uuid.UUID]ScanState{}, msg: map[uuid.UUID]string{},
+	return &memStore{version: map[uuid.UUID]int{}, state: map[uuid.UUID]ScanState{}, msg: map[uuid.UUID]string{},
 		reasons: map[uuid.UUID][]string{}, runs: map[uuid.UUID]map[uint64]bool{}}
 }
 
@@ -47,6 +49,7 @@ func (m *memStore) begin(_ context.Context, id uuid.UUID, gen uint64) error {
 	}
 	m.runs[id][gen] = true
 	m.state[id], m.msg[id], m.reasons[id] = ScanStateRunning, "", nil
+	m.version[id]++
 	return nil
 }
 
@@ -63,8 +66,10 @@ func (m *memStore) finish(_ context.Context, id uuid.UUID, gen uint64, msg strin
 	delete(m.runs[id], gen)
 	if msg != "" {
 		m.state[id], m.msg[id], m.reasons[id] = ScanStateFailed, msg, reasons
+		m.version[id]++
 	} else {
 		m.state[id], m.msg[id], m.reasons[id] = ScanStateCompleted, "", nil
+		m.version[id]++
 	}
 	return true, nil
 }
@@ -104,6 +109,7 @@ func (m *memStore) rejoin(ctx context.Context, id uuid.UUID, gen uint64) error {
 	}
 	m.runs[id][gen] = true
 	m.state[id] = ScanStateRunning
+	m.version[id]++
 	return nil
 }
 
@@ -122,6 +128,7 @@ func (m *memStore) merge(ctx context.Context, id uuid.UUID, ms *mergeSet) error 
 	defer m.mu.Unlock()
 	for _, f := range ms.failures {
 		m.state[id], m.msg[id], m.reasons[id] = ScanStateFailed, f.msg, f.reasons
+		m.version[id]++
 	}
 	return nil
 }
@@ -135,21 +142,23 @@ func (m *memStore) mark(_ context.Context, id uuid.UUID, st ScanState, msg strin
 	}
 	delete(m.runs, id)
 	m.state[id], m.msg[id], m.reasons[id] = st, msg, reasons
+	m.version[id]++
 	return nil
 }
 
-func (m *memStore) get(_ context.Context, id uuid.UUID) (ScanState, string, []string, bool, error) {
+func (m *memStore) get(_ context.Context, id uuid.UUID) (statusView, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls++
 	if m.down {
-		return ScanStateUnknown, "", nil, false, errStoreDown
+		return statusView{}, errStoreDown
 	}
 	st, ok := m.state[id]
 	if !ok {
-		return ScanStateUnknown, "", nil, false, nil
+		return statusView{}, nil
 	}
-	return st, m.msg[id], m.reasons[id], true, nil
+	return statusView{state: st, errMsg: m.msg[id], reasons: m.reasons[id], found: true,
+		version: fmt.Sprintf("m%d", m.version[id])}, nil
 }
 
 func trackerOn(store scanStatusStore, hb time.Duration) *ScanTracker {
@@ -348,7 +357,7 @@ func TestM72R1_GetDetailDoesNotRaceBeginFinish(t *testing.T) {
 // process B's run of the same SBOM is still running. A must not answer its
 // local "completed".
 func TestM72R1_PendingFinishNeverReadsCompletedWhileAnotherRunIsActive(t *testing.T) {
-	store := newMemStore()
+	store := newGroupStore()
 	a, b := trackerOn(store, time.Hour), trackerOn(store, time.Hour)
 	id := uuid.New()
 	ga := a.Begin(id)
@@ -360,6 +369,12 @@ func TestM72R1_PendingFinishNeverReadsCompletedWhileAnotherRunIsActive(t *testin
 	})
 	store.setDown(true)
 	a.Finish(id, ga, nil, "") // its shared finish fails
+	waitFor(t, "the finish to fail", func() bool {
+		a.qMu.Lock()
+		defer a.qMu.Unlock()
+		q := a.queues[id]
+		return q != nil && !q.draining
+	})
 	store.setDown(false)
 	if st, _, _ := a.GetDetail(id); st != ScanStateRunning {
 		t.Fatalf("A answered %s while B's run is active", st)
@@ -501,6 +516,7 @@ func (g *groupStore) merge(ctx context.Context, id uuid.UUID, ms *mergeSet) erro
 }
 
 func (g *groupStore) publishLocked(id uuid.UUID) {
+	g.version[id]++
 	switch {
 	case len(g.runs[id]) > 0:
 		g.state[id] = ScanStateRunning
@@ -620,13 +636,13 @@ type hookGetStore struct {
 	onGet func()
 }
 
-func (h *hookGetStore) get(ctx context.Context, id uuid.UUID) (ScanState, string, []string, bool, error) {
-	st, msg, r, found, err := h.memStore.get(ctx, id)
+func (h *hookGetStore) get(ctx context.Context, id uuid.UUID) (statusView, error) {
+	v, err := h.memStore.get(ctx, id)
 	if f := h.onGet; f != nil {
 		h.onGet = nil
 		f()
 	}
-	return st, msg, r, found, err
+	return v, err
 }
 
 // Codex M72 R4 High-1: a Begin that completes (write included) while
@@ -699,8 +715,8 @@ type staleGetStore struct {
 	state ScanState
 }
 
-func (s staleGetStore) get(context.Context, uuid.UUID) (ScanState, string, []string, bool, error) {
-	return s.state, "", nil, true, nil
+func (s staleGetStore) get(context.Context, uuid.UUID) (statusView, error) {
+	return statusView{state: s.state, found: true, version: "stale"}, nil
 }
 
 // Codex M72 R5 High-3: queue overflow must not lose a failure. With the
@@ -927,7 +943,78 @@ func TestM72R12_InitialDrainsAreBounded(t *testing.T) {
 	for _, id := range ids {
 		settle(t, a, id)
 	}
-	if p := store.peak.Load(); p > maxDrainWorkers {
-		t.Fatalf("%d store calls at once, want <= %d", p, maxDrainWorkers)
+	if p := store.peak.Load(); p > maxDrainWorkers+priorityWorkers {
+		t.Fatalf("%d store calls at once, want <= %d", p, maxDrainWorkers+priorityWorkers)
+	}
+}
+
+// Codex M72 R13 High-1: GetDetailVersion's version changes on every
+// transition, so a reader can tell a terminal state it read before a query
+// from the same-looking state read after it.
+func TestM72R13_VersionChangesWithEveryTransition(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		var a *ScanTracker
+		if shared {
+			a = trackerOn(newMemStore(), time.Hour)
+		} else {
+			a = NewScanTracker()
+		}
+		id := uuid.New()
+		a.Finish(id, a.Begin(id), nil, "")
+		settle(t, a, id)
+		st1, _, _, v1 := a.GetDetailVersion(id)
+		a.Finish(id, a.Begin(id), nil, "") // a whole new scan in between
+		settle(t, a, id)
+		st2, _, _, v2 := a.GetDetailVersion(id)
+		if st1 != ScanStateCompleted || st2 != ScanStateCompleted || v1 == v2 {
+			t.Fatalf("shared=%v: %s/%q then %s/%q: the version must differ", shared, st1, v1, st2, v2)
+		}
+	}
+}
+
+// slowApplyStore takes d per begin/finish.
+type slowApplyStore struct {
+	*memStore
+	d time.Duration
+}
+
+func (s slowApplyStore) begin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	time.Sleep(s.d)
+	return s.memStore.begin(ctx, id, gen)
+}
+
+func (s slowApplyStore) finish(ctx context.Context, id uuid.UUID, gen uint64, msg string, r []string) (bool, error) {
+	time.Sleep(s.d)
+	return s.memStore.finish(ctx, id, gen, msg, r)
+}
+
+// Codex M72 R13 High-2: a fresh Begin is not starved by backlog drains; it
+// reaches a healthy Redis within beginWait.
+func TestM72R13_FreshBeginIsNotStarvedByBacklog(t *testing.T) {
+	mem := newMemStore()
+	store := slowApplyStore{memStore: mem, d: 2 * time.Millisecond}
+	a := trackerOn(store, time.Hour)
+	a.beginWait = time.Millisecond
+	mem.setDown(true)
+	for i := 0; i < maxDrainWorkers+8; i++ { // deep backlogs on many SBOMs
+		id := uuid.New()
+		for j := 0; j < 100; j++ {
+			a.Finish(id, a.Begin(id), nil, "")
+		}
+	}
+	mem.setDown(false)
+	a.kickQueues()
+	time.Sleep(20 * time.Millisecond) // the workers are busy with the backlog
+	a.beginWait = beginWait
+	fresh := uuid.New()
+	start := time.Now()
+	a.Begin(fresh)
+	if d := time.Since(start); d >= beginWait {
+		t.Fatalf("a fresh Begin waited %s behind the backlog (bound %s)", d, beginWait)
+	}
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
+	if !mem.runs[fresh][0] && len(mem.runs[fresh]) == 0 {
+		t.Fatal("the fresh begin did not reach the store")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -336,54 +337,66 @@ func (t *ScanTracker) MarkFailedWithReasons(sbomID uuid.UUID, errMsg string, rea
 // A local transition that races the Redis read makes the read be retried
 // (Codex M72 R4 High-1).
 func (t *ScanTracker) GetDetail(sbomID uuid.UUID) (ScanState, string, []string) {
+	state, msg, reasons, _ := t.GetDetailVersion(sbomID)
+	return state, msg, reasons
+}
+
+// GetDetailVersion is GetDetail plus a version that changes with every
+// transition of the SBOM's status (Codex M72 R13 High-1): a caller that reads
+// the status, then something else (the counts), then the status again can
+// tell whether anything happened in between, even when both reads say
+// "completed".
+func (t *ScanTracker) GetDetailVersion(sbomID uuid.UUID) (ScanState, string, []string, string) {
 	if t.shared == nil {
-		return t.getDetailLocal(sbomID)
+		return t.localVersioned(sbomID, false)
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		// One snapshot of "active here" and the revision (Codex M72 R5
 		// High-1): any local transition after it changes the revision.
 		active, rev := t.snapshot(sbomID)
 		if active {
-			return t.getDetailLocal(sbomID)
+			return t.localVersioned(sbomID, false)
 		}
 		if f := testHookAfterLocalActiveCheck; f != nil {
 			f()
 		}
-		state, msg, reasons, found, err := t.shared.get(context.Background(), sbomID)
+		view, err := t.shared.get(context.Background(), sbomID)
 		if t.revision(sbomID) != rev {
 			continue
 		}
 		switch {
 		case err != nil:
 			slog.Debug("scan status: shared store unavailable, answering from this process", "sbom_id", sbomID, "error", err)
-			return t.localWithoutShared(sbomID)
-		case !found && t.pendingShared(sbomID):
+			return t.localVersioned(sbomID, true)
+		case !view.found && t.pendingShared(sbomID):
 			// Its own writes have not landed yet: memory is newest.
-			return t.getDetailLocal(sbomID)
-		case !found:
+			return t.localVersioned(sbomID, false)
+		case !view.found:
 			// No entry (never written, expired, or evicted): a local
 			// "completed" may be stale — another replica's run would be in
 			// that entry — so it reads unknown (Codex M72 R11 High-1).
-			return t.localWithoutShared(sbomID)
-		case state == ScanStateRunning:
-			return state, "", nil
+			return t.localVersioned(sbomID, true)
+		case view.state == ScanStateRunning:
+			return view.state, "", nil, view.version
 		case t.pendingShared(sbomID):
-			return t.getDetailLocal(sbomID)
+			return t.localVersioned(sbomID, false)
 		}
-		return state, msg, reasons
+		return view.state, view.errMsg, view.reasons, view.version
 	}
 	// Transitions kept racing the read: the safe local answer.
-	return t.localWithoutShared(sbomID)
+	return t.localVersioned(sbomID, true)
 }
 
-// localWithoutShared is this process's answer when Redis could not be
-// consulted: a local "completed" is not trusted (see GetDetail).
-func (t *ScanTracker) localWithoutShared(sbomID uuid.UUID) (ScanState, string, []string) {
+// localVersioned is this process's answer with its entry revision as the
+// version. withoutShared: Redis could not be consulted, so a local
+// "completed" is not trusted (see GetDetailVersion) and reads unknown.
+func (t *ScanTracker) localVersioned(sbomID uuid.UUID, withoutShared bool) (ScanState, string, []string, string) {
+	rev := t.revision(sbomID)
 	state, msg, reasons := t.getDetailLocal(sbomID)
-	if state == ScanStateCompleted {
-		return ScanStateUnknown, "", nil
+	if withoutShared && state == ScanStateCompleted {
+		state, msg, reasons = ScanStateUnknown, "", nil
 	}
-	return state, msg, reasons
+	return state, msg, reasons, "l" + strconv.FormatUint(rev, 10)
 }
 
 func (t *ScanTracker) getDetailLocal(sbomID uuid.UUID) (ScanState, string, []string) {
