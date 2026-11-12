@@ -146,3 +146,50 @@ func TestM72ScheduledScanPanicIsRecordedAsFailure(t *testing.T) {
 		t.Fatalf("after a panic: %s %v, want failed scan_error", st, reasons)
 	}
 }
+
+// Codex M72 R9 High-1: a FORCED tenant scan (POST /settings/scan/force, one
+// goroutine per request) takes the tenant's slots like any on-demand scan;
+// only the periodic loop is exempt.
+func TestM72ForcedScanTakesTenantSlots(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+	tenantID := seedWave3Tenant(t, migDB, "m72force")
+	m62SchedSeedProject(t, migDB, tenantID, "m72forced")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"resultsPerPage":0,"startIndex":0,"totalResults":0,"vulnerabilities":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	var rels []func()
+	for i := 0; i < service.TenantScanConcurrency(); i++ {
+		rel, err := service.AcquireTenantScanSlot(context.Background(), tenantID, uuid.New())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rels = append(rels, rel)
+	}
+	job := (&VulnerabilityScanJob{
+		db: appDB,
+		nvdService: service.NewNVDService(repository.NewVulnerabilityRepository(appDB),
+			repository.NewComponentRepository(appDB), "m72-fake-api-key", srv.URL, false),
+	}).WithScanDeadline(time.Minute)
+	done := make(chan error, 1)
+	go func() { done <- job.ForceRunTenant(context.Background(), tenantID) }()
+	select {
+	case err := <-done:
+		t.Fatalf("the forced scan ran although the tenant's slots were taken (err %v)", err)
+	case <-time.After(1500 * time.Millisecond):
+	}
+	for _, r := range rels {
+		r()
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("forced scan: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the forced scan did not run once a slot was free")
+	}
+}
