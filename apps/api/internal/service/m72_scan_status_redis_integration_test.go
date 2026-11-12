@@ -217,3 +217,32 @@ func TestM72R2_RepeatedFailuresDoNotGrowTheEntry(t *testing.T) {
 		t.Fatalf("in-memory group kept %d copies of one marker", n)
 	}
 }
+
+// Codex M72 R3 Medium-2: runs swept as interrupted do not grow the entry
+// without bound either.
+func TestM72R3_ManyInterruptedRunsStayBounded(t *testing.T) {
+	rdb := m72Redis(t)
+	long := process(rdb, 0, 50*time.Millisecond)
+	crashing := process(rdb, 30*time.Millisecond, time.Hour)
+	reader := process(rdb, 0, time.Hour)
+	id := uuid.New()
+	g := long.Begin(id)
+	for i := 0; i < 200; i++ {
+		crashing.Begin(id)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if st, _, _ := detail(reader, id, long, crashing); st != ScanStateRunning {
+		t.Fatalf("%s, want running (the long scan is alive)", st)
+	}
+	keys := scanStatusKeys(id)
+	raw := rdb.HGet(context.Background(), keys[0], "outcomes").Val()
+	lost := rdb.ZCard(context.Background(), keys[0]+":lost").Val()
+	if len(raw) > 512 || lost > scanStatusMaxLost {
+		t.Fatalf("after 200 interrupted runs: outcomes %d bytes, %d lost ids", len(raw), lost)
+	}
+	long.Finish(id, g, nil, "")
+	st, msg, r := detail(reader, id, long)
+	if st != ScanStateFailed || msg != "scan: scan failed (interrupted)" || !slices.Equal(r, []string{ScanReasonInterrupted}) {
+		t.Fatalf("group outcome %s %q %v, want failed (interrupted)", st, msg, r)
+	}
+}

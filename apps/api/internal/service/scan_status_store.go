@@ -20,15 +20,16 @@ import (
 //
 // # Model
 //
-// Per SBOM, two keys sharing a hash tag (one Redis Cluster slot):
+// Per SBOM, three keys sharing a hash tag (one Redis Cluster slot):
 //
 //	scanstatus1:{<sbom>}       HASH  state, error, reasons (JSON), updated,
-//	                                 outcomes (JSON: the outcome of each run
-//	                                 of the current group)
+//	                                 outcomes (JSON: the distinct failures of
+//	                                 the current group), lost_dropped
 //	scanstatus1:{<sbom>}:runs  ZSET  the active runs (member: run generation,
 //	                                 score: lease expiry, ms of Redis time)
+//	scanstatus1:{<sbom>}:lost  ZSET  runs swept as interrupted (at most 64)
 //
-// Both expire after the tracker's retention (scan deadline + 15m, at least
+// All expire after the tracker's retention (scan deadline + 15m, at least
 // 1h), refreshed on every write.
 //
 // A run holds a LEASE (ScanStatusLease, 90s) that the process running it
@@ -69,6 +70,9 @@ const (
 	ScanStatusHeartbeat = 30 * time.Second
 	// scanStatusOpTimeout bounds one store round trip.
 	scanStatusOpTimeout = 1 * time.Second
+	// scanStatusMaxLost bounds the ids of interrupted runs kept for a late
+	// revival or outcome.
+	scanStatusMaxLost = 64
 	// ScanReasonInterrupted: the process running the scan stopped (or lost
 	// Redis for longer than the lease) before the scan reported an outcome.
 	ScanReasonInterrupted = "interrupted"
@@ -79,12 +83,19 @@ var scanInterruptedMarker = ScanFailureMarker("scan", []string{ScanReasonInterru
 
 func scanStatusKeys(sbomID uuid.UUID) []string {
 	k := scanStatusPrefix + "{" + sbomID.String() + "}"
-	return []string{k, k + ":runs"}
+	return []string{k, k + ":runs", k + ":lost"}
 }
 
-// scanStatusLua is shared by every script. KEYS[1] the hash, KEYS[2] the runs.
+// scanStatusLua is shared by every script. KEYS[1] the hash, KEYS[2] the
+// active runs, KEYS[3] the runs swept as interrupted (ZSET gen -> sweep time,
+// at most MAX_LOST newest; hash field lost_dropped=1 once one was dropped).
+//
+// outcomes holds only FAILURES, once per distinct marker (their reasons
+// merged), so it is bounded by the marker vocabulary (Codex M72 R2 High-3);
+// interrupted runs are counted through KEYS[3] instead of one outcome each, so
+// they are bounded too (Codex M72 R3 Medium-2).
 const scanStatusLua = `
-local K, R = KEYS[1], KEYS[2]
+local K, R, L = KEYS[1], KEYS[2], KEYS[3]
 local function nowms()
   local t = redis.call('TIME')
   return tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
@@ -103,19 +114,43 @@ local function save_outcomes(o)
     redis.call('HSET', K, 'outcomes', cjson.encode(o))
   end
 end
+local function add_failure(msg, rs)
+  if msg == '' then return end
+  local o = load_outcomes()
+  for _, e in ipairs(o) do
+    if e.m == msg then
+      if type(e.r) ~= 'table' then e.r = {} end
+      local have = {}
+      for _, r in ipairs(e.r) do have[r] = true end
+      for _, r in ipairs(rs) do
+        if not have[r] then table.insert(e.r, r); have[r] = true end
+      end
+      save_outcomes(o)
+      return
+    end
+  end
+  table.insert(o, {m = msg, r = rs})
+  save_outcomes(o)
+end
+local function mark_lost(g, now)
+  redis.call('ZADD', L, now, g)
+  local n = redis.call('ZCARD', L)
+  if n > MAX_LOST then
+    redis.call('ZREMRANGEBYRANK', L, 0, n - MAX_LOST - 1)
+    redis.call('HSET', K, 'lost_dropped', '1')
+  end
+end
 local function sweep(now, except)
   local lost = redis.call('ZRANGEBYSCORE', R, '-inf', '(' .. now)
   if #lost == 0 then return 0 end
   redis.call('ZREMRANGEBYSCORE', R, '-inf', '(' .. now)
-  local o = load_outcomes()
   local n = 0
   for _, g in ipairs(lost) do
     if g ~= except then
-      table.insert(o, {g = g, m = INTERRUPTED_MSG, r = {INTERRUPTED_REASON}, lost = 1})
+      mark_lost(g, now)
       n = n + 1
     end
   end
-  save_outcomes(o)
   return n
 end
 local function publish(now)
@@ -125,15 +160,21 @@ local function publish(now)
   end
   local o = load_outcomes()
   local msgs, reasons, seen = {}, {}, {}
+  local function add(m, rs)
+    table.insert(msgs, m)
+    for _, r in ipairs(rs) do
+      if not seen[r] then seen[r] = true; table.insert(reasons, r) end
+    end
+  end
   for _, e in ipairs(o) do
     if type(e.m) == 'string' and e.m ~= '' then
-      table.insert(msgs, e.m)
-      if type(e.r) == 'table' then
-        for _, r in ipairs(e.r) do
-          if not seen[r] then seen[r] = true; table.insert(reasons, r) end
-        end
-      end
+      local rs = {}
+      if type(e.r) == 'table' then rs = e.r end
+      add(e.m, rs)
     end
+  end
+  if redis.call('ZCARD', L) > 0 or redis.call('HGET', K, 'lost_dropped') == '1' then
+    add(INTERRUPTED_MSG, {INTERRUPTED_REASON})
   end
   if #msgs > 0 then
     local rj = '[]'
@@ -146,12 +187,13 @@ end
 local function expire(ttl)
   redis.call('PEXPIRE', K, ttl)
   redis.call('PEXPIRE', R, ttl)
+  redis.call('PEXPIRE', L, ttl)
 end
 `
 
 func scanStatusScript(body string) *redis.Script {
-	prelude := fmt.Sprintf("local INTERRUPTED_MSG = %q\nlocal INTERRUPTED_REASON = %q\n",
-		scanInterruptedMarker, ScanReasonInterrupted)
+	prelude := fmt.Sprintf("local INTERRUPTED_MSG = %q\nlocal INTERRUPTED_REASON = %q\nlocal MAX_LOST = %d\n",
+		scanInterruptedMarker, ScanReasonInterrupted, scanStatusMaxLost)
 	return redis.NewScript(prelude + scanStatusLua + body)
 }
 
@@ -160,7 +202,7 @@ var scanStatusBegin = scanStatusScript(`
 local now = nowms()
 sweep(now, nil)
 if redis.call('ZCARD', R) == 0 then
-  redis.call('DEL', K)
+  redis.call('DEL', K, L)
   save_outcomes({})
 end
 redis.call('ZADD', R, now + tonumber(ARGV[2]), ARGV[1])
@@ -175,40 +217,15 @@ local now = nowms()
 local exists = redis.call('EXISTS', K) == 1
 local active = redis.call('ZREM', R, ARGV[1]) == 1
 sweep(now, ARGV[1])
-local o = load_outcomes()
-local idx = nil
-for i, e in ipairs(o) do
-  if e.g == ARGV[1] then idx = i end
-end
-if not active and exists then
+local wasLost = redis.call('ZREM', L, ARGV[1]) == 1
+if not active and exists and not wasLost then
   -- Only a run swept as interrupted (its process lost Redis for longer than
   -- the lease) may still report; anything else was superseded.
-  if not (idx and o[idx].lost == 1) then return 0 end
+  return 0
 end
 local ok, rs = pcall(cjson.decode, ARGV[4])
 if not ok or type(rs) ~= 'table' then rs = {} end
-if idx then table.remove(o, idx) end
--- Only failures are kept, once per distinct marker (Codex M72 R2 High-3): a
--- success adds nothing to the group's outcome, and a repeated marker (many
--- runs failing the same way) only merges its reasons, so the entry stays
--- bounded by the marker vocabulary plus the runs swept as interrupted.
-if ARGV[3] ~= '' then
-  local dup = nil
-  for _, e in ipairs(o) do
-    if e.lost ~= 1 and e.m == ARGV[3] then dup = e end
-  end
-  if dup then
-    if type(dup.r) ~= 'table' then dup.r = {} end
-    local have = {}
-    for _, r in ipairs(dup.r) do have[r] = true end
-    for _, r in ipairs(rs) do
-      if not have[r] then table.insert(dup.r, r); have[r] = true end
-    end
-  else
-    table.insert(o, {g = ARGV[1], m = ARGV[3], r = rs})
-  end
-end
-save_outcomes(o)
+add_failure(ARGV[3], rs)
 publish(now)
 expire(ARGV[2])
 return 1`)
@@ -222,23 +239,20 @@ if redis.call('ZSCORE', R, ARGV[1]) then
   expire(ARGV[3])
   return 1
 end
-local o = load_outcomes()
-for i, e in ipairs(o) do
-  if e.g == ARGV[1] and e.lost == 1 then
-    table.remove(o, i)
-    save_outcomes(o)
-    redis.call('ZADD', R, now + tonumber(ARGV[2]), ARGV[1])
-    publish(now)
-    expire(ARGV[3])
-    return 1
-  end
+if redis.call('ZREM', L, ARGV[1]) == 1 then
+  -- swept as interrupted while it was alive: revive it
+  redis.call('ZADD', R, now + tonumber(ARGV[2]), ARGV[1])
+  publish(now)
+  expire(ARGV[3])
+  return 1
 end
 return 0`)
 
 // ARGV: state, error, reasons JSON, ttl ms. A terminal state set outside a
 // run (MarkFailed / MarkCompleted): ends every run of the group.
 var scanStatusMark = scanStatusScript(`
-redis.call('DEL', R)
+redis.call('DEL', R, L)
+redis.call('HDEL', K, 'lost_dropped')
 redis.call('HSET', K, 'state', ARGV[1], 'error', ARGV[2], 'reasons', ARGV[3], 'updated', nowms())
 save_outcomes({})
 expire(ARGV[4])
@@ -249,13 +263,10 @@ var scanStatusGet = scanStatusScript(`
 if redis.call('EXISTS', K) == 0 then return false end
 local now = nowms()
 local changed = sweep(now, nil) > 0
-if redis.call('HGET', K, 'state') == 'running' and redis.call('ZCARD', R) == 0 then
-  -- running with no active run (the runs key was lost): interrupted.
-  if not changed then
-    local o = load_outcomes()
-    table.insert(o, {g = '', m = INTERRUPTED_MSG, r = {INTERRUPTED_REASON}})
-    save_outcomes(o)
-  end
+if not changed and redis.call('HGET', K, 'state') == 'running' and redis.call('ZCARD', R) == 0 then
+  -- running with no active run and none just swept (the runs key itself was
+  -- lost): interrupted, without a run to revive.
+  redis.call('HSET', K, 'lost_dropped', '1')
   changed = true
 end
 if changed then publish(now) end
