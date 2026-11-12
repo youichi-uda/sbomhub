@@ -314,3 +314,27 @@ func TestM72R5_UnknownFinishStillCountsItsFailure(t *testing.T) {
 		t.Fatalf("group outcome %s %q, want failed with A's failure", st, msg)
 	}
 }
+
+// Codex M72 R8 High-1c: a retried begin of a run already swept as interrupted
+// rejoins the group; it does not start a new one and erase the group's other
+// interruptions.
+func TestM72R8_RetriedBeginOfALostRunRejoins(t *testing.T) {
+	rdb := m72Redis(t)
+	p := process(rdb, 40*time.Millisecond, time.Hour)
+	reader := process(rdb, 0, time.Hour)
+	id := uuid.New()
+	p.Begin(id) // dies
+	ga := p.Begin(id)
+	time.Sleep(80 * time.Millisecond)
+	detail(reader, id, p)                                                // both swept as interrupted
+	if err := p.shared.begin(context.Background(), id, ga); err != nil { // A's begin, retried
+		t.Fatal(err)
+	}
+	if _, err := p.shared.finish(context.Background(), id, ga, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	st, msg, _ := reader.GetDetail(id)
+	if st != ScanStateFailed || msg != "scan: scan failed (interrupted)" {
+		t.Fatalf("%s %q, want failed (interrupted): the dead run's interruption was erased", st, msg)
+	}
+}

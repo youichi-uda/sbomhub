@@ -63,7 +63,7 @@ type ScanTracker struct {
 	// order.
 	queues map[uuid.UUID]*sbomQueue
 	// live: this process's active runs (lease renewal), with their start.
-	live       map[runKey]time.Time
+	live       map[runKey]*liveRun
 	queueCap   int           // maxQueuedWrites; smaller in tests
 	beginWait  time.Duration // beginWait; shorter in tests
 	hbActive   bool
@@ -125,7 +125,7 @@ func NewScanTracker() *ScanTracker {
 		entries:    make(map[uuid.UUID]scanEntry),
 		retention:  1 * time.Hour,
 		queues:     map[uuid.UUID]*sbomQueue{},
-		live:       map[runKey]time.Time{},
+		live:       map[runKey]*liveRun{},
 		queueCap:   maxQueuedWrites,
 		beginWait:  beginWait,
 		hbInterval: ScanStatusHeartbeat,

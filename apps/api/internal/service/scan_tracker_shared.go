@@ -33,9 +33,9 @@ const (
 	// heartbeatBatch is how many lease renewals go in one pipelined round
 	// trip (Codex M72 R2 Medium-4).
 	heartbeatBatch = 256
-	// maxDrainKicks bounds how many stalled queues one heartbeat retries
-	// (Codex M72 R7 High-1); the rest wait for the next pass.
-	maxDrainKicks = 32
+	// maxDrainWorkers bounds the goroutines one heartbeat uses to retry
+	// stalled queues (Codex M72 R7/R8 High-1).
+	maxDrainWorkers = 32
 )
 
 type sharedEventKind int
@@ -59,6 +59,13 @@ type sharedEvent struct {
 	merged  *mergeSet     // evMerge
 	// applying: an evMerge being applied; it takes no more writes.
 	applying bool
+}
+
+// liveRun is one of this process's active runs.
+type liveRun struct {
+	began time.Time
+	// acked: Redis has applied its begin (or rejoin); its lease is renewed.
+	acked bool
 }
 
 type sbomQueue struct {
@@ -164,6 +171,20 @@ func (t *ScanTracker) drain(sbomID uuid.UUID) {
 			t.logSharedError("scan status: shared write failed; retrying on the next heartbeat", sbomID, err)
 			return
 		}
+		// Runs Redis now knows as active: their leases are renewed from
+		// here on, whatever else is queued (Codex M72 R8 High-1).
+		switch {
+		case ev.kind == evBegin || ev.kind == evRejoin:
+			if lr := t.live[runKey{sbomID, ev.gen}]; lr != nil {
+				lr.acked = true
+			}
+		case merged != nil:
+			for g := range merged.begins {
+				if lr := t.live[runKey{sbomID, g}]; lr != nil {
+					lr.acked = true
+				}
+			}
+		}
 		q.events = q.events[1:]
 		close(ev.done)
 		t.qMu.Unlock()
@@ -203,7 +224,7 @@ func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) *sharedEven
 	ev := &sharedEvent{kind: evBegin, gen: gen}
 	t.qMu.Lock()
 	defer t.qMu.Unlock()
-	t.live[runKey{sbomID, gen}] = time.Now()
+	t.live[runKey{sbomID, gen}] = &liveRun{began: time.Now()}
 	t.enqueueLocked(sbomID, ev)
 	return ev
 }
@@ -268,19 +289,20 @@ func (t *ScanTracker) heartbeatLoop() {
 	}
 }
 
-// heartbeatPass restarts stalled queues and renews the lease of every live
-// run whose SBOM has no queued write, in pipelined batches; false when there
-// is nothing left to do (the loop then ends). A live run older than
-// retention + lease is dropped (a scan that never finished, e.g. an upload
-// whose transaction rolled back).
+// heartbeatPass retries stalled queues and renews the lease of every live run
+// Redis has acknowledged, in pipelined batches; false when there is nothing
+// left to do (the loop then ends). A live run older than retention + lease is
+// dropped (a scan that never finished, e.g. an upload whose transaction
+// rolled back).
 func (t *ScanTracker) heartbeatPass() bool {
 	t.qMu.Lock()
 	// A queue is reclaimed only as a whole, when it is not being drained and
 	// its LAST write is older than retention: by then the status it carries
 	// would have expired in Redis and in this process anyway (Codex M72 R7
 	// High-1). A single write is never dropped for its age while newer ones of
-	// its SBOM wait (Codex M72 R6 High-2/3). Stalled queues are retried at
-	// most maxDrainKicks per pass, least recently written first.
+	// its SBOM wait (Codex M72 R6 High-2/3). Every stalled queue is retried,
+	// least recently written first, by at most maxDrainWorkers goroutines
+	// (Codex M72 R8 High-1).
 	var stalled []uuid.UUID
 	for id, q := range t.queues {
 		switch {
@@ -299,20 +321,34 @@ func (t *ScanTracker) heartbeatPass() bool {
 		}
 	}
 	slices.SortFunc(stalled, func(x, y uuid.UUID) int { return t.queues[x].lastWrite.Compare(t.queues[y].lastWrite) })
-	for _, id := range stalled[:min(len(stalled), maxDrainKicks)] {
+	for _, id := range stalled {
 		t.queues[id].draining = true
-		go t.drain(id)
+	}
+	if len(stalled) > 0 {
+		work := make(chan uuid.UUID, len(stalled))
+		for _, id := range stalled {
+			work <- id
+		}
+		close(work)
+		for range min(len(stalled), maxDrainWorkers) {
+			go func() {
+				for id := range work {
+					t.drain(id)
+				}
+			}()
+		}
 	}
 	var renew []runKey
-	for k, began := range t.live {
-		if time.Since(began) > t.retention+ScanStatusLease {
+	for k, lr := range t.live {
+		if time.Since(lr.began) > t.retention+ScanStatusLease {
 			delete(t.live, k)
 			continue
 		}
-		if q := t.queues[k.sbom]; q != nil && len(q.events) > 0 {
-			continue // its writes come first; the begin sets a fresh lease
+		// Only runs Redis has acknowledged; a run whose begin is still
+		// queued gets a fresh lease when it lands.
+		if lr.acked {
+			renew = append(renew, k)
 		}
-		renew = append(renew, k)
 	}
 	if len(t.live) == 0 && len(t.queues) == 0 {
 		t.hbActive = false

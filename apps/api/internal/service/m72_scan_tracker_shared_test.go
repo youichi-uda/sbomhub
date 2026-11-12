@@ -815,8 +815,8 @@ func TestM72R7_StalledQueuesAreBoundedAndReclaimed(t *testing.T) {
 	store.mu.Lock()
 	calls := store.calls
 	store.mu.Unlock()
-	if calls > maxDrainKicks {
-		t.Fatalf("one heartbeat retried %d queues, want <= %d", calls, maxDrainKicks)
+	if calls > n {
+		t.Fatalf("one heartbeat made %d attempts for %d stalled queues, want <= one each", calls, n)
 	}
 
 	a.retention = time.Millisecond
@@ -827,5 +827,68 @@ func TestM72R7_StalledQueuesAreBoundedAndReclaimed(t *testing.T) {
 	a.qMu.Unlock()
 	if left != 0 {
 		t.Fatalf("%d queues older than retention kept", left)
+	}
+}
+
+// finishFailStore fails every finish (Redis "flaky" for one kind of write).
+type finishFailStore struct{ *countingStore }
+
+func (f finishFailStore) finish(context.Context, uuid.UUID, uint64, string, []string) (bool, error) {
+	return false, errStoreDown
+}
+
+// Codex M72 R8 High-1a: a run Redis already acknowledged keeps its lease
+// renewed even while other writes of its SBOM are queued.
+func TestM72R8_AcknowledgedRunsAreRenewedWhileWritesQueue(t *testing.T) {
+	cs := &countingStore{memStore: newMemStore()}
+	store := finishFailStore{cs}
+	a := trackerOn(store, time.Hour)
+	id := uuid.New()
+	a.Begin(id) // acknowledged
+	settle(t, a, id)
+	a.Finish(id, a.Begin(id), nil, "") // its finish keeps failing: queued
+	waitFor(t, "the finish to stall", func() bool {
+		a.qMu.Lock()
+		defer a.qMu.Unlock()
+		q := a.queues[id]
+		return q != nil && len(q.events) > 0 && !q.draining
+	})
+	cs.mu.Lock()
+	cs.beats = 0
+	cs.mu.Unlock()
+	a.heartbeatPass()
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.beats == 0 {
+		t.Fatal("the acknowledged run's lease was not renewed while a write of its SBOM was queued")
+	}
+}
+
+// Codex M72 R8 High-1b: once Redis is back, one heartbeat gets every stalled
+// queue drained (by a bounded pool), not 32 per 30s.
+func TestM72R8_RecoveredQueuesAllDrainAfterOnePass(t *testing.T) {
+	store := newMemStore()
+	store.setDown(true)
+	a := trackerOn(store, time.Hour)
+	a.beginWait = time.Millisecond
+	ids := make([]uuid.UUID, 100)
+	for i := range ids {
+		ids[i] = uuid.New()
+		a.Finish(ids[i], a.Begin(ids[i]), nil, "")
+	}
+	waitFor(t, "the first drains to fail", func() bool {
+		a.qMu.Lock()
+		defer a.qMu.Unlock()
+		for _, q := range a.queues {
+			if q.draining {
+				return false
+			}
+		}
+		return true
+	})
+	store.setDown(false)
+	a.heartbeatPass()
+	for _, id := range ids {
+		settle(t, a, id)
 	}
 }

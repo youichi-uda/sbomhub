@@ -203,6 +203,14 @@ func scanStatusScript(body string) *redis.Script {
 var scanStatusBegin = scanStatusScript(`
 local now = nowms()
 sweep(now, nil)
+-- A begin of a run already swept as interrupted (a retried write) rejoins
+-- the group instead of starting a new one (Codex M72 R8 High-1).
+if redis.call('ZREM', L, ARGV[1]) == 1 then
+  redis.call('ZADD', R, now + tonumber(ARGV[2]), ARGV[1])
+  publish(now)
+  expire(ARGV[3])
+  return 1
+end
 if redis.call('ZCARD', R) == 0 then
   redis.call('DEL', K, L)
   save_outcomes({})
