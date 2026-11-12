@@ -248,6 +248,20 @@ if redis.call('ZREM', L, ARGV[1]) == 1 then
 end
 return 0`)
 
+// ARGV: gen, lease ms, ttl ms. A run that is alive but no longer active in
+// Redis (its lease ran out and its identity was dropped from the capped lost
+// set, or a new group started meanwhile) joins the CURRENT group again: unlike
+// Begin it never starts a new group, so the group's failures and
+// interruptions are kept (Codex M72 R4 High-3).
+var scanStatusRejoin = scanStatusScript(`
+local now = nowms()
+sweep(now, ARGV[1])
+redis.call('ZREM', L, ARGV[1])
+redis.call('ZADD', R, now + tonumber(ARGV[2]), ARGV[1])
+publish(now)
+expire(ARGV[3])
+return 1`)
+
 // ARGV: state, error, reasons JSON, ttl ms. A terminal state set outside a
 // run (MarkFailed / MarkCompleted): ends every run of the group.
 var scanStatusMark = scanStatusScript(`
@@ -269,7 +283,13 @@ if not changed and redis.call('HGET', K, 'state') == 'running' and redis.call('Z
   redis.call('HSET', K, 'lost_dropped', '1')
   changed = true
 end
-if changed then publish(now) end
+if changed then
+  publish(now)
+  -- The lost-run key a read creates expires with the entry (Codex M72 R4
+  -- Medium-4).
+  local ttl = redis.call('PTTL', K)
+  if ttl > 0 then redis.call('PEXPIRE', L, ttl) end
+end
 return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]'}`)
 
 // scanStatusStore is what the tracker needs from shared storage.
@@ -279,6 +299,8 @@ type scanStatusStore interface {
 	// heartbeatMany renews the leases of runs in one round trip; active[i]
 	// is false for a run that was superseded.
 	heartbeatMany(ctx context.Context, runs []runKey) (active []bool, err error)
+	// rejoin makes a live run active again in the current group.
+	rejoin(ctx context.Context, sbomID uuid.UUID, gen uint64) error
 	mark(ctx context.Context, sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) error
 	get(ctx context.Context, sbomID uuid.UUID) (state ScanState, errMsg string, reasons []string, found bool, err error)
 }
@@ -350,6 +372,13 @@ func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey)
 		out[i] = n == 1
 	}
 	return out, nil
+}
+
+func (s *redisScanStatusStore) rejoin(ctx context.Context, sbomID uuid.UUID, gen uint64) error {
+	ctx, cancel := s.opCtx(ctx)
+	defer cancel()
+	return scanStatusRejoin.Run(ctx, s.client, scanStatusKeys(sbomID),
+		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
 func (s *redisScanStatusStore) mark(ctx context.Context, sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) error {

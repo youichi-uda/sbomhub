@@ -40,6 +40,7 @@ const (
 	evBegin sharedEventKind = iota
 	evFinish
 	evMark
+	evRejoin
 )
 
 type sharedEvent struct {
@@ -121,6 +122,8 @@ func (t *ScanTracker) apply(sbomID uuid.UUID, ev *sharedEvent) error {
 	switch ev.kind {
 	case evBegin:
 		return t.shared.begin(ctx, sbomID, ev.gen)
+	case evRejoin:
+		return t.shared.rejoin(ctx, sbomID, ev.gen)
 	case evFinish:
 		recorded, err := t.shared.finish(ctx, sbomID, ev.gen, ev.msg, ev.reasons)
 		if err == nil && !recorded {
@@ -265,11 +268,11 @@ func (t *ScanTracker) heartbeatPass() bool {
 			if active[i] {
 				continue
 			}
-			// Superseded while alive (its lease ran out and a new group
-			// started, or a terminal state was set): join the current group
-			// again.
+			// Not active in Redis although alive (its lease ran out and its
+			// identity was dropped, or a new group started): rejoin the
+			// current group, keeping its outcomes (Codex M72 R4 High-3).
 			if _, still := t.live[k]; still {
-				t.enqueueLocked(k.sbom, &sharedEvent{kind: evBegin, gen: k.gen})
+				t.enqueueLocked(k.sbom, &sharedEvent{kind: evRejoin, gen: k.gen})
 			}
 		}
 		t.qMu.Unlock()

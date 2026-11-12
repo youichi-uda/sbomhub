@@ -246,3 +246,48 @@ func TestM72R3_ManyInterruptedRunsStayBounded(t *testing.T) {
 		t.Fatalf("group outcome %s %q %v, want failed (interrupted)", st, msg, r)
 	}
 }
+
+// Codex M72 R4 High-3: a live run whose identity was dropped from the capped
+// lost set rejoins the CURRENT group; it must not start a new one and erase
+// the group's interruptions.
+func TestM72R4_RejoinKeepsTheGroupsInterruptions(t *testing.T) {
+	rdb := m72Redis(t)
+	live := process(rdb, 60*time.Millisecond, time.Hour)
+	dead := process(rdb, 60*time.Millisecond, time.Hour)
+	reader := process(rdb, 0, time.Hour)
+	id := uuid.New()
+	g := live.Begin(id)
+	dead.Begin(id)
+	time.Sleep(120 * time.Millisecond)
+	if st, _, _ := detail(reader, id, live, dead); st != ScanStateFailed {
+		t.Fatalf("both lapsed: %s", st)
+	}
+	// The live run's identity is the one the cap dropped.
+	keys := scanStatusKeys(id)
+	rdb.ZRem(context.Background(), keys[2], genString(g))
+	rdb.HSet(context.Background(), keys[0], "lost_dropped", "1")
+	live.heartbeatPass() // inactive -> rejoin
+	if st, _, _ := detail(reader, id, live); st != ScanStateRunning {
+		t.Fatalf("after rejoin: %s, want running", st)
+	}
+	live.Finish(id, g, nil, "")
+	st, msg, _ := detail(reader, id, live)
+	if st != ScanStateFailed || msg != "scan: scan failed (interrupted)" {
+		t.Fatalf("group outcome %s %q, want failed (interrupted): the dead run's interruption was erased", st, msg)
+	}
+}
+
+// Codex M72 R4 Medium-4: the lost-run key a read creates expires with the
+// entry.
+func TestM72R4_LostKeyCreatedByAReadExpires(t *testing.T) {
+	rdb := m72Redis(t)
+	dead := process(rdb, 30*time.Millisecond, time.Hour)
+	reader := process(rdb, 0, time.Hour)
+	id := uuid.New()
+	dead.Begin(id)
+	time.Sleep(60 * time.Millisecond)
+	detail(reader, id, dead)
+	if ttl := rdb.PTTL(context.Background(), scanStatusKeys(id)[2]).Val(); ttl <= 0 {
+		t.Fatalf(":lost PTTL %s, want a positive TTL", ttl)
+	}
+}
