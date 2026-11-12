@@ -86,9 +86,9 @@ func TestM67JVN_DuplicateCVEUsesTheVersionRule(t *testing.T) {
 // NVDCache.Set; an unstamped (pre-M67) entry is unusable, so the lookup goes
 // to NVD exactly as on a miss.
 //
-// The stamp is per ENTRY, not inferred from a missing per-CVE version: the
-// CPE path (M60) writes entries whose CachedVuln carries no version, and
-// rejecting those disabled its cache outright
+// The stamp is per ENTRY, not inferred from a missing per-CVE version: a
+// CachedVuln with no version is legitimate (no assessment was chosen), and
+// rejecting such entries once disabled the CPE path's cache outright
 // (TestM60NVDCache_SecondLookupIsServedFromCache went red on the first cut).
 func TestM67NVDCache_PreM67EntryIsRefetched(t *testing.T) {
 	score := 4.0

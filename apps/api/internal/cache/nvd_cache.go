@@ -77,11 +77,8 @@ type CachedVuln struct {
 	Description string   `json:"description"`
 	Severity    string   `json:"severity"`
 	CVSSScore   *float64 `json:"cvss_score,omitempty"`
-	// CVSSVersion is the version of the chosen assessment (M67); nil when
-	// none was chosen, and also on entries the CPE path writes (it does not
-	// carry it yet — a row created from one stores no version until the CVE
-	// sync next sees the CVE: the delta sync if NVD modifies it, otherwise
-	// the next full catalogue re-read; the scanner never dates its rows).
+	// CVSSVersion is the version of the chosen assessment (M67), written by
+	// both the keyword and the CPE path; nil when no assessment was chosen.
 	// Pre-M67 entries are refused by VulnCacheEntry.CVSSRule, not by this.
 	CVSSVersion *string    `json:"cvss_version,omitempty"`
 	PublishedAt *time.Time `json:"published_at,omitempty"`
