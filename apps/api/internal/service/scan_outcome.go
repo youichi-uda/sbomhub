@@ -35,6 +35,9 @@ var (
 	// the distro-aware ones the scan promises, and a failure must not read as
 	// "the distro has no fix".
 	ErrScanDistroDataFailed = errors.New("distro data unavailable")
+	// ErrScanQueueFull (M72): too many scans of the tenant already wait for
+	// a scan slot (SBOMHUB_SCAN_TENANT_CONCURRENCY); this one was not run.
+	ErrScanQueueFull = errors.New("tenant scan queue full")
 )
 
 // Reason codes as reported in scan status (GET .../scan-status `reasons`,
@@ -47,6 +50,8 @@ const (
 	ScanReasonWriteRefused     = "write_refused"
 	ScanReasonDistroDataFailed = "distro_data_failed"
 	ScanReasonError            = "scan_error"
+	// ScanReasonQueueFull (M72): see ErrScanQueueFull.
+	ScanReasonQueueFull = "queue_full"
 )
 
 // ScanReasons maps a scanner error to the reason codes it carries, in a fixed
@@ -67,6 +72,7 @@ func ScanReasons(err error) []string {
 		{ErrScanTruncated, ScanReasonTruncated},
 		{ErrScanWriteRefused, ScanReasonWriteRefused},
 		{ErrScanDistroDataFailed, ScanReasonDistroDataFailed},
+		{ErrScanQueueFull, ScanReasonQueueFull},
 	} {
 		if errors.Is(err, p.sentinel) {
 			out = append(out, p.code)

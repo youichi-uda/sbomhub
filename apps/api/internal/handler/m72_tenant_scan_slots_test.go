@@ -165,3 +165,33 @@ func waitUntil(t *testing.T, cond func() bool) {
 		time.Sleep(2 * time.Millisecond)
 	}
 }
+
+// Codex M72 R1 High-4: the waiters of one tenant are bounded too; a scan
+// beyond the queue fails at once (queue_full) instead of parking a goroutine
+// for its whole deadline.
+func TestM72R1_TenantQueueIsBounded(t *testing.T) {
+	withConcurrency(t, 1)
+	tenant := uuid.New()
+	hold := &m72Gate{release: make(chan struct{})}
+	go runSBOMScan(context.Background(), nil, tenant, uuid.New(), time.Minute, []scanStep{{source: "nvd", scanner: hold}})
+	waitUntil(t, func() bool { return hold.running.Load() == 1 })
+	q := service.TenantScanQueueLimit(1)
+	waiters := make(chan scanOutcome, q)
+	for i := 0; i < q; i++ {
+		go func() {
+			waiters <- runSBOMScan(context.Background(), nil, tenant, uuid.New(), time.Minute, []scanStep{{source: "nvd", scanner: hold}})
+		}()
+	}
+	waitUntil(t, func() bool { return service.TenantScanWaiting(tenant) == q })
+	start := time.Now()
+	out := runSBOMScan(context.Background(), nil, tenant, uuid.New(), time.Minute, []scanStep{{source: "nvd", scanner: hold}})
+	if time.Since(start) > time.Second || !slices.Equal(out.reasons, []string{service.ScanReasonQueueFull}) {
+		t.Fatalf("scan beyond the queue: %v %v after %s, want queue_full at once", out.markers, out.reasons, time.Since(start))
+	}
+	close(hold.release)
+	for i := 0; i < q; i++ {
+		if o := <-waiters; o.failed() {
+			t.Fatalf("queued scan failed: %v", o.markers)
+		}
+	}
+}

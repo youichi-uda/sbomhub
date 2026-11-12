@@ -37,6 +37,8 @@ import (
 //     scan-status retention (deadline + 15m) stays sufficient. A scan whose
 //     deadline fires while it waits is reported failed (deadline_exceeded)
 //     without having started; one cancelled while waiting is cancelled.
+//   - At most TenantScanQueueLimit scans of one tenant wait; one beyond that
+//     fails at once (queue_full).
 //   - The upload scan, the manual scan route and the scheduled per-project scan
 //     share the same slots.
 //
@@ -54,9 +56,17 @@ type TenantScanSlots struct {
 }
 
 type tenantSlot struct {
-	sem  chan struct{}
-	refs int // holders + waiters; the entry is dropped at 0
+	sem     chan struct{}
+	refs    int // holders + waiters; the entry is dropped at 0
+	waiting int
 }
+
+// TenantScanQueueLimit is how many scans of one tenant may WAIT for a slot
+// when limit run (Codex M72 R1 High-4): a scan beyond it fails at once with
+// reason queue_full rather than parking a goroutine for its whole deadline.
+// 32 per slot (64 at the default) is far beyond a CI burst, and bounds what one
+// tenant can pin in the process.
+func TenantScanQueueLimit(limit int) int { return 32 * limit }
 
 // NewTenantScanSlots returns a limiter allowing limit concurrent scans per
 // tenant; limit <= 0 is unlimited.
@@ -83,8 +93,19 @@ func (s *TenantScanSlots) Acquire(ctx context.Context, tenantID uuid.UUID) (func
 		ts = &tenantSlot{sem: make(chan struct{}, s.limit)}
 		s.slots[tenantID] = ts
 	}
+	free := len(ts.sem) < cap(ts.sem)
+	if !free && ts.waiting >= TenantScanQueueLimit(s.limit) {
+		s.mu.Unlock()
+		return nil, 0, fmt.Errorf("%d scans of the tenant already wait for a slot: %w", ts.waiting, ErrScanQueueFull)
+	}
 	ts.refs++
+	ts.waiting++
 	s.mu.Unlock()
+	waited := func() {
+		s.mu.Lock()
+		ts.waiting--
+		s.mu.Unlock()
+	}
 
 	drop := func() {
 		s.mu.Lock()
@@ -98,10 +119,13 @@ func (s *TenantScanSlots) Acquire(ctx context.Context, tenantID uuid.UUID) (func
 	start := time.Now()
 	select {
 	case ts.sem <- struct{}{}:
+		waited()
 	default:
 		select {
 		case ts.sem <- struct{}{}:
+			waited()
 		case <-ctx.Done():
+			waited()
 			drop()
 			return nil, time.Since(start), fmt.Errorf("waiting for a scan slot of the tenant: %w", scanInterruption(ctx))
 		}
@@ -128,6 +152,22 @@ func (s *TenantScanSlots) InUse(tenantID uuid.UUID) int {
 	return 0
 }
 
+// Waiting reports how many scans of tenantID wait for a slot.
+func (s *TenantScanSlots) Waiting(tenantID uuid.UUID) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ts := s.slots[tenantID]; ts != nil {
+		return ts.waiting
+	}
+	return 0
+}
+
+// TenantScanWaiting is Waiting on the process-wide limiter.
+func TenantScanWaiting(tenantID uuid.UUID) int { return tenantScanSlots.Load().Waiting(tenantID) }
+
 // tenantScanSlots is the process-wide limiter shared by every scan path.
 var tenantScanSlots atomic.Pointer[TenantScanSlots]
 
@@ -150,7 +190,7 @@ func AcquireTenantScanSlot(ctx context.Context, tenantID, sbomID uuid.UUID) (fun
 	slots := tenantScanSlots.Load()
 	release, waited, err := slots.Acquire(ctx, tenantID)
 	if err != nil {
-		slog.Warn("scan: not started; its deadline ended while it waited for one of the tenant's scan slots",
+		slog.Warn("scan: not started; no scan slot of the tenant became free (queue full, or its deadline ended while it waited)",
 			"tenant_id", tenantID, "sbom_id", sbomID, "limit", slots.Limit(),
 			"waited", waited.Round(time.Millisecond).String(), "error", err)
 		return nil, err
