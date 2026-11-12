@@ -91,6 +91,8 @@ func scanStatusKeys(sbomID uuid.UUID) []string {
 //	outcomes      JSON: the group's distinct failures (marker + reasons),
 //	              bounded by the marker vocabulary (Codex M72 R2 High-3)
 //	r:<gen>       an active run, value = lease expiry (ms, Redis time)
+//	p:<gen>       an intent: a Begin still queued behind older writes; reads
+//	              as running, value = lease expiry
 //	l:<gen>       a run swept as interrupted (a tombstone), value = sweep time;
 //	              at most MAX_LOST (Codex M72 R3 Medium-2), they survive a new
 //	              group and expire after MAX_RUN_AGE (Codex M72 R10 High-1)
@@ -103,7 +105,7 @@ local function nowms()
 end
 local function fields()
   local all = redis.call('HGETALL', K)
-  local runs, lost = {}, {}
+  local runs, lost, intents = {}, {}, {}
   for i = 1, #all, 2 do
     local f, v = all[i], all[i + 1]
     local p = string.sub(f, 1, 2)
@@ -111,9 +113,11 @@ local function fields()
       runs[string.sub(f, 3)] = tonumber(v) or 0
     elseif p == 'l:' then
       lost[string.sub(f, 3)] = tonumber(v) or 0
+    elseif p == 'p:' then
+      intents[string.sub(f, 3)] = tonumber(v) or 0
     end
   end
-  return runs, lost
+  return runs, lost, intents
 end
 local function count(t)
   local n = 0
@@ -173,16 +177,18 @@ end
 -- sweep moves every expired run to a tombstone in ONE pass over the hash
 -- (Codex M72 R15 Medium-3: one hash read per run was quadratic).
 local function sweep(now, except)
-  local runs = fields()
+  local runs, _, intents = fields()
   local n = 0
   local del, set = {}, {}
-  for g, exp in pairs(runs) do
-    if exp < now then
-      table.insert(del, 'r:' .. g)
-      if g ~= except then
-        table.insert(set, 'l:' .. g)
-        table.insert(set, now)
-        n = n + 1
+  for prefix, t in pairs({['r:'] = runs, ['p:'] = intents}) do
+    for g, exp in pairs(t) do
+      if exp < now then
+        table.insert(del, prefix .. g)
+        if g ~= except then
+          table.insert(set, 'l:' .. g)
+          table.insert(set, now)
+          n = n + 1
+        end
       end
     end
   end
@@ -207,8 +213,9 @@ local function prune_lost(now)
 end
 local function publish(now)
   prune_lost(now)
-  local runs, lost = fields()
-  if count(runs) > 0 then
+  local runs, lost, intents = fields()
+  -- An intent (a Begin written ahead of its queue) is running too.
+  if count(runs) > 0 or count(intents) > 0 then
     redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated', now)
     return
   end
@@ -239,7 +246,7 @@ local function publish(now)
   end
 end
 local function activate(g, now, lease)
-  redis.call('HDEL', K, 'l:' .. g)
+  redis.call('HDEL', K, 'l:' .. g, 'p:' .. g)
   redis.call('HSET', K, 'r:' .. g, now + tonumber(lease))
 end
 -- Every write bumps rev: the status version readers compare (Codex M72
@@ -255,7 +262,7 @@ end
 
 // statusScripts are the store's Lua scripts, built for its MAX_RUN_AGE.
 type statusScripts struct {
-	begin, finish, merge, heartbeat, rejoin, mark, get *redis.Script
+	begin, finish, merge, heartbeat, rejoin, mark, get, intent *redis.Script
 }
 
 func newStatusScripts(maxRunAge time.Duration) *statusScripts {
@@ -265,7 +272,7 @@ func newStatusScripts(maxRunAge time.Duration) *statusScripts {
 	return &statusScripts{
 		begin: mk(scanStatusBeginLua), finish: mk(scanStatusFinishLua), merge: mk(scanStatusMergeLua),
 		heartbeat: mk(scanStatusHeartbeatLua), rejoin: mk(scanStatusRejoinLua), mark: mk(scanStatusMarkLua),
-		get: mk(scanStatusGetLua),
+		get: mk(scanStatusGetLua), intent: mk(scanStatusIntentLua),
 	}
 }
 
@@ -293,6 +300,21 @@ redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated
 expire(ARGV[3])
 return 1`
 
+// ARGV: gen, lease ms, ttl ms. An INTENT (Codex M72 R18 High-1): a Begin
+// queued behind older writes of its SBOM is written ahead of them as p:<gen>,
+// which reads as running (so those older writes cannot publish a terminal
+// state meanwhile) but takes no part in group decisions; the queued Begin
+// replaces it when applied. An intent whose lease runs out is swept as
+// interrupted, like a run.
+const scanStatusIntentLua = `
+local now = nowms()
+sweep(now, nil)
+if redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 1 then return 0 end
+redis.call('HSET', K, 'p:' .. ARGV[1], now + tonumber(ARGV[2]))
+publish(now)
+expire(ARGV[3])
+return 1`
+
 // ARGV: gen, ttl ms, error marker (empty = completed), reasons JSON.
 // Returns 1 if the run was active or swept as interrupted, 2 if Redis did not
 // know it (its begin never landed, or it lapsed and its tombstone expired). A
@@ -302,6 +324,7 @@ return 1`
 const scanStatusFinishLua = `
 local now = nowms()
 local active = redis.call('HDEL', K, 'r:' .. ARGV[1]) == 1
+if redis.call('HDEL', K, 'p:' .. ARGV[1]) == 1 then active = true end
 sweep(now, ARGV[1])
 local wasLost = redis.call('HDEL', K, 'l:' .. ARGV[1]) == 1
 local ok, rs = pcall(cjson.decode, ARGV[4])
@@ -326,7 +349,7 @@ if type(m.b) == 'table' then
 end
 if type(m.f) == 'table' then
   for _, g in ipairs(m.f) do
-    redis.call('HDEL', K, 'r:' .. g, 'l:' .. g)
+    redis.call('HDEL', K, 'r:' .. g, 'l:' .. g, 'p:' .. g)
   end
 end
 if type(m.x) == 'table' then
@@ -348,6 +371,12 @@ const scanStatusHeartbeatLua = `
 local now = nowms()
 if redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 1 then
   activate(ARGV[1], now, ARGV[2])
+  expire(ARGV[3])
+  return 1
+end
+if redis.call('HEXISTS', K, 'p:' .. ARGV[1]) == 1 then
+  -- an intent whose Begin is still queued: renew it as an intent
+  redis.call('HSET', K, 'p:' .. ARGV[1], now + tonumber(ARGV[2]))
   expire(ARGV[3])
   return 1
 end
@@ -389,7 +418,8 @@ const scanStatusGetLua = `
 if redis.call('EXISTS', K) == 0 then return false end
 local now = nowms()
 local changed = sweep(now, nil) > 0
-if not changed and redis.call('HGET', K, 'state') == 'running' and active_count() == 0 then
+local runs_now, _, intents_now = fields()
+if not changed and redis.call('HGET', K, 'state') == 'running' and count(runs_now) == 0 and count(intents_now) == 0 then
   -- running with no active run and none just swept: interrupted, without a
   -- run to revive.
   redis.call('HSET', K, 'lost_dropped', now)
@@ -420,6 +450,8 @@ type scanStatusStore interface {
 	// heartbeatMany renews the leases of runs in one round trip; active[i]
 	// is false for a run that was superseded.
 	heartbeatMany(ctx context.Context, runs []runKey) (active []bool, err error)
+	// intent marks a Begin queued behind older writes as running at once.
+	intent(ctx context.Context, sbomID uuid.UUID, gen uint64) error
 	// rejoin makes a live run active again in the current group.
 	rejoin(ctx context.Context, sbomID uuid.UUID, gen uint64) error
 	// merge applies a coalesced overflow (see scanStatusMerge).
@@ -599,6 +631,13 @@ func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey)
 		out[i] = n == 1
 	}
 	return out, nil
+}
+
+func (s *redisScanStatusStore) intent(ctx context.Context, sbomID uuid.UUID, gen uint64) error {
+	ctx, cancel := s.opCtx(ctx)
+	defer cancel()
+	return s.scripts.intent.Run(ctx, s.client, scanStatusKeys(sbomID),
+		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
 func (s *redisScanStatusStore) rejoin(ctx context.Context, sbomID uuid.UUID, gen uint64) error {

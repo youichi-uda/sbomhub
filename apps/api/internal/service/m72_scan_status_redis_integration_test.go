@@ -513,3 +513,45 @@ func TestM72R15_SweepingManyRunsIsCheap(t *testing.T) {
 		t.Fatalf("%d tombstones kept, cap %d", lost, scanStatusMaxLost)
 	}
 }
+
+// Codex M72 R18 High-1 (Redis side): an intent reads running and keeps older
+// writes from publishing a terminal state; the queued Begin replaces it; an
+// intent whose process died reads interrupted.
+func TestM72R18_IntentReadsRunningUntilItsBeginLands(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	store := a.shared.(*redisScanStatusStore)
+	ctx := context.Background()
+	id := uuid.New()
+	if err := store.begin(ctx, id, 1); err != nil { // an older run
+		t.Fatal(err)
+	}
+	if err := store.intent(ctx, id, 2); err != nil { // the new Begin, ahead of the queue
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id, 1, "", nil); err != nil { // the older write lands
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); v.state != ScanStateRunning {
+		t.Fatalf("older finish with an intent present: %s, want running", v.state)
+	}
+	if err := store.begin(ctx, id, 2); err != nil { // the queued Begin lands
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id, 2, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); v.state != ScanStateCompleted {
+		t.Fatalf("after the run finished: %s, want completed", v.state)
+	}
+
+	short := process(rdb, 30*time.Millisecond, time.Hour)
+	id2 := uuid.New()
+	if err := short.shared.intent(ctx, id2, 9); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if v, _ := store.get(ctx, id2); v.state != ScanStateFailed || v.errMsg != "scan: scan failed (interrupted)" {
+		t.Fatalf("an intent whose lease ran out: %s %q, want failed (interrupted)", v.state, v.errMsg)
+	}
+}

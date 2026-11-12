@@ -97,6 +97,10 @@ func (m *memStore) heartbeatMany(ctx context.Context, runs []runKey) ([]bool, er
 	return out, nil
 }
 
+func (m *memStore) intent(ctx context.Context, id uuid.UUID, gen uint64) error {
+	return m.rejoin(ctx, id, gen)
+}
+
 func (m *memStore) rejoin(ctx context.Context, id uuid.UUID, gen uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1157,5 +1161,30 @@ func TestM72R16_UnpolledEntriesAreSwept(t *testing.T) {
 	a.mu.RUnlock()
 	if n > 3 || !kept {
 		t.Fatalf("%d entries left (active kept: %v), want the 100 expired terminal ones swept", n, kept)
+	}
+}
+
+// Codex M72 R18 High-1: a Begin queued behind a backlog of its own SBOM is
+// visible as running at once (an intent written out of line), so the older
+// writes it waits behind cannot publish a terminal state meanwhile.
+func TestM72R18_BeginBehindABacklogIsVisibleAtOnce(t *testing.T) {
+	mem := newMemStore()
+	store := slowApplyStore{memStore: mem, d: 40 * time.Millisecond}
+	a := trackerOn(store, time.Hour)
+	id := uuid.New()
+	mem.setDown(true)
+	a.beginWait = time.Millisecond
+	for i := 0; i < 30; i++ { // an old backlog of completed runs
+		a.Finish(id, a.Begin(id), nil, "")
+	}
+	mem.setDown(false)
+	a.kickQueues() // drains slowly: ~60 writes x 40ms
+	a.beginWait = beginWait
+	gen := a.Begin(id) // queued behind the backlog
+	mem.mu.Lock()
+	visible := mem.runs[id][gen]
+	mem.mu.Unlock()
+	if !visible {
+		t.Fatal("a Begin queued behind a backlog was not visible in the store when Begin returned")
 	}
 }

@@ -285,29 +285,48 @@ func (t *ScanTracker) apply(sbomID uuid.UUID, ev *sharedEvent) error {
 
 // queueBeginLocked queues run gen's begin; nil without a shared store (or if
 // the queue is full).
-func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) *sharedEvent {
+func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) <-chan struct{} {
 	if t.shared == nil {
 		return nil
 	}
 	ev := &sharedEvent{kind: evBegin, gen: gen}
 	t.qMu.Lock()
 	defer t.qMu.Unlock()
-	t.live[runKey{sbomID, gen}] = &liveRun{began: time.Now()}
+	lr := &liveRun{began: time.Now()}
+	t.live[runKey{sbomID, gen}] = lr
+	q := t.queues[sbomID]
+	behind := q != nil && (q.draining || len(q.events) > 0)
 	t.enqueueLocked(sbomID, ev)
-	return ev
+	if !behind {
+		return ev.done // applied at once (see enqueueLocked)
+	}
+	// Queued behind older writes of the SBOM: write an intent ahead of them,
+	// so the SBOM reads running from now on (Codex M72 R18 High-1).
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := t.shared.intent(context.Background(), sbomID, gen); err != nil {
+			t.logSharedError("scan status: shared intent failed", sbomID, err)
+			return
+		}
+		t.qMu.Lock()
+		lr.acked = true // its lease (as an intent) is renewed from now on
+		t.qMu.Unlock()
+	}()
+	return done
 }
 
-// waitBegin waits, at most beginWait, for a queued begin to reach Redis: a run
-// should normally be there before another process's run of the SBOM
-// finishes, but Begin is on the request path.
-func (t *ScanTracker) waitBegin(ev *sharedEvent) {
-	if ev == nil {
+// waitBegin waits, at most beginWait, for a Begin (or its intent) to reach
+// Redis: a run should normally be visible before another process's run of
+// the SBOM finishes, but Begin is on the request path.
+func (t *ScanTracker) waitBegin(done <-chan struct{}) {
+	if done == nil {
 		return
 	}
 	timer := time.NewTimer(t.beginWait)
 	defer timer.Stop()
 	select {
-	case <-ev.done:
+	case <-done:
 	case <-timer.C:
 	}
 }
