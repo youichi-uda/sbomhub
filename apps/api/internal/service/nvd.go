@@ -345,6 +345,9 @@ type CvssMetric struct {
 	// diagnosis; selection keys off Type.
 	Source   string   `json:"source"`
 	CvssData CvssData `json:"cvssData"`
+	// BaseSeverity is where NVD's CVSS v2 metric carries its rating — on the
+	// metric object, not in cvssData (Codex M67 R4, Medium). See SelectNVDCVSS.
+	BaseSeverity string `json:"baseSeverity"`
 }
 
 type CvssData struct {

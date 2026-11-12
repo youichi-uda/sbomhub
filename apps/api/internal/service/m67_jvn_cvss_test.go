@@ -166,3 +166,40 @@ func eqF(a, b *float64) bool {
 	}
 	return *a == *b
 }
+
+// TestM67NVD_V2MetricLevelSeverity (Codex M67 R4, Medium). NVD's v2 metric
+// carries baseSeverity on the METRIC object, not in cvssData (recorded live,
+// CVE-2021-44228: {"type":"Primary","cvssData":{"version":"2.0","baseScore":
+// 9.3},"baseSeverity":"HIGH",...}). It was not modelled, so a v2 rating with
+// no usable score was stored UNKNOWN, and a rating harsher than the score's
+// band was lost. The rule is the same as everywhere: the harsher wins.
+func TestM67NVD_V2MetricLevelSeverity(t *testing.T) {
+	cases := []struct {
+		name, metrics string
+		score         *float64
+		sev           string
+	}{
+		{"recorded shape", `{"cvssMetricV2":[{"type":"Primary","cvssData":{"version":"2.0","baseScore":9.3},"baseSeverity":"HIGH"}]}`,
+			ptrF(9.3), "HIGH"},
+		{"rating only (score null)", `{"cvssMetricV2":[{"type":"Primary","cvssData":{"baseScore":null},"baseSeverity":"HIGH"}]}`,
+			nil, "HIGH"},
+		{"rating harsher than the score's band", `{"cvssMetricV2":[{"type":"Primary","cvssData":{"baseScore":2.0},"baseSeverity":"HIGH"}]}`,
+			ptrF(2.0), "HIGH"},
+		{"band harsher than the rating", `{"cvssMetricV2":[{"type":"Primary","cvssData":{"baseScore":9.3},"baseSeverity":"LOW"}]}`,
+			ptrF(9.3), "HIGH"},
+		{"out-of-range score keeps the rating", `{"cvssMetricV2":[{"type":"Primary","cvssData":{"baseScore":42},"baseSeverity":"MEDIUM"}]}`,
+			nil, "MEDIUM"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var m NVDMetrics
+			if err := json.Unmarshal([]byte(tc.metrics), &m); err != nil {
+				t.Fatal(err)
+			}
+			got := SelectNVDCVSS(m)
+			if got.Version != cvss.V2 || got.Severity != tc.sev || !eqF(got.Score, tc.score) {
+				t.Errorf("SelectNVDCVSS = {%q %v %q}, want {2.0 %v %q}", got.Version, got.Score, got.Severity, tc.score, tc.sev)
+			}
+		})
+	}
+}

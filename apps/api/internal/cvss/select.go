@@ -217,6 +217,16 @@ func NormaliseSeverity(s string) string {
 	}
 }
 
+// Harsher returns the more severe of two stated ratings, normalised; UNKNOWN
+// when neither is a rating.
+func Harsher(a, b string) string {
+	na, nb := NormaliseSeverity(a), NormaliseSeverity(b)
+	if severityRank[nb] > severityRank[na] {
+		return nb
+	}
+	return na
+}
+
 // Band is the rating a score implies on its version's scale. v2 has three
 // bands, no CRITICAL and no NONE (0.0-3.9 is Low, as NVD rates it); v3.x,
 // v4.0 — and an unrecognised version, so the failure direction is the harsher

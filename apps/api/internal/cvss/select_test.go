@@ -206,3 +206,14 @@ func fmtScore(p *float64) any {
 	}
 	return *p
 }
+
+func TestHarsher(t *testing.T) {
+	for _, c := range [][3]string{
+		{"", "HIGH", "HIGH"}, {"low", "", "LOW"}, {"Critical", "high", "CRITICAL"},
+		{"MEDIUM", "LOW", "MEDIUM"}, {"", "", "UNKNOWN"}, {"bogus", "none", "NONE"},
+	} {
+		if got := Harsher(c[0], c[1]); got != c[2] {
+			t.Errorf("Harsher(%q, %q) = %q, want %q", c[0], c[1], got, c[2])
+		}
+	}
+}

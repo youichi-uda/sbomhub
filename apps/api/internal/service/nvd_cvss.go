@@ -31,10 +31,13 @@ func SelectNVDCVSS(metrics NVDMetrics) cvss.Selection {
 				score = &s
 			}
 			as = append(as, cvss.Assessment{
-				Version:  v,
-				Primary:  strings.EqualFold(strings.TrimSpace(m.Type), "Primary"),
-				Score:    score,
-				Severity: m.CvssData.BaseSeverity,
+				Version: v,
+				Primary: strings.EqualFold(strings.TrimSpace(m.Type), "Primary"),
+				Score:   score,
+				// v2 states its rating on the metric object; v3.x / v4.0 in
+				// cvssData. Both are read, and the harsher stated one is what
+				// cvss.Select then reconciles against the score's band.
+				Severity: cvss.Harsher(m.CvssData.BaseSeverity, m.BaseSeverity),
 			})
 		}
 	}
