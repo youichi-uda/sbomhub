@@ -39,8 +39,10 @@ import (
 //     without having started; one cancelled while waiting is cancelled.
 //   - At most TenantScanQueueLimit scans of one tenant wait; one beyond that
 //     fails at once (queue_full).
-//   - The upload scan, the manual scan route and the scheduled per-project scan
-//     share the same slots.
+//   - The upload scan and the manual scan route share the slots. The
+//     scheduled scan takes none: the scheduler runs one project scan at a
+//     time process-wide, so it adds at most one scan to a tenant's, and
+//     waiting here would stall every later tenant of its sequential loop.
 //
 // Not covered: the limit is per process (two replicas allow 2N per tenant),
 // and it does not pace NVD globally — N tenants still run N or more sweeps.
