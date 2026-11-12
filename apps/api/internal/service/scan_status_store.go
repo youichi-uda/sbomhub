@@ -229,7 +229,13 @@ local function activate(g, now, lease)
   redis.call('HDEL', K, 'l:' .. g)
   redis.call('HSET', K, 'r:' .. g, now + tonumber(lease))
 end
+-- Every write bumps rev: the status version readers compare (Codex M72
+-- R14 High-1; a millisecond time was not unique per write).
+local function bump()
+  redis.call('HINCRBY', K, 'rev', 1)
+end
 local function expire(ttl)
+  bump()
   redis.call('PEXPIRE', K, ttl)
 end
 `
@@ -356,14 +362,16 @@ return 1`
 // ARGV: state, error, reasons JSON, ttl ms. A terminal state set outside a
 // run (MarkFailed / MarkCompleted): ends every run of the group.
 const scanStatusMarkLua = `
+local rev = redis.call('HGET', K, 'rev')
 redis.call('DEL', K)
+if rev then redis.call('HSET', K, 'rev', rev) end
 redis.call('HSET', K, 'state', ARGV[1], 'error', ARGV[2], 'reasons', ARGV[3], 'updated', nowms())
 save_outcomes({})
 expire(ARGV[4])
 return 1`
 
 // Returns false (nil) when there is no entry, else {state, error, reasons,
-// updated}.
+// rev}.
 const scanStatusGetLua = `
 if redis.call('EXISTS', K) == 0 then return false end
 local now = nowms()
@@ -374,11 +382,14 @@ if not changed and redis.call('HGET', K, 'state') == 'running' and active_count(
   redis.call('HSET', K, 'lost_dropped', now)
   changed = true
 end
-if changed then publish(now) end
-return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]', redis.call('HGET', K, 'updated') or ''}`
+if changed then
+  publish(now)
+  bump()
+end
+return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]', redis.call('HGET', K, 'rev') or ''}`
 
 // statusView is one read of the shared status. version changes with every
-// write of it (Redis's "updated" time of the last change).
+// write of it (the entry's rev counter).
 type statusView struct {
 	state   ScanState
 	errMsg  string
@@ -448,10 +459,8 @@ func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen
 
 // mergeSet is a queue overflow's coalesced writes, as their NET effect (Codex
 // M72 R6 High-1): the runs that began and are still live, the runs that
-// finished whose begin was written before, and the failures. A run that began
-// and finished inside the overflow leaves only its failure. Its size is
-// therefore bounded by the runs live at once plus the queue before it, not by
-// how many writes were folded in.
+// finished, and the failures. Its size is bounded by the runs of the SBOM
+// seen during the overflow, not by how many writes were folded in.
 type mergeSet struct {
 	begins   map[uint64]bool
 	finishes map[uint64]bool
@@ -469,11 +478,11 @@ func newMergeSet() *mergeSet {
 
 func (m *mergeSet) begin(gen uint64) { m.begins[gen] = true }
 
+// finish always records the removal (Codex M72 R14 Medium-4): even when the
+// run began inside this merge, an earlier queued write (a rejoin) may have
+// activated it in Redis.
 func (m *mergeSet) finish(gen uint64) {
-	if m.begins[gen] {
-		delete(m.begins, gen)
-		return
-	}
+	delete(m.begins, gen)
 	m.finishes[gen] = true
 }
 

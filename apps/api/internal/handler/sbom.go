@@ -884,7 +884,7 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	// the counts were taken. Then this poll answers running; the next one
 	// gets a consistent pair.
 	if h.scanTracker != nil && (state == service.ScanStateCompleted || state == service.ScanStateFailed) {
-		if _, _, _, v2 := h.scanTracker.GetDetailVersion(sbomID); v2 != version {
+		if s2, _, _, v2 := h.scanTracker.GetDetailVersion(sbomID); s2 != state || v2 != version {
 			state, errMsg, reasons = service.ScanStateRunning, "", nil
 		}
 	}

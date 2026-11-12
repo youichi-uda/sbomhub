@@ -449,3 +449,31 @@ func (h singleCmdHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 func (h singleCmdHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return next
 }
+
+// Codex M72 R14 High-1: the shared status version changes with EVERY write,
+// even two in the same millisecond.
+func TestM72R14_SharedVersionIsUniquePerWrite(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	store := a.shared.(*redisScanStatusStore)
+	ctx := context.Background()
+	id := uuid.New()
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		g := uint64(i + 1)
+		if err := store.begin(ctx, id, g); err != nil {
+			t.Fatal(err)
+		}
+		v1, _ := store.get(ctx, id)
+		if _, err := store.finish(ctx, id, g, "", nil); err != nil {
+			t.Fatal(err)
+		}
+		v2, _ := store.get(ctx, id)
+		for _, v := range []string{v1.version, v2.version} {
+			if seen[v] {
+				t.Fatalf("version %q repeated across writes", v)
+			}
+			seen[v] = true
+		}
+	}
+}

@@ -69,8 +69,10 @@ type ScanTracker struct {
 	queues map[uuid.UUID]*sbomQueue
 	// live: this process's active runs (lease renewal), with their start.
 	live map[runKey]*liveRun
-	// ready: queues waiting for a drain worker; workers: running workers.
+	// ready / readyPrio: queues waiting for a drain worker (FIFO; the
+	// priority lane holds fresh Begins); workers: running workers.
 	ready      []uuid.UUID
+	readyPrio  []uuid.UUID
 	workers    int
 	queueCap   int           // maxQueuedWrites; smaller in tests
 	beginWait  time.Duration // beginWait; shorter in tests
@@ -388,20 +390,21 @@ func (t *ScanTracker) GetDetailVersion(sbomID uuid.UUID) (ScanState, string, []s
 }
 
 // localVersioned is this process's answer with its entry revision as the
-// version. withoutShared: Redis could not be consulted, so a local
-// "completed" is not trusted (see GetDetailVersion) and reads unknown.
+// version, both read under one lock (Codex M72 R14 Medium-3). withoutShared:
+// Redis could not be consulted, so a local "completed" is not trusted (see
+// GetDetailVersion) and reads unknown.
 func (t *ScanTracker) localVersioned(sbomID uuid.UUID, withoutShared bool) (ScanState, string, []string, string) {
-	rev := t.revision(sbomID)
-	state, msg, reasons := t.getDetailLocal(sbomID)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	state, msg, reasons := t.getDetailLocked(sbomID)
 	if withoutShared && state == ScanStateCompleted {
 		state, msg, reasons = ScanStateUnknown, "", nil
 	}
-	return state, msg, reasons, "l" + strconv.FormatUint(rev, 10)
+	return state, msg, reasons, "l" + strconv.FormatUint(t.entries[sbomID].rev, 10)
 }
 
-func (t *ScanTracker) getDetailLocal(sbomID uuid.UUID) (ScanState, string, []string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+// getDetailLocked is the in-memory status of sbomID. t.mu is held.
+func (t *ScanTracker) getDetailLocked(sbomID uuid.UUID) (ScanState, string, []string) {
 	entry, ok := t.entries[sbomID]
 	if !ok {
 		return ScanStateUnknown, "", nil
