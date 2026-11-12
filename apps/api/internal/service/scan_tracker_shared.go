@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,6 +33,9 @@ const (
 	// heartbeatBatch is how many lease renewals go in one pipelined round
 	// trip (Codex M72 R2 Medium-4).
 	heartbeatBatch = 256
+	// maxDrainKicks bounds how many stalled queues one heartbeat retries
+	// (Codex M72 R7 High-1); the rest wait for the next pass.
+	maxDrainKicks = 32
 )
 
 type sharedEventKind int
@@ -60,6 +64,8 @@ type sharedEvent struct {
 type sbomQueue struct {
 	events   []*sharedEvent
 	draining bool
+	// lastWrite is when a write was last queued or folded in.
+	lastWrite time.Time
 }
 
 func (t *ScanTracker) logSharedError(msg string, sbomID uuid.UUID, err error) {
@@ -77,6 +83,7 @@ func (t *ScanTracker) enqueueLocked(sbomID uuid.UUID, ev *sharedEvent) {
 		q = &sbomQueue{}
 		t.queues[sbomID] = q
 	}
+	q.lastWrite = time.Now()
 	if len(q.events) >= t.queueCap {
 		// Full: coalesce into one merge event at the tail (Codex M72 R5
 		// High-3). It stays last, so call order is kept, and nothing that
@@ -268,18 +275,33 @@ func (t *ScanTracker) heartbeatLoop() {
 // whose transaction rolled back).
 func (t *ScanTracker) heartbeatPass() bool {
 	t.qMu.Lock()
-	// Queued writes are never discarded for their age (Codex M72 R6
-	// High-2/3): one may carry a failure, and the head may be in flight. The
-	// queue is bounded by queueCap plus one merge event.
+	// A queue is reclaimed only as a whole, when it is not being drained and
+	// its LAST write is older than retention: by then the status it carries
+	// would have expired in Redis and in this process anyway (Codex M72 R7
+	// High-1). A single write is never dropped for its age while newer ones of
+	// its SBOM wait (Codex M72 R6 High-2/3). Stalled queues are retried at
+	// most maxDrainKicks per pass, least recently written first.
+	var stalled []uuid.UUID
 	for id, q := range t.queues {
-		if len(q.events) == 0 && !q.draining {
+		switch {
+		case q.draining:
+		case len(q.events) == 0:
 			delete(t.queues, id)
-			continue
+		case time.Since(q.lastWrite) > t.retention:
+			for _, ev := range q.events {
+				close(ev.done)
+			}
+			delete(t.queues, id)
+			slog.Warn("scan status: dropped shared writes older than the status retention; Redis was unreachable for longer",
+				"sbom_id", id)
+		default:
+			stalled = append(stalled, id)
 		}
-		if !q.draining {
-			q.draining = true
-			go t.drain(id)
-		}
+	}
+	slices.SortFunc(stalled, func(x, y uuid.UUID) int { return t.queues[x].lastWrite.Compare(t.queues[y].lastWrite) })
+	for _, id := range stalled[:min(len(stalled), maxDrainKicks)] {
+		t.queues[id].draining = true
+		go t.drain(id)
 	}
 	var renew []runKey
 	for k, began := range t.live {

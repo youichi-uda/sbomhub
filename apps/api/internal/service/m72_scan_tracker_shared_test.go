@@ -750,22 +750,82 @@ func TestM72R6_MergeKeepsEveryLiveRun(t *testing.T) {
 	}
 }
 
-// Codex M72 R6 High-2/3: a queued write is never discarded for its age (a
-// failure would be lost, and pruning the in-flight head could panic).
+// Codex M72 R6 High-2/3: a queued write is not discarded for its own age
+// while its SBOM's queue is still being written to (a failure would be lost,
+// and pruning the in-flight head could panic). Only a whole queue whose LAST
+// write is older than retention is reclaimed (R7).
 func TestM72R6_OldQueuedWritesAreKept(t *testing.T) {
 	store := newGroupStore()
 	store.setDown(true)
 	a := trackerOn(store, time.Hour)
-	a.retention = 20 * time.Millisecond
+	a.retention = 60 * time.Millisecond
 	a.beginWait = time.Millisecond
 	id := uuid.New()
+	long := a.Begin(id)
 	a.Finish(id, a.Begin(id), []string{ScanReasonFetchFailed}, "nvd: scan failed (fetch_failed)")
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(45 * time.Millisecond)
+	a.Finish(id, long, nil, "")       // a newer write of the same SBOM (same group)
+	time.Sleep(30 * time.Millisecond) // the failure is now older than retention
 	a.heartbeatPass()
 	store.setDown(false)
 	a.kickQueues()
 	settle(t, a, id)
 	if st, _, _ := trackerOn(store, time.Hour).GetDetail(id); st != ScanStateFailed {
 		t.Fatalf("an old queued failure: %s, want failed", st)
+	}
+}
+
+// Codex M72 R7 High-1: during a long outage, queues whose last write is older
+// than retention (their status would have expired anyway) are reclaimed, and
+// one heartbeat retries a bounded number of stalled queues.
+func TestM72R7_StalledQueuesAreBoundedAndReclaimed(t *testing.T) {
+	store := newMemStore()
+	store.setDown(true)
+	a := trackerOn(store, time.Hour)
+	a.beginWait = time.Millisecond
+	const n = 100
+	for i := 0; i < n; i++ {
+		id := uuid.New()
+		a.Finish(id, a.Begin(id), nil, "")
+	}
+	waitFor(t, "the first drains to fail", func() bool {
+		a.qMu.Lock()
+		defer a.qMu.Unlock()
+		for _, q := range a.queues {
+			if q.draining {
+				return false
+			}
+		}
+		return true
+	})
+	store.mu.Lock()
+	store.calls = 0
+	store.mu.Unlock()
+	a.heartbeatPass()
+	waitFor(t, "the retries to fail", func() bool {
+		a.qMu.Lock()
+		defer a.qMu.Unlock()
+		for _, q := range a.queues {
+			if q.draining {
+				return false
+			}
+		}
+		return true
+	})
+	store.mu.Lock()
+	calls := store.calls
+	store.mu.Unlock()
+	if calls > maxDrainKicks {
+		t.Fatalf("one heartbeat retried %d queues, want <= %d", calls, maxDrainKicks)
+	}
+
+	a.retention = time.Millisecond
+	time.Sleep(5 * time.Millisecond)
+	a.heartbeatPass()
+	a.qMu.Lock()
+	left := len(a.queues)
+	a.qMu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d queues older than retention kept", left)
 	}
 }
