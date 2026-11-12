@@ -1123,7 +1123,7 @@ func TestM72R16_MergeNetsAwayRunsWhollyInside(t *testing.T) {
 	a.beginWait = time.Millisecond
 	id := uuid.New()
 	a.Finish(id, a.Begin(id), nil, "") // fills the queue
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 3*maxFreshFinishes; i++ {
 		a.Finish(id, a.Begin(id), []string{ScanReasonQueueFull}, "scan: scan failed (queue_full)")
 	}
 	a.qMu.Lock()
@@ -1131,8 +1131,10 @@ func TestM72R16_MergeNetsAwayRunsWhollyInside(t *testing.T) {
 	tail := q.events[len(q.events)-1]
 	nb, nf := len(tail.merged.begins), len(tail.merged.finishes)
 	a.qMu.Unlock()
-	if nb+nf > 4 {
-		t.Fatalf("merge holds %d begins and %d finishes after 500 runs that began and ended inside it", nb, nf)
+	// R19: removals of runs that began and ended inside it are written (their
+	// intents may be in Redis), up to maxFreshFinishes.
+	if nb+nf > maxFreshFinishes+4 {
+		t.Fatalf("merge holds %d begins and %d finishes after %d runs that began and ended inside it", nb, nf, 3*maxFreshFinishes)
 	}
 	store.setDown(false)
 	a.kickQueues()
@@ -1186,5 +1188,42 @@ func TestM72R18_BeginBehindABacklogIsVisibleAtOnce(t *testing.T) {
 	mem.mu.Unlock()
 	if !visible {
 		t.Fatal("a Begin queued behind a backlog was not visible in the store when Begin returned")
+	}
+}
+
+// slowIntentStore delays begins by d and intents by 3d.
+type slowIntentStore struct {
+	*memStore
+	d time.Duration
+}
+
+func (s slowIntentStore) begin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	time.Sleep(s.d)
+	return s.memStore.begin(ctx, id, gen)
+}
+
+func (s slowIntentStore) intent(ctx context.Context, id uuid.UUID, gen uint64) error {
+	time.Sleep(3 * s.d)
+	return s.memStore.intent(ctx, id, gen)
+}
+
+// Codex M72 R19 Medium-3: an intent that lands after its run already
+// finished is removed again.
+func TestM72R19_LateIntentIsCleanedUp(t *testing.T) {
+	mem := newMemStore()
+	store := slowIntentStore{memStore: mem, d: 60 * time.Millisecond}
+	a := trackerOn(store, time.Hour)
+	a.beginWait = time.Millisecond
+	id := uuid.New()
+	first := a.Begin(id) // its write is in flight: the queue is busy
+	gen := a.Begin(id)   // queued behind: its intent (slow) is in flight
+	a.Finish(id, gen, nil, "")
+	a.Finish(id, first, nil, "")
+	time.Sleep(400 * time.Millisecond) // the intent lands after the finish
+	settle(t, a, id)
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
+	if mem.runs[id][gen] {
+		t.Fatal("a late intent left the finished run active in the store")
 	}
 }

@@ -97,6 +97,9 @@ func scanStatusKeys(sbomID uuid.UUID) []string {
 //	              at most MAX_LOST (Codex M72 R3 Medium-2), they survive a new
 //	              group and expire after MAX_RUN_AGE (Codex M72 R10 High-1)
 //	lost_dropped  when a tombstone was dropped (or the runs were found lost)
+//	born          when this incarnation of the key was created (+ nonce)
+//	rev           write counter; the version is born:rev
+//	young_hold    the state was held running because the key is young
 const scanStatusLua = `
 local K = KEYS[1]
 local function nowms()
@@ -127,6 +130,20 @@ end
 local function active_count()
   local runs = fields()
   return count(runs)
+end
+-- born: when this incarnation of the key was created, with Redis's
+-- microseconds as a nonce. It is part of the version, so versions never repeat
+-- after the key was evicted and recreated (Codex M72 R19 High-2).
+local function ensure_born()
+  if redis.call('HEXISTS', K, 'born') == 0 then
+    local t = redis.call('TIME')
+    redis.call('HSET', K, 'born', t[1] .. string.format('%06d', tonumber(t[2])))
+  end
+end
+local function born_ms()
+  local b = redis.call('HGET', K, 'born')
+  if not b then return nil end
+  return math.floor(tonumber(string.sub(b, 1, -7)) * 1000 + tonumber(string.sub(b, -6)) / 1000)
 end
 local function load_outcomes()
   local raw = redis.call('HGET', K, 'outcomes')
@@ -241,9 +258,19 @@ local function publish(now)
     local rj = '[]'
     if #reasons > 0 then rj = cjson.encode(reasons) end
     redis.call('HSET', K, 'state', 'failed', 'error', table.concat(msgs, '; '), 'reasons', rj, 'updated', now)
-  else
-    redis.call('HSET', K, 'state', 'completed', 'error', '', 'reasons', '[]', 'updated', now)
+    redis.call('HDEL', K, 'young_hold')
+    return
   end
+  -- A key younger than one heartbeat may have replaced an evicted one whose
+  -- runs have not rejoined yet: it does not read completed until they could
+  -- have (Codex M72 R19 High-2).
+  local b = born_ms()
+  if b and now - b < YOUNG then
+    redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated', now, 'young_hold', '1')
+    return
+  end
+  redis.call('HDEL', K, 'young_hold')
+  redis.call('HSET', K, 'state', 'completed', 'error', '', 'reasons', '[]', 'updated', now)
 end
 local function activate(g, now, lease)
   redis.call('HDEL', K, 'l:' .. g, 'p:' .. g)
@@ -266,8 +293,16 @@ type statusScripts struct {
 }
 
 func newStatusScripts(maxRunAge time.Duration) *statusScripts {
-	prelude := fmt.Sprintf("local INTERRUPTED_MSG = %q\nlocal INTERRUPTED_REASON = %q\nlocal MAX_LOST = %d\nlocal MAX_RUN_AGE = %d\n",
-		scanInterruptedMarker, ScanReasonInterrupted, scanStatusMaxLost, maxRunAge.Milliseconds())
+	return newStatusScriptsYoung(maxRunAge, scanStatusYoung)
+}
+
+// scanStatusYoung: a status key younger than this does not read completed
+// (one heartbeat plus slack; see publish in scanStatusLua).
+const scanStatusYoung = ScanStatusHeartbeat + 15*time.Second
+
+func newStatusScriptsYoung(maxRunAge, young time.Duration) *statusScripts {
+	prelude := fmt.Sprintf("local INTERRUPTED_MSG = %q\nlocal INTERRUPTED_REASON = %q\nlocal MAX_LOST = %d\nlocal MAX_RUN_AGE = %d\nlocal YOUNG = %d\n",
+		scanInterruptedMarker, ScanReasonInterrupted, scanStatusMaxLost, maxRunAge.Milliseconds(), young.Milliseconds())
 	mk := func(body string) *redis.Script { return redis.NewScript(prelude + scanStatusLua + body) }
 	return &statusScripts{
 		begin: mk(scanStatusBeginLua), finish: mk(scanStatusFinishLua), merge: mk(scanStatusMergeLua),
@@ -279,17 +314,23 @@ func newStatusScripts(maxRunAge time.Duration) *statusScripts {
 // ARGV: gen, lease ms, ttl ms.
 const scanStatusBeginLua = `
 local now = nowms()
+ensure_born()
 sweep(now, nil)
 -- A begin of a run already swept as interrupted (a retried write) rejoins
 -- the group instead of starting a new one (Codex M72 R8 High-1).
-if redis.call('HEXISTS', K, 'l:' .. ARGV[1]) == 1 then
+-- Likewise a Begin replacing its own intent: the intent already made the
+-- run a member of the current group (Codex M72 R19 High-1).
+if redis.call('HEXISTS', K, 'l:' .. ARGV[1]) == 1 or redis.call('HEXISTS', K, 'p:' .. ARGV[1]) == 1 then
   activate(ARGV[1], now, ARGV[2])
   publish(now)
   expire(ARGV[3])
   return 1
 end
-if active_count() == 0 then
-  -- A new group. Tombstones are kept: a run swept as interrupted may still be
+local runs_b, _, intents_b = fields()
+intents_b[ARGV[1]] = nil
+if count(runs_b) == 0 and count(intents_b) == 0 then
+  -- A new group (no other run, and no intent: an intent is a member of the
+  -- current group, Codex M72 R19 High-1). Tombstones are kept: a run swept as interrupted may still be
   -- alive (a suspended process), so the SBOM must not read completed while it
   -- could still be writing (Codex M72 R10 High-1).
   redis.call('HDEL', K, 'state', 'error', 'reasons', 'updated')
@@ -308,6 +349,7 @@ return 1`
 // interrupted, like a run.
 const scanStatusIntentLua = `
 local now = nowms()
+ensure_born()
 sweep(now, nil)
 if redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 1 then return 0 end
 redis.call('HSET', K, 'p:' .. ARGV[1], now + tonumber(ARGV[2]))
@@ -323,6 +365,7 @@ return 1`
 // "failed", never a false "completed".
 const scanStatusFinishLua = `
 local now = nowms()
+ensure_born()
 local active = redis.call('HDEL', K, 'r:' .. ARGV[1]) == 1
 if redis.call('HDEL', K, 'p:' .. ARGV[1]) == 1 then active = true end
 sweep(now, ARGV[1])
@@ -341,6 +384,7 @@ return 2`
 // finished, and the failures among them (Codex M72 R5 High-3).
 const scanStatusMergeLua = `
 local now = nowms()
+ensure_born()
 local ok, m = pcall(cjson.decode, ARGV[1])
 if not ok or type(m) ~= 'table' then return redis.error_reply('bad merge') end
 sweep(now, nil)
@@ -395,6 +439,7 @@ return 0`
 // and interruptions are kept (Codex M72 R4 High-3).
 const scanStatusRejoinLua = `
 local now = nowms()
+ensure_born()
 sweep(now, ARGV[1])
 activate(ARGV[1], now, ARGV[2])
 publish(now)
@@ -405,8 +450,10 @@ return 1`
 // run (MarkFailed / MarkCompleted): ends every run of the group.
 const scanStatusMarkLua = `
 local rev = redis.call('HGET', K, 'rev')
+local born = redis.call('HGET', K, 'born')
 redis.call('DEL', K)
 if rev then redis.call('HSET', K, 'rev', rev) end
+if born then redis.call('HSET', K, 'born', born) else ensure_born() end
 redis.call('HSET', K, 'state', ARGV[1], 'error', ARGV[2], 'reasons', ARGV[3], 'updated', nowms())
 save_outcomes({})
 expire(ARGV[4])
@@ -419,7 +466,12 @@ if redis.call('EXISTS', K) == 0 then return false end
 local now = nowms()
 local changed = sweep(now, nil) > 0
 local runs_now, _, intents_now = fields()
-if not changed and redis.call('HGET', K, 'state') == 'running' and count(runs_now) == 0 and count(intents_now) == 0 then
+local idle = count(runs_now) == 0 and count(intents_now) == 0
+if not changed and idle and redis.call('HGET', K, 'young_hold') == '1' then
+  -- held as running while the key was young: re-evaluate
+  local b = born_ms()
+  if not b or now - b >= YOUNG then changed = true end
+elseif not changed and idle and redis.call('HGET', K, 'state') == 'running' then
   -- running with no active run and none just swept: interrupted, without a
   -- run to revive.
   redis.call('HSET', K, 'lost_dropped', now)
@@ -429,7 +481,7 @@ if changed then
   publish(now)
   bump()
 end
-return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]', redis.call('HGET', K, 'rev') or ''}`
+return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]', (redis.call('HGET', K, 'born') or '') .. ':' .. (redis.call('HGET', K, 'rev') or '')}`
 
 // statusView is one read of the shared status. version changes with every
 // write of it (the entry's rev counter).
@@ -514,8 +566,9 @@ type mergeSet struct {
 	// finishes inside the merge it leaves nothing but its failure (Codex M72
 	// R16 High-2) — the merge stays bounded by the runs live at once plus the
 	// writes queued before it, however many requests arrive.
-	fresh    map[uint64]bool
-	failures []mergeFailure
+	fresh         map[uint64]bool
+	freshFinishes int
+	failures      []mergeFailure
 }
 
 type mergeFailure struct {
@@ -542,10 +595,21 @@ func (m *mergeSet) finish(gen uint64) {
 	delete(m.begins, gen)
 	if m.fresh[gen] {
 		delete(m.fresh, gen)
-		return
+		// Its Begin was queued behind others, so an intent of it may be in
+		// Redis: its removal is written too (Codex M72 R19 Medium-3), up to
+		// maxFreshFinishes per merge; beyond that its intent expires and is
+		// swept as interrupted — conservative, and the merge stays bounded.
+		if m.freshFinishes >= maxFreshFinishes {
+			return
+		}
+		m.freshFinishes++
 	}
 	m.finishes[gen] = true
 }
+
+// maxFreshFinishes bounds the removals one merge writes for runs that began
+// and ended inside it.
+const maxFreshFinishes = 1024
 
 func (m *mergeSet) addFailure(msg string, reasons []string) {
 	for i := range m.failures {

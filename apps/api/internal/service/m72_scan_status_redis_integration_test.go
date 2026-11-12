@@ -42,6 +42,9 @@ func m72Redis(t *testing.T) *redis.Client {
 // heartbeat loop ticks every hb.
 func process(rdb *redis.Client, lease, hb time.Duration) *ScanTracker {
 	t := NewScanTracker().WithRedis(rdb)
+	// No young-key hold here (TestM72R19_EvictionYoungKeyAndVersions covers
+	// it): these tests read completed right after a fresh key's finish.
+	t.shared.(*redisScanStatusStore).scripts = newStatusScriptsYoung(t.maxRunAge, 0)
 	if lease > 0 {
 		t.shared.(*redisScanStatusStore).lease = lease
 	}
@@ -381,7 +384,7 @@ func TestM72R10_NewGroupKeepsLiveTombstones(t *testing.T) {
 
 // setMaxRunAge rebuilds tr's scripts for a different tombstone age.
 func setMaxRunAge(tr *ScanTracker, d time.Duration) {
-	tr.shared.(*redisScanStatusStore).scripts = newStatusScripts(d)
+	tr.shared.(*redisScanStatusStore).scripts = newStatusScriptsYoung(d, 0)
 }
 
 // Codex M72 R11 High-1: the status of one SBOM is ONE Redis key (evicted all
@@ -553,5 +556,64 @@ func TestM72R18_IntentReadsRunningUntilItsBeginLands(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if v, _ := store.get(ctx, id2); v.state != ScanStateFailed || v.errMsg != "scan: scan failed (interrupted)" {
 		t.Fatalf("an intent whose lease ran out: %s %q, want failed (interrupted)", v.state, v.errMsg)
+	}
+}
+
+// Codex M72 R19 High-1: a queued Begin replacing its intent joins the group
+// the intent was part of; it does not start a new group and drop a failure.
+func TestM72R19_BeginReplacingItsIntentKeepsTheGroup(t *testing.T) {
+	rdb := m72Redis(t)
+	store := process(rdb, 0, time.Hour).shared.(*redisScanStatusStore)
+	ctx := context.Background()
+	id := uuid.New()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(store.begin(ctx, id, 1))  // A runs
+	must(store.intent(ctx, id, 2)) // B's Begin is queued; its intent lands
+	_, err := store.finish(ctx, id, 1, "nvd: scan failed (fetch_failed)", []string{ScanReasonFetchFailed})
+	must(err)
+	must(store.begin(ctx, id, 2)) // B's queued Begin lands
+	_, err = store.finish(ctx, id, 2, "", nil)
+	must(err)
+	if v, _ := store.get(ctx, id); v.state != ScanStateFailed {
+		t.Fatalf("group outcome %s, want failed (A's failure)", v.state)
+	}
+}
+
+// Codex M72 R19 High-2: after the status key was evicted, a short scan that
+// recreates it cannot publish completed before the evicted runs could have
+// rejoined (one heartbeat), and versions never repeat across incarnations.
+func TestM72R19_EvictionYoungKeyAndVersions(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	store := a.shared.(*redisScanStatusStore)
+	store.scripts = newStatusScriptsYoung(DefaultScanDeadline+5*time.Minute, 300*time.Millisecond)
+	ctx := context.Background()
+	id := uuid.New()
+	if err := store.begin(ctx, id, 1); err != nil { // A runs
+		t.Fatal(err)
+	}
+	before, _ := store.get(ctx, id)
+	rdb.Del(ctx, scanStatusKeys(id)...) // evicted
+	if err := store.begin(ctx, id, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id, 2, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	v, _ := store.get(ctx, id)
+	if v.state == ScanStateCompleted {
+		t.Fatal("completed right after the key was recreated, while an evicted run may still be scanning")
+	}
+	if v.version == before.version {
+		t.Fatalf("version %q repeated across key incarnations", v.version)
+	}
+	time.Sleep(350 * time.Millisecond)
+	if v, _ := store.get(ctx, id); v.state != ScanStateCompleted {
+		t.Fatalf("after the young window with no run back: %s, want completed", v.state)
 	}
 }
