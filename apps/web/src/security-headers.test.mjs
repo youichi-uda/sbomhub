@@ -12,10 +12,12 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  FALLBACK_CSP,
   applyNonceCsp,
   buildContentSecurityPolicy,
   buildSecurityHeaders,
   clerkFrontendApiOrigin,
+  nextConfigHeaders,
   cspEnvFromProcessEnv,
   cspHeaderName,
   generateNonce,
@@ -229,10 +231,48 @@ describe("applyNonceCsp: every rendered response forwards the nonce", () => {
   });
 });
 
-test("next.config wires the static headers in and turns X-Powered-By off", () => {
+describe("paths the proxy never sees get a no-script CSP from next.config (Codex M71 R1 Low)", () => {
+  // Next renders its HTML 404 for e.g. /api/x or /_next/x; those paths are
+  // outside the proxy matcher, so they would otherwise carry no CSP at all.
+  const rules = nextConfigHeaders({ reportOnly: false });
+  const cspRules = rules.filter((r) => r.headers.some((h) => h.key === "Content-Security-Policy"));
+  const toRe = (source) =>
+    // path-to-regexp subset used here: ":path*" and ":path(<regex>)"
+    new RegExp("^" + source.replace(/:path\*/g, ".*").replace(/:path\((.*)\)$/, "$1") + "$");
+  const covered = (p) => cspRules.some((r) => toRe(r.source).test(p));
+
+  test("static headers on every route", () => {
+    assert.deepEqual(rules[0], { source: "/:path*", headers: buildSecurityHeaders() });
+  });
+  test("fallback policy runs nothing", () => {
+    assert.equal(FALLBACK_CSP, "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+  });
+  for (const p of ["/api", "/api/does-not-exist", "/api/webhooks/x", "/_next", "/_next/nope", "/_next/image", "/_next/data/x.json", "/_vercel", "/_vercel/insights"]) {
+    test(`covers ${p}`, () => assert.ok(covered(p), p));
+  }
+  // Pages get the nonce CSP from the proxy; a second, stricter CSP here would
+  // block them. /_next/static stays bare so a worker script is not
+  // restricted by a document policy.
+  for (const p of ["/", "/en", "/en/projects", "/apisomething", "/public/x", "/_next/static/chunks/a.js"]) {
+    test(`leaves ${p} alone`, () => assert.ok(!covered(p), p));
+  }
+  test("report-only switch applies to the fallback too", () => {
+    const ro = nextConfigHeaders({ reportOnly: true });
+    assert.ok(ro.some((r) => r.headers.some((h) => h.key === "Content-Security-Policy-Report-Only")));
+    assert.ok(!ro.some((r) => r.headers.some((h) => h.key === "Content-Security-Policy")));
+  });
+  test("the excluded prefixes match proxy.ts's matcher", () => {
+    const src = readFileSync(join(here, "proxy.ts"), "utf8");
+    for (const prefix of ["api", "_next", "_vercel"]) {
+      assert.match(src, new RegExp(`\\b${prefix}/\\|${prefix}\\$`), prefix);
+    }
+  });
+});
+
+test("next.config wires the headers in and turns X-Powered-By off", () => {
   const cfg = readFileSync(join(here, "..", "next.config.mjs"), "utf8");
   assert.match(cfg, /poweredByHeader:\s*false/);
-  assert.match(cfg, /source:\s*'\/:path\*',\s*headers:\s*buildSecurityHeaders\(\)/);
+  assert.match(cfg, /return nextConfigHeaders\(\{\s*reportOnly:/);
   assert.match(cfg, /SBOMHUB_CSP_REPORT_ONLY:\s*process\.env\.SBOMHUB_CSP_REPORT_ONLY/);
 });
 

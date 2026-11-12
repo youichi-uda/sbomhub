@@ -174,6 +174,33 @@ export function buildSecurityHeaders() {
 }
 
 /**
+ * CSP for the paths the proxy never sees (its matcher skips /api, /_next,
+ * /_vercel). Nothing the app serves there is a page, but Next answers an
+ * unknown path there with its HTML 404, and without this it would carry no
+ * CSP at all (Codex M71 R1 Low). It runs nothing.
+ */
+export const FALLBACK_CSP = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/**
+ * next.config `headers()`: the static headers on every route, plus
+ * FALLBACK_CSP on the prefixes outside the proxy matcher. /_next/static is
+ * left bare (a worker script's own CSP would restrict that worker); pages
+ * must not get it either, since two CSPs are both enforced.
+ */
+export function nextConfigHeaders({ reportOnly }) {
+  const csp = [{ key: cspHeaderName(reportOnly), value: FALLBACK_CSP }];
+  return [
+    { source: "/:path*", headers: buildSecurityHeaders() },
+    { source: "/api", headers: csp },
+    { source: "/api/:path*", headers: csp },
+    { source: "/_vercel", headers: csp },
+    { source: "/_vercel/:path*", headers: csp },
+    { source: "/_next", headers: csp },
+    { source: "/_next/:path((?!static/).*)", headers: csp },
+  ];
+}
+
+/**
  * The CSP inputs. src/proxy.ts passes `process.env.X` member accesses
  * (not the process.env object), so Next inlines the NEXT_PUBLIC_* values
  * and SBOMHUB_CSP_REPORT_ONLY (next.config.mjs `env`) at build time and a

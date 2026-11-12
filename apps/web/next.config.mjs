@@ -1,5 +1,5 @@
 import createNextIntlPlugin from 'next-intl/plugin';
-import { buildSecurityHeaders } from './security-headers.mjs';
+import { nextConfigHeaders } from './security-headers.mjs';
 
 // Debug: log env vars at config load time
 console.log('=== NEXT CONFIG ENV ===');
@@ -14,11 +14,12 @@ const nextConfig = {
   output: 'standalone',
   // M65 bug 9: no `X-Powered-By: Next.js`, and security headers (nosniff,
   // frame denial, Referrer-Policy, Permissions-Policy) on every route. The
-  // CSP carries a per-request nonce and is set by src/proxy.ts (M71). See
+  // CSP carries a per-request nonce and is set by src/proxy.ts (M71); paths
+  // outside the proxy matcher get a no-script CSP here. See
   // security-headers.mjs for the policy and why.
   poweredByHeader: false,
   async headers() {
-    return [{ source: '/:path*', headers: buildSecurityHeaders() }];
+    return nextConfigHeaders({ reportOnly: /^(1|true)$/i.test(process.env.SBOMHUB_CSP_REPORT_ONLY ?? '') });
   },
   env: {
     NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,

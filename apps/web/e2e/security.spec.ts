@@ -3,6 +3,15 @@ import en from '../messages/en.json';
 import ja from '../messages/ja.json';
 import { API_BASE_URL, createProject, deleteProject, uniqueName, uploadSbom } from './fixtures/vuln-project';
 
+// The web build's SBOMHUB_CSP_REPORT_ONLY=true sends the CSP as Report-Only
+// (docs/UPGRADE.md §19.1). Run this spec with the same value as the build;
+// the policy itself is the same either way.
+const CSP_HEADER = /^(1|true)$/i.test(process.env.SBOMHUB_CSP_REPORT_ONLY ?? '')
+    ? 'content-security-policy-report-only'
+    : 'content-security-policy';
+const OTHER_CSP_HEADER =
+    CSP_HEADER === 'content-security-policy' ? 'content-security-policy-report-only' : 'content-security-policy';
+
 // Records every native dialog (alert/confirm/prompt) the page opens: an
 // injected handler that ran would show up here.
 function recordDialogs(page: Page): string[] {
@@ -320,7 +329,8 @@ test.describe('Security Tests', () => {
             const headers = response!.headers();
             expect(headers['x-content-type-options']).toBe('nosniff');
             expect(headers['x-frame-options']).toBe('DENY');
-            expect(headers['content-security-policy']).toContain("frame-ancestors 'none'");
+            expect(headers[CSP_HEADER]).toContain("frame-ancestors 'none'");
+            expect(headers[OTHER_CSP_HEADER]).toBeUndefined();
             expect(headers['referrer-policy']).toBe('strict-origin-when-cross-origin');
             expect(headers['permissions-policy']).toContain('camera=()');
             expect(headers['x-powered-by']).toBeUndefined();
@@ -333,7 +343,8 @@ test.describe('Security Tests', () => {
             for (const path of ['/en/projects', '/en/projects', '/en']) {
                 const res = await request.get(path);
                 expect(res.status(), path).toBe(200);
-                const csp = res.headers()['content-security-policy'];
+                const csp = res.headers()[CSP_HEADER];
+                expect(csp, path).toBeDefined();
                 const scriptSrc = csp.split(';').map((d) => d.trim()).find((d) => d.startsWith('script-src '));
                 expect(scriptSrc, path).toBeDefined();
                 expect(scriptSrc, path).not.toContain("'unsafe-inline'");
@@ -359,8 +370,26 @@ test.describe('Security Tests', () => {
                 headers: { 'x-nonce': 'AAAAAAAAAAAAAAAAAAAAAA==', 'content-security-policy': "script-src 'nonce-AAAAAAAAAAAAAAAAAAAAAA=='" },
             });
             expect(res.status()).toBe(200);
-            expect(res.headers()['content-security-policy']).not.toContain('AAAAAAAAAAAAAAAAAAAAAA==');
+            expect(res.headers()[CSP_HEADER]).toMatch(/'nonce-/);
+            expect(res.headers()[CSP_HEADER]).not.toContain('AAAAAAAAAAAAAAAAAAAAAA==');
             expect(await res.text()).not.toContain('nonce="AAAAAAAAAAAAAAAAAAAAAA=="');
+        });
+
+        // Codex M71 R1 Low: paths outside the proxy matcher (Next's HTML 404
+        // for /api/x, /_next/x) carried no CSP once it moved to the proxy.
+        test('should send a no-script CSP on paths the proxy does not handle', async ({ request }) => {
+            for (const path of ['/api/does-not-exist-m71', '/_next/does-not-exist-m71', '/_vercel/does-not-exist-m71']) {
+                const res = await request.get(path);
+                expect(res.status(), path).toBe(404);
+                expect(res.headers()[CSP_HEADER], path).toBe(
+                    "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+                );
+                expect(res.headers()['x-frame-options'], path).toBe('DENY');
+            }
+            // A page gets exactly one policy: the proxy's nonce policy.
+            const page = await request.get('/en/projects');
+            expect(page.headers()[CSP_HEADER]).toMatch(/^default-src 'self'; script-src 'self' 'nonce-[^']+' 'strict-dynamic'/);
+            expect(page.headersArray().filter((h) => /^content-security-policy/i.test(h.name))).toHaveLength(1);
         });
 
         test('should load the main pages without any CSP violation', async ({ page }) => {
@@ -386,7 +415,7 @@ test.describe('Security Tests', () => {
             for (const [path, status] of pages) {
                 const res = await page.goto(path);
                 expect(res?.status(), path).toBe(status);
-                expect(res?.headers()['content-security-policy'], path).toContain("default-src 'self'");
+                expect(res?.headers()[CSP_HEADER], path).toContain("default-src 'self'");
                 // The page really ran its client code: hydrated and finished its
                 // API loads (connect-src), i.e. no loading placeholder is left.
                 // Not 'networkidle' (Codex R1 Low: dashboard polling can keep the
