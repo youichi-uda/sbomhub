@@ -50,6 +50,9 @@ func TestM72ScanStatus_ForeignSBOMIsNotReadFromRedis(t *testing.T) {
 		sbomService: service.NewSbomService(repository.NewSbomRepository(appDB), repository.NewComponentRepository(appDB)),
 		scanTracker: service.NewScanTracker().WithRedis(rdb),
 	}
+	// WithRedis reads Redis's eviction settings once (CONFIG GET); count only
+	// what the request does.
+	n.Store(0)
 	// sbom2 belongs to the tenant's OTHER project.
 	code, body := m47Call(t, appDB, m47Req{
 		method:     http.MethodGet,
