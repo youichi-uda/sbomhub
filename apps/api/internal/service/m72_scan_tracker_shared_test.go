@@ -1018,3 +1018,41 @@ func TestM72R13_FreshBeginIsNotStarvedByBacklog(t *testing.T) {
 		t.Fatal("the fresh begin did not reach the store")
 	}
 }
+
+// Codex M72 R14 High-2: the priority lane is FIFO (it was a stack: a stream
+// of newer arrivals pushed an older Begin back past its wait).
+func TestM72R14_PriorityLaneIsFIFO(t *testing.T) {
+	a := NewScanTracker()
+	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	a.qMu.Lock()
+	a.workers = maxDrainWorkers + priorityWorkers // no worker starts
+	for _, id := range ids {
+		q := &sbomQueue{}
+		a.queues[id] = q
+		a.startDrainLocked(id, q, true)
+	}
+	var got []uuid.UUID
+	for {
+		id, ok := a.nextReadyLocked()
+		if !ok {
+			break
+		}
+		got = append(got, id)
+	}
+	a.qMu.Unlock()
+	if !slices.Equal(got, ids) {
+		t.Fatalf("priority order %v, want %v (arrival order)", got, ids)
+	}
+}
+
+// Codex M72 R14 Medium-4: a run that begins (or rejoins) and finishes inside
+// one merge still removes its lease: an earlier queued rejoin may have
+// activated it.
+func TestM72R14_MergeFinishAlwaysRemovesTheRun(t *testing.T) {
+	m := newMergeSet()
+	m.begin(7)
+	m.finish(7)
+	if !m.finishes[7] || m.begins[7] {
+		t.Fatalf("begins %v finishes %v: the finish must still remove run 7", m.begins, m.finishes)
+	}
+}

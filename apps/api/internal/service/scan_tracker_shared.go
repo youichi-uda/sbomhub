@@ -71,6 +71,8 @@ type liveRun struct {
 	began time.Time
 	// acked: Redis has applied its begin (or rejoin); its lease is renewed.
 	acked bool
+	// rejoinPending: a rejoin of it is queued.
+	rejoinPending bool
 }
 
 type sbomQueue struct {
@@ -107,9 +109,9 @@ func (t *ScanTracker) enqueueLocked(sbomID uuid.UUID, ev *sharedEvent) {
 	ev.done = make(chan struct{})
 	q.events = append(q.events, ev)
 	if !q.draining {
-		// A write to an idle queue (typically a fresh Begin) goes ahead of
-		// backlog retries (Codex M72 R13 High-2).
-		t.startDrainLocked(sbomID, q, true)
+		// A fresh Begin on an idle queue goes ahead of backlog work (Codex
+		// M72 R13/R14 High-2).
+		t.startDrainLocked(sbomID, q, ev.kind == evBegin)
 	}
 	t.ensureHeartbeatLocked()
 }
@@ -145,16 +147,15 @@ func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedE
 
 // startDrainLocked hands sbomID's queue to the drain workers: at most
 // maxDrainWorkers drain at once, process-wide, whether a queue's first write
-// or a retry (Codex M72 R12 Medium-4). A priority queue (a write to an idle
-// queue, typically a fresh Begin) goes to the front, and may use one of
-// priorityWorkers extra workers when the others are all busy with backlogs,
-// so it reaches a healthy Redis within beginWait (Codex M72 R13 High-2).
-// t.qMu is held.
+// or a retry (Codex M72 R12 Medium-4). A fresh Begin on an idle queue goes to
+// the priority lane — FIFO, served first — and may use one of
+// priorityWorkers extra workers when the others are all busy, so it reaches a
+// healthy Redis within beginWait (Codex M72 R13/R14 High-2). t.qMu is held.
 func (t *ScanTracker) startDrainLocked(sbomID uuid.UUID, q *sbomQueue, priority bool) {
 	q.draining = true
 	limit := maxDrainWorkers
 	if priority {
-		t.ready = append([]uuid.UUID{sbomID}, t.ready...)
+		t.readyPrio = append(t.readyPrio, sbomID)
 		limit += priorityWorkers
 	} else {
 		t.ready = append(t.ready, sbomID)
@@ -165,17 +166,32 @@ func (t *ScanTracker) startDrainLocked(sbomID uuid.UUID, q *sbomQueue, priority 
 	}
 }
 
+// nextReadyLocked takes the next queue to drain: the priority lane first,
+// each lane in arrival order. t.qMu is held.
+func (t *ScanTracker) nextReadyLocked() (uuid.UUID, bool) {
+	if len(t.readyPrio) > 0 {
+		id := t.readyPrio[0]
+		t.readyPrio = t.readyPrio[1:]
+		return id, true
+	}
+	if len(t.ready) > 0 {
+		id := t.ready[0]
+		t.ready = t.ready[1:]
+		return id, true
+	}
+	return uuid.Nil, false
+}
+
 // drainWorker drains ready queues until none is left.
 func (t *ScanTracker) drainWorker() {
 	for {
 		t.qMu.Lock()
-		if len(t.ready) == 0 {
+		id, ok := t.nextReadyLocked()
+		if !ok {
 			t.workers--
 			t.qMu.Unlock()
 			return
 		}
-		id := t.ready[0]
-		t.ready = t.ready[1:]
 		t.qMu.Unlock()
 		t.drain(id)
 	}
@@ -193,7 +209,7 @@ func (t *ScanTracker) drain(sbomID uuid.UUID) {
 			return
 		}
 		if applied == drainQuantum {
-			// Its turn is over: back of the line, still draining.
+			// Its turn is over: back of the (backlog) line, still draining.
 			t.ready = append(t.ready, sbomID)
 			t.qMu.Unlock()
 			return
@@ -226,12 +242,12 @@ func (t *ScanTracker) drain(sbomID uuid.UUID) {
 		switch {
 		case ev.kind == evBegin || ev.kind == evRejoin:
 			if lr := t.live[runKey{sbomID, ev.gen}]; lr != nil {
-				lr.acked = true
+				lr.acked, lr.rejoinPending = true, false
 			}
 		case merged != nil:
 			for g := range merged.begins {
 				if lr := t.live[runKey{sbomID, g}]; lr != nil {
-					lr.acked = true
+					lr.acked, lr.rejoinPending = true, false
 				}
 			}
 		}
@@ -408,7 +424,9 @@ func (t *ScanTracker) heartbeatPass() bool {
 			// Not active in Redis although alive (its lease ran out and its
 			// identity was dropped, or a new group started): rejoin the
 			// current group, keeping its outcomes (Codex M72 R4 High-3).
-			if _, still := t.live[k]; still {
+			// One pending rejoin per run (Codex M72 R14 Medium-4).
+			if lr := t.live[k]; lr != nil && !lr.rejoinPending {
+				lr.rejoinPending = true
 				t.enqueueLocked(k.sbom, &sharedEvent{kind: evRejoin, gen: k.gen})
 			}
 		}
