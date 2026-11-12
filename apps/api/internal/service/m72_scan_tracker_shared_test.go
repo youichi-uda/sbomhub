@@ -1293,3 +1293,66 @@ func TestM72R20_PendingWritesNeverYieldLocalCompleted(t *testing.T) {
 		t.Fatal("local completed returned while its finish is pending and the shared entry is missing")
 	}
 }
+
+// lossyRejoinStore: every run reads inactive; a rejoin waits d, APPLIES, then
+// reports an error (its reply was lost); it tracks concurrent rejoins.
+type lossyRejoinStore struct {
+	*memStore
+	d         time.Duration
+	cur, peak atomic.Int32
+}
+
+func (s *lossyRejoinStore) heartbeatMany(_ context.Context, runs []runKey) ([]bool, error) {
+	return make([]bool, len(runs)), nil
+}
+
+func (s *lossyRejoinStore) rejoin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	n := s.cur.Add(1)
+	for {
+		p := s.peak.Load()
+		if n <= p || s.peak.CompareAndSwap(p, n) {
+			break
+		}
+	}
+	defer s.cur.Add(-1)
+	time.Sleep(s.d)
+	_ = s.memStore.rejoin(ctx, id, gen)
+	return errStoreDown
+}
+
+// Codex M72 R21 Medium-1: a rejoin whose reply was lost after the run already
+// finished still gets the run removed again.
+func TestM72R21_LostRejoinReplyAfterFinishIsCleanedUp(t *testing.T) {
+	store := &lossyRejoinStore{memStore: newMemStore(), d: 100 * time.Millisecond}
+	a := trackerOn(store, time.Hour)
+	id := uuid.New()
+	gen := a.Begin(id)
+	settle(t, a, id)
+	a.heartbeatPass() // inactive: a rejoin starts (slow)
+	time.Sleep(20 * time.Millisecond)
+	a.Finish(id, gen, nil, "") // finishes before the rejoin applies
+	time.Sleep(200 * time.Millisecond)
+	settle(t, a, id)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.runs[id][gen] {
+		t.Fatal("a rejoin applied after the finish (reply lost) left the run active")
+	}
+}
+
+// Codex M72 R21 Medium-2: rejoins after a mass loss (eviction, FLUSHDB) are
+// bounded process-wide.
+func TestM72R21_RejoinsAreBounded(t *testing.T) {
+	store := &lossyRejoinStore{memStore: newMemStore(), d: 20 * time.Millisecond}
+	a := trackerOn(store, time.Hour)
+	for i := 0; i < 200; i++ {
+		id := uuid.New()
+		a.Begin(id)
+		settle(t, a, id)
+	}
+	a.heartbeatPass()
+	time.Sleep(300 * time.Millisecond)
+	if p := store.peak.Load(); p > maxRejoins {
+		t.Fatalf("%d rejoins at once, want <= %d", p, maxRejoins)
+	}
+}

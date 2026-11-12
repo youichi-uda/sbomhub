@@ -305,17 +305,19 @@ func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) <-chan stru
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := t.shared.intent(context.Background(), sbomID, gen); err != nil {
-			t.logSharedError("scan status: shared intent failed", sbomID, err)
-			return
-		}
+		err := t.shared.intent(context.Background(), sbomID, gen)
 		t.qMu.Lock()
 		defer t.qMu.Unlock()
 		if t.live[runKey{sbomID, gen}] != lr {
 			// The run already finished (its finish may have landed before
 			// this intent): remove the intent again, behind that finish
-			// (Codex M72 R19 Medium-3).
+			// (Codex M72 R19 Medium-3) — even if the call reported an error,
+			// which may have followed its execution (R21 Medium-1).
 			t.enqueueLocked(sbomID, &sharedEvent{kind: evFinish, gen: gen})
+			return
+		}
+		if err != nil {
+			t.logSharedError("scan status: shared intent failed", sbomID, err)
 			return
 		}
 		lr.acked = true // its lease (as an intent) is renewed from now on
@@ -481,21 +483,31 @@ func (t *ScanTracker) kickQueues() {
 // rejoinNow writes run k's rejoin out of line. If the run finished
 // meanwhile (its finish may have landed first), its removal is queued again
 // behind that finish, as for a late intent.
+//
+// A failed call may still have executed (its reply lost), so a run that
+// finished meanwhile gets its removal queued whatever the error (Codex M72
+// R21 Medium-1). Rejoins run at most maxRejoins at once, process-wide (R21
+// Medium-2: an evicted key or a FLUSHDB makes every live run rejoin).
 func (t *ScanTracker) rejoinNow(k runKey, lr *liveRun) {
+	t.rejoinSem <- struct{}{}
 	err := t.shared.rejoin(context.Background(), k.sbom, k.gen)
+	<-t.rejoinSem
 	t.qMu.Lock()
 	defer t.qMu.Unlock()
 	lr.rejoinPending = false
-	if err != nil {
-		t.logSharedError("scan status: rejoin failed; retrying on the next heartbeat", k.sbom, err)
-		return
-	}
 	if t.live[k] != lr {
 		t.enqueueLocked(k.sbom, &sharedEvent{kind: evFinish, gen: k.gen})
 		return
 	}
+	if err != nil {
+		t.logSharedError("scan status: rejoin failed; retrying on the next heartbeat", k.sbom, err)
+		return
+	}
 	lr.acked = true
 }
+
+// maxRejoins bounds the rejoins in flight, process-wide.
+const maxRejoins = 16
 
 // pendingShared reports whether this process has writes of sbomID that have
 // not reached the shared store.

@@ -74,6 +74,7 @@ type ScanTracker struct {
 	// workers.
 	ready      []uuid.UUID
 	workers    int
+	rejoinSem  chan struct{} // bounds rejoins in flight (maxRejoins)
 	queueCap   int           // maxQueuedWrites; smaller in tests
 	beginWait  time.Duration // beginWait; shorter in tests
 	hbActive   bool
@@ -152,6 +153,7 @@ func NewScanTracker() *ScanTracker {
 		queues:     map[uuid.UUID]*sbomQueue{},
 		live:       map[runKey]*liveRun{},
 		queueCap:   maxQueuedWrites,
+		rejoinSem:  make(chan struct{}, maxRejoins),
 		beginWait:  beginWait,
 		hbInterval: ScanStatusHeartbeat,
 	}
