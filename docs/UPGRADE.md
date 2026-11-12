@@ -2173,3 +2173,214 @@ Deployment Mode). Before, the page asked them to upgrade to Enterprise.
 The "Add integration", "Create API key" and vulnerability "Create ticket"
 buttons now open their dialogs. A shared Dialog component bug dropped the
 trigger while the dialog was closed.
+
+## 20. One CVSS version rule for every path, and the version is recorded (M67)
+
+**Who must act:** operators running more than one API process against one
+database (§20.3). Everybody else: nothing to configure, but read §20.2 —
+stored severities change for some CVEs.
+
+### 20.1 What changed
+
+When NVD publishes several CVSS assessments for a CVE, SBOMHub now stores the
+same one whichever path writes the row:
+
+1. **CVSS v3.1, then v3.0, then v4.0, then v2.** v3.x is preferred over v4.0
+   deliberately: it is what NVD itself displays, what JVN iPedia and
+   Dependency-Track use, and most v4.0 assessments NVD carries today are a
+   CNA's Secondary beside NVD's own v3.1 Primary.
+2. Within one version, NVD's own (`Primary`) assessment over a CNA's
+   (`Secondary`) one, as since M54 / M57.
+3. Among assessments of the same version and type, the more severe one, then
+   the higher score. Before, the first one listed was used; NVD's order is not
+   significant, so the stored value could depend on it.
+
+The severity stored is the band of the chosen score on its version's scale
+(v2: three bands, 0.0–3.9 is LOW), or the rating the assessment states when that
+is harsher. A score that is not a CVSS base score (outside 0–10) is dropped
+and the stated rating kept. An assessment whose score is absent or `null`
+on the wire is no longer read as 0.0 ("None"). Before, an empty v3.1 entry
+could be stored as 0.0 / NONE beside a valid v4.0 9.8 CRITICAL.
+
+Before this release the daily CVE sync (and the monthly catalogue re-read,
+§12) preferred v4.0, while the scanner and the CVE search preferred v3.x. A
+CVE carrying both was stored at whichever score the last writer chose.
+Measured on the NVD responses recorded on 2026-11-08: CVE-2026-34478 / -34479 /
+-34480 / -34481 (Apache Log4j) are v3.1 Primary **7.5 HIGH** beside a v4.0
+Secondary **6.9 / 6.3 MEDIUM**, and their stored severity flipped between
+HIGH and MEDIUM.
+
+The JVN scanner follows the same rule. It used to keep the most severe
+assessment across versions; it now prefers the newer v3.x version first, so
+an advisory carrying v3.0 MEDIUM beside v2 HIGH is stored MEDIUM.
+
+Migration **069** adds `vulnerabilities.cvss_version` (`'3.1'`, `'3.0'`,
+`'4.0'`, `'2.0'`; NULL when there is no usable assessment, when JVN states an
+unrecognised version, or for rows written before 069). It can be set while
+`cvss_score` is NULL, for an assessment that states a rating without a usable
+score. It is recorded on every write and is not yet returned by the API. The migration adds a nullable column and a `NOT VALID`
+CHECK under `lock_timeout = '5s'`. It rewrites and scans nothing.
+
+### 20.2 How existing rows converge, and how long it takes
+
+No one-shot backfill runs. Rows written before 069 carry no version, and
+they are re-derived once from NVD's record when it is next offered:
+
+- by the **daily CVE sync**, for CVEs NVD modified in its window (the last
+  ~25 hours) — on the first tick after the upgrade;
+- by the **monthly catalogue re-read** (§12), for every other CVE in your
+  catalogue — on the next pass that is due. That is at most
+  `SBOMHUB_NVD_RECONCILE_INTERVAL` (default 30 days) after the previous pass
+  finished, plus the pass itself (~20 min with `NVD_API_KEY`, a little over an
+  hour without). If no pass has completed yet, it starts right after the first
+  daily sync.
+
+This needed a change to the freshness guard (§9.4 / §11). It refuses a record
+whose `lastModified` is not newer than the stored one, and the re-read offers
+exactly the `lastModified` the old sync stored. A dated row with no
+`cvss_version` is now writable **once** at an equal `lastModified`, by a record
+that carries a CVSS assessment and was answered by NVD itself: the configured
+URL is NVD's, the request did not go through a proxy, and no redirect led
+away from NVD. After that the strict rule applies again.
+
+Expect severities to change on those ticks, in both directions. Most changes
+are MEDIUM → HIGH for CVEs where the old sync stored a CNA's v4.0 score over
+NVD's v3.1. CVEs that NVD rates only with CVSS v2 also change: the previous
+build missed the rating NVD puts on the v2 metric and could store them
+UNKNOWN. Rows created by the scanner were already stored by the v3.x rule.
+
+Not covered:
+
+- JVN-only rows (JVNDB ids): NVD has no record to re-read. They keep the
+  value the JVN scanner stored. The JVN rule change applies to advisories
+  scanned from now on.
+- `SBOMHUB_NVD_RECONCILE_INTERVAL=off`: rows NVD does not modify keep the old
+  rule.
+- **`SBOMHUB_NVD_URL` set to a mirror, or the API's NVD traffic going through
+  an HTTP(S) proxy (`HTTPS_PROXY`) or being redirected:** the
+  equal-`lastModified` re-derivation is off. A mirror or caching proxy can
+  serve a stale or partial copy under an unchanged timestamp, and the
+  re-derivation would let that copy replace the stored record once. Rows keep the old rule until NVD modifies each CVE. To converge
+  them anyway, once the mirror is known to be complete and current, run once:
+
+  ```sql
+  UPDATE vulnerabilities SET source_modified_at = NULL
+  WHERE cvss_version IS NULL AND source = 'NVD'
+    AND source_modified_at IS NOT NULL;
+  ```
+
+  Each such row then accepts the next dated record from whatever source the
+  sync reads.
+- NVD answers cached in Redis by the previous build are not served. They
+  are re-fetched from NVD, so scans may make more NVD requests than usual for
+  up to 24 hours after upgrading.
+
+### 20.3 More than one API process: stop the old ones first
+
+A pre-069 binary still running against the 069 schema writes scores by the
+old rule and leaves `cvss_version` unchanged. A row a new process has already
+stamped then holds a version that does not describe its score, and the
+freshness guard defends it until NVD next modifies the CVE.
+
+Stop every pre-069 API process before, or while, migration 069 is applied.
+The docker compose upgrade (§4) already does this. If an old process kept
+running alongside a new one, run one of these once, after the last old process
+has stopped.
+
+If the sync reads NVD itself:
+
+```sql
+UPDATE vulnerabilities SET cvss_version = NULL
+WHERE cvss_version IS NOT NULL AND source = 'NVD';
+```
+
+If the sync reads a mirror, or goes through a proxy (§20.2), run this instead,
+once the mirror is known to be complete and current:
+
+```sql
+UPDATE vulnerabilities SET cvss_version = NULL, source_modified_at = NULL
+WHERE source = 'NVD'
+  AND (cvss_version IS NOT NULL OR source_modified_at IS NOT NULL);
+```
+
+Either statement returns every NVD-sourced row to a re-derivable state. The
+next daily sync and re-read re-derive each one. JVN-only rows are left alone:
+NVD has no record for them to re-derive from.
+
+### 20.4 Rollback
+
+`069_vulnerabilities_cvss_version.down.sql` drops the column (metadata-only,
+`lock_timeout = '5s'`). Scores and severities stay as M67 derived them. Roll
+the binary back first, because the M67 binary names the column in every
+catalogue write. Upgrading again later re-adds the column empty, and §20.2
+then re-derives each row once, as on the first upgrade.
+
+## 21. Distribution-aware matching for Debian, Ubuntu, AlmaLinux and Rocky Linux packages (M70)
+
+**Who must act:** operators who restrict egress (allow `api.osv.dev`, or set
+`SBOMHUB_OSV_URL`); anyone who reads `match_method` from the API or the
+database; operators rolling back past migration 070.
+
+### 21.1 What changed
+
+NVD describes upstream versions, so a Debian or RHEL-family package that
+carries a backported fix (`openssl 1.1.1n-0+deb11u5`) used to be matched
+against the upstream range and could only be labelled
+`nvd_cpe_unverified` (§13). After the NVD/JVN steps, every scan (upload,
+manual and scheduled) now relabels the existing links of packages from
+Debian ≥ 7, Ubuntu LTS, AlmaLinux and Rocky Linux, using the distribution's
+own fixed-version data from OSV. Versions are compared with dpkg / rpm
+semantics.
+
+The step **never adds or removes a link**. It only changes the label:
+
+| `match_method` | Meaning | Confidence |
+|---|---|---|
+| `distro_affected` | The distribution's data says the installed version is affected | high |
+| `distro_unfixed` | Affected, with no fixed version published | high |
+| `distro_fixed` | The installed version is at or past the distribution's fix | `distro_fixed` (the link stays; dashboards still count it — review it) |
+
+`distro_fixed` is not `not_affected`: no VEX statement is drafted or
+confirmed from it. Each label carries the evidence it rests on in the new
+`component_vulnerabilities.match_evidence` column (OSV record ids, release,
+fixed version, and `basis`). For an end-of-life Debian release (≤ 11) the
+verdict may be inferred from later releases (`basis = later_releases`).
+
+A label whose OSV records were later withdrawn is cleared on a later scan,
+back to the method it replaced.
+
+Measured on the M60 fixture (openssl, Debian 11; local PostgreSQL 15.18 +
+Redis, recorded NVD/OSV responses, 2026-11-10): of 313 links that were all
+`nvd_cpe_unverified`, 21 became `distro_affected` (all 21 true), 181
+`distro_fixed`, and 111 stayed unchanged. No true CVE was labelled
+`distro_fixed`. Scan time was unchanged; a rescan is served from the Redis
+cache with no OSV request.
+
+### 21.2 New settings and scan outcomes
+
+- `SBOMHUB_OSV_URL` (default `https://api.osv.dev/v1`; a path prefix and a
+  query are kept) and `SBOMHUB_OSV_SOURCE_ID` (a stable name for the dataset,
+  kept across credential rotation). See `docs/configuration.md`.
+- `SBOMHUB_OFFLINE=true` makes no OSV request; links keep their NVD labels.
+- New scan failure reason **`distro_data_failed`**: OSV returned malformed or
+  incomplete data, or a record lookup failed. The scan is marked `failed`
+  and no label is changed.
+- Links held by another transaction are left for the next scan and counted as
+  `write_refused` in the scan report.
+
+### 21.3 Not covered
+
+RHEL, Alpine, kernel images (`linux-signed` is not mapped to `linux`),
+Ubuntu Pro / FIPS / ESM builds, Debian ELTS, RPM entries qualified by
+architecture / epoch / version, `repository_url`-scoped packages, and
+multi-CVE multi-binary ALSA errata get no verdict and keep their NVD label.
+New Debian / Ubuntu releases need their codenames added in a release of
+SBOMHub before their packages get a verdict.
+
+### 21.4 Rollback
+
+`070_component_vulnerabilities_distro_match.down.sql` takes an ACCESS
+EXCLUSIVE lock on `component_vulnerabilities`, restores each distro label to
+the method it replaced (its evidence `prior_method`, else NULL), restores the
+previous `match_method` CHECK, and drops `match_evidence`. Roll the binary
+back first.
