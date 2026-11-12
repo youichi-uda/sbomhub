@@ -1,11 +1,16 @@
 package service
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
 // ScanState represents the lifecycle of a background vulnerability scan
@@ -29,24 +34,51 @@ const (
 // ScanTracker tracks the state of background vulnerability scans by sbom
 // ID.
 //
-// Storage is in-process only. On API restart all tracked state is lost and
-// pollers see `ScanStateUnknown` until --wait-timeout, then fail soft with
-// exit 2 ("scan timed out, treating as no threshold violation"). That is
-// the honest trade-off — we do not have a persistent scan_runs table yet
-// (※要確認: a dedicated table is the proper long-term answer; for #12 we
-// chose this hack so we do not need a new migration), and inventing a
-// completion state from "vulnerability count stopped increasing" would
-// produce false negatives on legitimately-clean SBOMs.
+// It always keeps the state of this process's scans in memory. With WithRedis
+// (M72) it also keeps it in Redis (scan_status_store.go), so that a scan
+// started on one API process is readable from every other and survives a
+// restart; a scan whose process died reads failed with reason "interrupted"
+// once its lease runs out, instead of "running" until retention. Without
+// Redis — or while Redis is unreachable — it is the pre-M72 in-memory
+// tracker: on restart the state is lost and pollers see `ScanStateUnknown`.
+//
+// The scan never depends on the tracker: every Redis write is bounded, goes
+// through the client's circuit breaker, and a failed one is only logged and
+// retried by the heartbeat loop; the in-memory state answers meanwhile.
 //
 // Entries auto-expire after `retention` to bound memory.
 type ScanTracker struct {
 	mu        sync.RWMutex
 	entries   map[uuid.UUID]scanEntry
 	retention time.Duration
-	// nextGen numbers runs (M62, Codex R1/R2 High): every Begin starts a
-	// tracked run of its SBOM, and the SBOM's state is terminal only when
-	// none of its runs is active; see Begin.
-	nextGen uint64
+
+	// shared (M72) is the Redis store; nil keeps the tracker in-memory only.
+	shared scanStatusStore
+	// hb* is the heartbeat loop that renews this process's runs' leases and
+	// retries shared writes that failed.
+	hbMu       sync.Mutex
+	synced     map[runKey]*syncedRun
+	hbActive   bool
+	hbInterval time.Duration
+	// dirty: SBOMs whose last shared write outside a run (MarkFailed /
+	// MarkCompleted) failed, so the shared copy is stale; read locally.
+	dirty map[uuid.UUID]time.Time
+}
+
+type runKey struct {
+	sbom uuid.UUID
+	gen  uint64
+}
+
+// localRun is a run of this process as the shared store should see it.
+type localRun struct {
+	began time.Time
+	// begun: the shared Begin succeeded.
+	begun bool
+	// finished: the run ended; its outcome is still to be written.
+	finished bool
+	errMsg   string
+	reasons  []string
 }
 
 type scanEntry struct {
@@ -69,8 +101,35 @@ type scanEntry struct {
 // 5m) but short enough that long-lived servers do not accumulate state.
 func NewScanTracker() *ScanTracker {
 	return &ScanTracker{
-		entries:   make(map[uuid.UUID]scanEntry),
-		retention: 1 * time.Hour,
+		entries:    make(map[uuid.UUID]scanEntry),
+		retention:  1 * time.Hour,
+		synced:     map[runKey]*syncedRun{},
+		hbInterval: ScanStatusHeartbeat,
+		dirty:      map[uuid.UUID]time.Time{},
+	}
+}
+
+// WithRedis makes the tracker keep its state in Redis too (M72), shared by
+// every API process on that Redis. Call it before the tracker is used.
+func (t *ScanTracker) WithRedis(client *redis.Client) *ScanTracker {
+	if client != nil {
+		t.shared = &redisScanStatusStore{client: client, ttl: t.retention, lease: ScanStatusLease}
+	}
+	return t
+}
+
+// newRunGen returns a random non-zero run generation: unique across API
+// processes without coordination (a collision needs 2^32 concurrent runs of
+// one SBOM to become likely).
+func newRunGen() uint64 {
+	var b [8]byte
+	for {
+		if _, err := rand.Read(b[:]); err != nil {
+			panic("scan tracker: crypto/rand: " + err.Error())
+		}
+		if g := binary.BigEndian.Uint64(b[:]); g != 0 {
+			return g
+		}
 	}
 }
 
@@ -110,9 +169,8 @@ func (t *ScanTracker) MarkRunning(sbomID uuid.UUID) {
 // poller therefore never reads "completed" while some scan of the SBOM can
 // still add findings.
 func (t *ScanTracker) Begin(sbomID uuid.UUID) uint64 {
+	gen := newRunGen()
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.nextGen++
 	e, ok := t.entries[sbomID]
 	if !ok || len(e.active) == 0 || time.Since(e.updatedAt) > t.retention {
 		e = scanEntry{active: map[uint64]bool{}}
@@ -120,15 +178,28 @@ func (t *ScanTracker) Begin(sbomID uuid.UUID) uint64 {
 	e.state = ScanStateRunning
 	e.errMsg, e.reasons = "", nil
 	e.updatedAt = time.Now()
-	e.active[t.nextGen] = true
+	e.active[gen] = true
 	t.entries[sbomID] = e
-	return t.nextGen
+	t.mu.Unlock()
+	t.sharedBegin(sbomID, gen)
+	return gen
 }
 
 // Finish records run gen's outcome — failed when errMsg or reasons is
 // non-empty, completed otherwise. It reports whether gen was an active run.
 // The SBOM's state becomes terminal only when no other run is active.
 func (t *ScanTracker) Finish(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string) bool {
+	ok := t.finishLocal(sbomID, gen, reasons, errMsg)
+	if ok {
+		if errMsg == "" && len(reasons) > 0 {
+			errMsg = "scan failed"
+		}
+		t.sharedFinish(sbomID, gen, errMsg, reasons)
+	}
+	return ok
+}
+
+func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	e, ok := t.entries[sbomID]
@@ -171,8 +242,9 @@ func (t *ScanTracker) Finish(sbomID uuid.UUID, gen uint64, reasons []string, err
 // routes use Begin / Finish).
 func (t *ScanTracker) MarkCompleted(sbomID uuid.UUID) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.entries[sbomID] = scanEntry{state: ScanStateCompleted, updatedAt: time.Now()}
+	t.mu.Unlock()
+	t.sharedMark(sbomID, ScanStateCompleted, "", nil)
 }
 
 // MarkFailed records that at least one background scan for the sbom
@@ -187,13 +259,35 @@ func (t *ScanTracker) MarkFailed(sbomID uuid.UUID, errMsg string) {
 // (service.ScanReason*), exposed as `reasons` on the scan-status response.
 func (t *ScanTracker) MarkFailedWithReasons(sbomID uuid.UUID, errMsg string, reasons []string) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.entries[sbomID] = scanEntry{state: ScanStateFailed, updatedAt: time.Now(), errMsg: errMsg,
 		reasons: append([]string(nil), reasons...)}
+	t.mu.Unlock()
+	t.sharedMark(sbomID, ScanStateFailed, errMsg, reasons)
 }
 
 // GetDetail is Get plus the failed scan's reason codes, read atomically.
+//
+// With a shared store (M72) the shared state answers — it covers runs of
+// every process — unless this process knows better: a run of this SBOM is
+// active here (it is running, whatever Redis says), or this process's last
+// write of it to Redis failed and has not been retried yet. When Redis cannot
+// be read the in-memory state answers, as before M72.
 func (t *ScanTracker) GetDetail(sbomID uuid.UUID) (ScanState, string, []string) {
+	if t.shared == nil || t.preferLocal(sbomID) {
+		return t.getDetailLocal(sbomID)
+	}
+	state, msg, reasons, found, err := t.shared.get(context.Background(), sbomID)
+	if err != nil {
+		slog.Debug("scan status: shared store unavailable, answering from this process", "sbom_id", sbomID, "error", err)
+		return t.getDetailLocal(sbomID)
+	}
+	if !found {
+		return t.getDetailLocal(sbomID)
+	}
+	return state, msg, reasons
+}
+
+func (t *ScanTracker) getDetailLocal(sbomID uuid.UUID) (ScanState, string, []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	entry, ok := t.entries[sbomID]
@@ -214,17 +308,6 @@ func (t *ScanTracker) GetDetail(sbomID uuid.UUID) (ScanState, string, []string) 
 // message string. Returns ScanStateUnknown when no entry exists or when
 // the entry has aged past `retention`.
 func (t *ScanTracker) Get(sbomID uuid.UUID) (ScanState, string) {
-	t.mu.RLock()
-	entry, ok := t.entries[sbomID]
-	t.mu.RUnlock()
-	if !ok {
-		return ScanStateUnknown, ""
-	}
-	if time.Since(entry.updatedAt) > t.retention {
-		t.mu.Lock()
-		delete(t.entries, sbomID)
-		t.mu.Unlock()
-		return ScanStateUnknown, ""
-	}
-	return entry.state, entry.errMsg
+	state, msg, _ := t.GetDetail(sbomID)
+	return state, msg
 }

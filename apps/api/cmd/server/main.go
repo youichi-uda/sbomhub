@@ -753,14 +753,15 @@ func main() {
 	ssvcService := service.NewSSVCService(ssvcRepo, vulnRepo, kevRepo)
 	eolService := service.NewEOLService(eolRepo, cfg.EOLURL, cfg.Offline)
 
-	// In-memory tracker for background SBOM scans. Observed by
+	// Tracker for background SBOM scans. Observed by
 	// GET /api/v1/projects/:id/sboms/:sbom_id/scan-status so the CLI
 	// (`sbomhub scan --fail-on <severity>`) can block until scanning
 	// completes and then enforce the threshold. Trust Rescue P1 #12.
 	//
 	// M62: retention is sized from the scan deadline so a running scan's
 	// entry is never evicted before the scan can reach a terminal state.
-	scanTracker := service.NewScanTrackerFor(scanDeadline)
+	// M72: shared through Redis, so every replica and a restart see it.
+	scanTracker := service.NewScanTrackerFor(scanDeadline).WithRedis(rdb)
 
 	// AI VEX triage runner (issue #30 / Wave M1-5). Composes the four
 	// input repositories above with the BYOK LLM provider and the
