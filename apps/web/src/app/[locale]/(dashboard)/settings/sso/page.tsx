@@ -19,6 +19,8 @@ import {
   Info,
 } from "lucide-react";
 
+const SUPPORT_ISSUES_URL = "https://github.com/youichi-uda/sbomhub/issues";
+
 const SSO_PROVIDERS = [
   {
     id: "azure-ad",
@@ -398,11 +400,15 @@ export default function SSOSettingsPage() {
             <div className="flex-1">
               <h4 className="font-medium">SSO 設定のサポートが必要ですか？</h4>
               <p className="text-sm text-muted-foreground">
-                Enterprise プランでは、専任のサポートチームが SSO 設定をお手伝いします。
+                設定で困ったときは、GitHub Issues で質問してください。
               </p>
             </div>
-            <Button variant="outline">
-              サポートに問い合わせ
+            <Button asChild variant="outline">
+              <a href={SUPPORT_ISSUES_URL} target="_blank" rel="noopener noreferrer">
+                GitHub Issues で質問する
+                <ExternalLink className="h-4 w-4" aria-hidden="true" />
+                <span className="sr-only">（新しいタブで開きます）</span>
+              </a>
             </Button>
           </div>
         </CardContent>

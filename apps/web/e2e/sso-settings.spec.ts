@@ -154,6 +154,13 @@ test.describe('SSO Settings in Japanese', () => {
 
         await expect(page.getByRole('heading', { level: 1, name: TITLE })).toBeVisible({ timeout: 15000 });
         await expect(page.getByText('対応アイデンティティプロバイダー')).toBeVisible();
-        await expect(page.getByRole('button', { name: 'サポートに問い合わせ' })).toBeVisible();
+        // The support action is a real link to the project's GitHub Issues
+        // (it used to be a button with no handler).
+        const support = page.getByRole('link', { name: 'GitHub Issues で質問する' });
+        await expect(support).toBeVisible();
+        await expect(support).toHaveAttribute('href', 'https://github.com/youichi-uda/sbomhub/issues');
+        await expect(support).toHaveAttribute('target', '_blank');
+        await expect(support).toHaveAttribute('rel', 'noopener noreferrer');
+        await expect(page.getByRole('button', { name: 'サポートに問い合わせ' })).toHaveCount(0);
     });
 });
