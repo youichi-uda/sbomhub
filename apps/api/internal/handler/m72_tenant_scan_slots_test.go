@@ -288,3 +288,25 @@ func TestM72R3_EndedContextIsReportedAsSuch(t *testing.T) {
 		t.Fatalf("full queue, ended context: %v, want cancelled", err)
 	}
 }
+
+// Codex M72 R6 Low-4: a waiter whose context ended before the slot was
+// handed to it reports the interruption and passes the slot on.
+func TestM72R6_HandOffToAnEndedWaiterIsRefused(t *testing.T) {
+	for i := 0; i < 300; i++ {
+		s := service.NewTenantScanSlots(1)
+		tenant := uuid.New()
+		rel, _, _ := s.Acquire(context.Background(), tenant)
+		ctx, cancel := context.WithCancel(context.Background())
+		res := make(chan error, 1)
+		go func() { _, _, err := s.Acquire(ctx, tenant); res <- err }()
+		waitUntil(t, func() bool { return s.Waiting(tenant) == 1 })
+		cancel()
+		rel()
+		if err := <-res; err == nil {
+			t.Fatalf("iteration %d: a waiter whose context had ended got the slot", i)
+		}
+		if s.InUse(tenant) != 0 {
+			t.Fatalf("iteration %d: slot leaked (in use %d)", i, s.InUse(tenant))
+		}
+	}
+}

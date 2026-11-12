@@ -98,6 +98,12 @@ func (s *TenantScanSlots) Acquire(ctx context.Context, tenantID uuid.UUID) (func
 		return nil, 0, fmt.Errorf("waiting for a scan slot of the tenant: %w", err)
 	}
 	s.mu.Lock()
+	// Rechecked under the lock: a context that ended since the check above
+	// neither reserves nor queues (Codex M72 R6 Low-4).
+	if err := scanInterruption(ctx); err != nil {
+		s.mu.Unlock()
+		return nil, 0, fmt.Errorf("waiting for a scan slot of the tenant: %w", err)
+	}
 	ts := s.slots[tenantID]
 	if ts == nil {
 		ts = &tenantSlot{}
@@ -119,8 +125,15 @@ func (s *TenantScanSlots) Acquire(ctx context.Context, tenantID uuid.UUID) (func
 
 	select {
 	case <-ch:
-		// A releasing scan handed its slot over (inUse unchanged).
-		return s.releaser(tenantID, ts), time.Since(start), nil
+		// A releasing scan handed its slot over (inUse unchanged). If this
+		// scan's context ended meanwhile (select picks at random when both
+		// are ready), pass the slot on and report the interruption.
+		rel := s.releaser(tenantID, ts)
+		if err := scanInterruption(ctx); err != nil {
+			rel()
+			return nil, time.Since(start), fmt.Errorf("waiting for a scan slot of the tenant: %w", err)
+		}
+		return rel, time.Since(start), nil
 	case <-ctx.Done():
 		s.mu.Lock()
 		for i, w := range ts.waiters {
