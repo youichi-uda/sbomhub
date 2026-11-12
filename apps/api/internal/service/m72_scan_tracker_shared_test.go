@@ -916,6 +916,23 @@ type gaugeStore struct {
 	delay     time.Duration
 }
 
+func (g *gaugeStore) mark(ctx context.Context, id uuid.UUID, st ScanState, msg string, reasons []string) error {
+	g.enter()
+	defer g.cur.Add(-1)
+	time.Sleep(g.delay)
+	return g.memStore.mark(ctx, id, st, msg, reasons)
+}
+
+func (g *gaugeStore) enter() {
+	n := g.cur.Add(1)
+	for {
+		p := g.peak.Load()
+		if n <= p || g.peak.CompareAndSwap(p, n) {
+			return
+		}
+	}
+}
+
 func (g *gaugeStore) begin(ctx context.Context, id uuid.UUID, gen uint64) error {
 	n := g.cur.Add(1)
 	for {
@@ -931,20 +948,23 @@ func (g *gaugeStore) begin(ctx context.Context, id uuid.UUID, gen uint64) error 
 
 // Codex M72 R12 Medium-4: the first drains of many SBOMs share the bounded
 // worker pool too, so a burst cannot start one Redis call per SBOM at once.
+//
+// R15: a fresh Begin is the exception — it is applied at once by its own
+// goroutine (TestM72R15_BurstOfBeginsAllLandBeforeReturning); every other
+// first write (here MarkFailed) goes through the pool.
 func TestM72R12_InitialDrainsAreBounded(t *testing.T) {
 	store := &gaugeStore{memStore: newMemStore(), delay: 50 * time.Millisecond}
 	a := trackerOn(store, time.Hour)
-	a.beginWait = time.Millisecond
 	ids := make([]uuid.UUID, 200)
 	for i := range ids {
 		ids[i] = uuid.New()
-		a.Begin(ids[i])
+		a.MarkFailed(ids[i], "tenant context missing")
 	}
 	for _, id := range ids {
 		settle(t, a, id)
 	}
-	if p := store.peak.Load(); p > maxDrainWorkers+priorityWorkers {
-		t.Fatalf("%d store calls at once, want <= %d", p, maxDrainWorkers+priorityWorkers)
+	if p := store.peak.Load(); p > maxDrainWorkers {
+		t.Fatalf("%d store calls at once, want <= %d", p, maxDrainWorkers)
 	}
 }
 
@@ -1019,17 +1039,16 @@ func TestM72R13_FreshBeginIsNotStarvedByBacklog(t *testing.T) {
 	}
 }
 
-// Codex M72 R14 High-2: the priority lane is FIFO (it was a stack: a stream
-// of newer arrivals pushed an older Begin back past its wait).
-func TestM72R14_PriorityLaneIsFIFO(t *testing.T) {
+// Codex M72 R14 High-2: the drain line is FIFO.
+func TestM72R14_DrainLineIsFIFO(t *testing.T) {
 	a := NewScanTracker()
 	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
 	a.qMu.Lock()
-	a.workers = maxDrainWorkers + priorityWorkers // no worker starts
+	a.workers = maxDrainWorkers // no worker starts
 	for _, id := range ids {
 		q := &sbomQueue{}
 		a.queues[id] = q
-		a.startDrainLocked(id, q, true)
+		a.startDrainLocked(id, q)
 	}
 	var got []uuid.UUID
 	for {
@@ -1041,7 +1060,7 @@ func TestM72R14_PriorityLaneIsFIFO(t *testing.T) {
 	}
 	a.qMu.Unlock()
 	if !slices.Equal(got, ids) {
-		t.Fatalf("priority order %v, want %v (arrival order)", got, ids)
+		t.Fatalf("order %v, want %v (arrival order)", got, ids)
 	}
 }
 
@@ -1054,5 +1073,37 @@ func TestM72R14_MergeFinishAlwaysRemovesTheRun(t *testing.T) {
 	m.finish(7)
 	if !m.finishes[7] || m.begins[7] {
 		t.Fatalf("begins %v finishes %v: the finish must still remove run 7", m.begins, m.finishes)
+	}
+}
+
+// Codex M72 R15 High-1: every fresh Begin gets its own Redis attempt right
+// away, however many arrive at once and however busy the drain pool is; with
+// Redis answering (slowly, 50ms) each lands before Begin returns.
+func TestM72R15_BurstOfBeginsAllLandBeforeReturning(t *testing.T) {
+	mem := newMemStore()
+	store := slowApplyStore{memStore: mem, d: 50 * time.Millisecond}
+	a := trackerOn(store, time.Hour)
+	const n = 400
+	ids := make([]uuid.UUID, n)
+	var wg sync.WaitGroup
+	for i := range ids {
+		ids[i] = uuid.New()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.Begin(ids[i])
+		}()
+	}
+	wg.Wait()
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
+	missing := 0
+	for _, id := range ids {
+		if len(mem.runs[id]) == 0 {
+			missing++
+		}
+	}
+	if missing > 0 {
+		t.Fatalf("%d of %d Begins returned before their write reached a responsive store", missing, n)
 	}
 }

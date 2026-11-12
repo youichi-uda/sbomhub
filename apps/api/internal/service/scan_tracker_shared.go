@@ -34,10 +34,9 @@ const (
 	// trip (Codex M72 R2 Medium-4).
 	heartbeatBatch = 256
 	// maxDrainWorkers bounds the goroutines draining queues (Codex M72
-	// R7/R8 High-1, R12 Medium-4); priorityWorkers more may run for writes
-	// to idle queues (R13 High-2).
+	// R7/R8 High-1, R12 Medium-4). A fresh Begin on an idle queue does not
+	// wait for one (see enqueueLocked).
 	maxDrainWorkers = 32
-	priorityWorkers = 8
 	// drainQuantum: a worker applies at most this many writes of one queue
 	// before taking the next queue, so long backlogs share the workers.
 	drainQuantum = 16
@@ -109,9 +108,18 @@ func (t *ScanTracker) enqueueLocked(sbomID uuid.UUID, ev *sharedEvent) {
 	ev.done = make(chan struct{})
 	q.events = append(q.events, ev)
 	if !q.draining {
-		// A fresh Begin on an idle queue goes ahead of backlog work (Codex
-		// M72 R13/R14 High-2).
-		t.startDrainLocked(sbomID, q, ev.kind == evBegin)
+		if ev.kind == evBegin {
+			// A fresh Begin on an idle queue gets its own goroutine and Redis
+			// attempt at once, outside the worker pool, so every Begin
+			// reaches a responsive Redis within beginWait however many
+			// arrive together or however busy the pool is (Codex M72
+			// R13/R14/R15 High). Their number is that of the requests and
+			// scans starting at that moment.
+			q.draining = true
+			go t.drain(sbomID)
+		} else {
+			t.startDrainLocked(sbomID, q)
+		}
 	}
 	t.ensureHeartbeatLocked()
 }
@@ -146,40 +154,32 @@ func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedE
 }
 
 // startDrainLocked hands sbomID's queue to the drain workers: at most
-// maxDrainWorkers drain at once, process-wide, whether a queue's first write
-// or a retry (Codex M72 R12 Medium-4). A fresh Begin on an idle queue goes to
-// the priority lane — FIFO, served first — and may use one of
-// priorityWorkers extra workers when the others are all busy, so it reaches a
-// healthy Redis within beginWait (Codex M72 R13/R14 High-2). t.qMu is held.
-func (t *ScanTracker) startDrainLocked(sbomID uuid.UUID, q *sbomQueue, priority bool) {
+// maxDrainWorkers drain at once, process-wide (Codex M72 R12 Medium-4), each
+// lane in arrival order. t.qMu is held.
+func (t *ScanTracker) startDrainLocked(sbomID uuid.UUID, q *sbomQueue) {
 	q.draining = true
-	limit := maxDrainWorkers
-	if priority {
-		t.readyPrio = append(t.readyPrio, sbomID)
-		limit += priorityWorkers
-	} else {
-		t.ready = append(t.ready, sbomID)
-	}
-	if t.workers < limit {
+	t.queueReadyLocked(sbomID)
+}
+
+// queueReadyLocked puts an already-draining queue in line for a worker,
+// starting one if fewer than maxDrainWorkers run. t.qMu is held.
+func (t *ScanTracker) queueReadyLocked(sbomID uuid.UUID) {
+	t.ready = append(t.ready, sbomID)
+	if t.workers < maxDrainWorkers {
 		t.workers++
 		go t.drainWorker()
 	}
 }
 
-// nextReadyLocked takes the next queue to drain: the priority lane first,
-// each lane in arrival order. t.qMu is held.
+// nextReadyLocked takes the next queue to drain, in arrival order. t.qMu is
+// held.
 func (t *ScanTracker) nextReadyLocked() (uuid.UUID, bool) {
-	if len(t.readyPrio) > 0 {
-		id := t.readyPrio[0]
-		t.readyPrio = t.readyPrio[1:]
-		return id, true
+	if len(t.ready) == 0 {
+		return uuid.Nil, false
 	}
-	if len(t.ready) > 0 {
-		id := t.ready[0]
-		t.ready = t.ready[1:]
-		return id, true
-	}
-	return uuid.Nil, false
+	id := t.ready[0]
+	t.ready = t.ready[1:]
+	return id, true
 }
 
 // drainWorker drains ready queues until none is left.
@@ -209,8 +209,8 @@ func (t *ScanTracker) drain(sbomID uuid.UUID) {
 			return
 		}
 		if applied == drainQuantum {
-			// Its turn is over: back of the (backlog) line, still draining.
-			t.ready = append(t.ready, sbomID)
+			// Its turn is over: back of the line, still draining.
+			t.queueReadyLocked(sbomID)
 			t.qMu.Unlock()
 			return
 		}
@@ -388,7 +388,7 @@ func (t *ScanTracker) heartbeatPass() bool {
 	}
 	slices.SortFunc(stalled, func(x, y uuid.UUID) int { return t.queues[x].lastWrite.Compare(t.queues[y].lastWrite) })
 	for _, id := range stalled {
-		t.startDrainLocked(id, t.queues[id], false)
+		t.startDrainLocked(id, t.queues[id])
 	}
 	var renew []runKey
 	for k, lr := range t.live {
@@ -442,7 +442,7 @@ func (t *ScanTracker) kickQueues() {
 	defer t.qMu.Unlock()
 	for id, q := range t.queues {
 		if len(q.events) > 0 && !q.draining {
-			t.startDrainLocked(id, q, false)
+			t.startDrainLocked(id, q)
 		}
 	}
 }
