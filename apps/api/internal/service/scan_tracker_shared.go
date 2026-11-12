@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +24,9 @@ type syncedRun struct {
 	mu sync.Mutex
 	localRun
 	done bool
+	// finishing is set (without mu) as soon as Finish is called, so the run
+	// counts as pending before its goroutine records the outcome.
+	finishing atomic.Bool
 }
 
 func (t *ScanTracker) logSharedError(msg string, sbomID uuid.UUID, err error) {
@@ -70,8 +74,28 @@ func (t *ScanTracker) sharedBegin(sbomID uuid.UUID, gen uint64) {
 		return
 	}
 	k := runKey{sbomID, gen}
-	t.syncRun(k, t.run(k), false)
+	r := t.run(k)
+	// Begin waits briefly for its write (Codex M72 R1 Medium-5 vs ordering):
+	// a run must normally reach Redis before another process's run of the
+	// SBOM finishes, or the two would not be one group and that run's
+	// failure would be dropped. But it is on the request path, so the wait is
+	// bounded by beginWait whatever Redis does; a write still in flight or
+	// failed is completed by the goroutine or the heartbeat loop.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t.syncRun(k, r, false)
+	}()
+	timer := time.NewTimer(beginWait)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
 }
+
+// beginWait bounds how long Begin waits for its shared write.
+const beginWait = 250 * time.Millisecond
 
 func (t *ScanTracker) sharedFinish(sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) {
 	if t.shared == nil {
@@ -79,27 +103,42 @@ func (t *ScanTracker) sharedFinish(sbomID uuid.UUID, gen uint64, errMsg string, 
 	}
 	k := runKey{sbomID, gen}
 	r := t.run(k)
-	r.mu.Lock()
-	r.finished, r.errMsg, r.reasons = true, errMsg, append([]string(nil), reasons...)
-	r.mu.Unlock()
-	t.syncRun(k, r, false)
+	reasons = append([]string(nil), reasons...)
+	r.finishing.Store(true)
+	// Asynchronous: the run's begin may still be in flight (holding r.mu).
+	// Until the outcome lands the shared store still lists the run as
+	// active, so every reader sees running, never a premature terminal state.
+	go func() {
+		r.mu.Lock()
+		r.finished, r.errMsg, r.reasons = true, errMsg, reasons
+		r.mu.Unlock()
+		t.syncRun(k, r, false)
+	}()
 }
 
 func (t *ScanTracker) sharedMark(sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) {
 	if t.shared == nil {
 		return
 	}
-	err := t.shared.mark(context.Background(), sbomID, state, errMsg, reasons)
+	// Marked dirty until the write lands, so this process answers from
+	// memory meanwhile; the write itself does not hold up the caller.
+	at := time.Now()
 	t.hbMu.Lock()
-	if err != nil {
-		t.dirty[sbomID] = time.Now()
-	} else {
-		delete(t.dirty, sbomID)
-	}
+	t.dirty[sbomID] = at
 	t.hbMu.Unlock()
-	if err != nil {
-		t.logSharedError("scan status: shared write failed; this process answers for the SBOM", sbomID, err)
-	}
+	reasons = append([]string(nil), reasons...)
+	go func() {
+		err := t.shared.mark(context.Background(), sbomID, state, errMsg, reasons)
+		if err != nil {
+			t.logSharedError("scan status: shared write failed; this process answers for the SBOM", sbomID, err)
+			return
+		}
+		t.hbMu.Lock()
+		if t.dirty[sbomID].Equal(at) {
+			delete(t.dirty, sbomID)
+		}
+		t.hbMu.Unlock()
+	}()
 }
 
 // syncRun brings the shared store up to date with one run: Begin if it has
@@ -156,44 +195,71 @@ func (t *ScanTracker) heartbeatLoop() {
 	ticker := time.NewTicker(t.hbInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		t.hbMu.Lock()
-		if len(t.synced) == 0 {
-			t.hbActive = false
-			t.hbMu.Unlock()
+		if !t.heartbeatPass() {
 			return
-		}
-		type item struct {
-			k runKey
-			r *syncedRun
-		}
-		items := make([]item, 0, len(t.synced))
-		for k, r := range t.synced {
-			items = append(items, item{k, r})
-		}
-		t.hbMu.Unlock()
-		for _, it := range items {
-			it.r.mu.Lock()
-			stale := time.Since(it.r.began) > t.retention+ScanStatusLease
-			it.r.mu.Unlock()
-			if stale {
-				t.dropRun(it.k, it.r)
-				continue
-			}
-			t.syncRun(it.k, it.r, true)
 		}
 	}
 }
 
-// preferLocal reports whether this process's memory is more current than the
-// shared store for sbomID: a run of it is active here, or a write of it has
-// not reached Redis.
-func (t *ScanTracker) preferLocal(sbomID uuid.UUID) bool {
-	t.mu.RLock()
-	e, ok := t.entries[sbomID]
-	t.mu.RUnlock()
-	if ok && len(e.active) > 0 && time.Since(e.updatedAt) <= t.retention {
-		return true
+// heartbeatPass syncs every run once; false when none is left (the loop then
+// ends).
+func (t *ScanTracker) heartbeatPass() bool {
+	t.hbMu.Lock()
+	if len(t.synced) == 0 {
+		t.hbActive = false
+		t.hbMu.Unlock()
+		return false
 	}
+	type item struct {
+		k runKey
+		r *syncedRun
+	}
+	items := make([]item, 0, len(t.synced))
+	for k, r := range t.synced {
+		items = append(items, item{k, r})
+	}
+	t.hbMu.Unlock()
+	// Renewed concurrently (bounded), so a pass takes about
+	// len/heartbeatWorkers round trips, not len (Codex M72 R1 Medium-6): at
+	// the 1s bound per call, 16 workers renew 480 runs within the 30s
+	// interval, well inside the 90s lease.
+	sem := make(chan struct{}, heartbeatWorkers)
+	var wg sync.WaitGroup
+	for _, it := range items {
+		it.r.mu.Lock()
+		stale := time.Since(it.r.began) > t.retention+ScanStatusLease
+		it.r.mu.Unlock()
+		if stale {
+			t.dropRun(it.k, it.r)
+			continue
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			t.syncRun(it.k, it.r, true)
+		}()
+	}
+	wg.Wait()
+	return true
+}
+
+// heartbeatWorkers bounds the concurrent renewals of one heartbeat pass.
+const heartbeatWorkers = 16
+
+// localActive reports whether a run of sbomID is active in this process.
+func (t *ScanTracker) localActive(sbomID uuid.UUID) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	e, ok := t.entries[sbomID]
+	return ok && len(e.active) > 0 && time.Since(e.updatedAt) <= t.retention
+}
+
+// pendingShared reports whether this process holds state of sbomID that has
+// not reached the shared store: a run whose begin or outcome is unwritten (or
+// being written), or a MarkFailed / MarkCompleted that failed.
+func (t *ScanTracker) pendingShared(sbomID uuid.UUID) bool {
 	t.hbMu.Lock()
 	defer t.hbMu.Unlock()
 	if at, ok := t.dirty[sbomID]; ok {
@@ -206,14 +272,24 @@ func (t *ScanTracker) preferLocal(sbomID uuid.UUID) bool {
 		if k.sbom != sbomID {
 			continue
 		}
-		if r.mu.TryLock() {
-			pending := !r.begun || (r.finished && !r.done)
-			r.mu.Unlock()
-			if pending {
-				return true
+		if r.finishing.Load() {
+			if r.mu.TryLock() {
+				done := r.done
+				r.mu.Unlock()
+				if !done {
+					return true
+				}
+				continue
 			}
-		} else {
+			return true
+		}
+		if !r.mu.TryLock() {
 			return true // a write is in flight
+		}
+		pending := !r.done && (!r.begun || r.finished)
+		r.mu.Unlock()
+		if pending {
+			return true
 		}
 	}
 	return false

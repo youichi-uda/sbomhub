@@ -14,7 +14,8 @@ func TestM72RedisBreaker(t *testing.T) {
 	}{
 		{"", "", 5, 5 * time.Second, false},
 		{"3", "30s", 3, 30 * time.Second, false},
-		{" 1000 ", "5m", 1000, 5 * time.Minute, false},
+		{" 1000 ", "30s", 1000, 30 * time.Second, false},
+		{"", "31s", 0, 0, true},
 		{"0", "", 0, 0, true},
 		{"1001", "", 0, 0, true},
 		{"x", "", 0, 0, true},

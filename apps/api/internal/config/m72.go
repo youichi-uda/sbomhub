@@ -19,7 +19,9 @@ const (
 
 // RedisBreaker returns SBOMHUB_REDIS_BREAKER_THRESHOLD (consecutive failures
 // that open the breaker, 1-1000, default 5) and SBOMHUB_REDIS_BREAKER_COOLDOWN
-// (how long it stays open before one probe, 1s-5m, default 5s).
+// (how long it stays open before one probe, 1s-30s, default 5s). The cap keeps
+// a cool-down plus one heartbeat interval (30s) inside the scan-status lease
+// (90s), so an open breaker alone cannot make a live scan read interrupted.
 func (c *Config) RedisBreaker() (threshold int, cooldown time.Duration, err error) {
 	threshold, cooldown = DefaultRedisBreakerThreshold, DefaultRedisBreakerCooldown
 	if v := strings.TrimSpace(c.RedisBreakerThresholdRaw); v != "" {
@@ -31,8 +33,8 @@ func (c *Config) RedisBreaker() (threshold int, cooldown time.Duration, err erro
 	}
 	if v := strings.TrimSpace(c.RedisBreakerCooldownRaw); v != "" {
 		d, perr := time.ParseDuration(v)
-		if perr != nil || d < time.Second || d > 5*time.Minute {
-			return 0, 0, fmt.Errorf("SBOMHUB_REDIS_BREAKER_COOLDOWN=%q: want a duration from 1s to 5m, such as \"5s\"", c.RedisBreakerCooldownRaw)
+		if perr != nil || d < time.Second || d > 30*time.Second {
+			return 0, 0, fmt.Errorf("SBOMHUB_REDIS_BREAKER_COOLDOWN=%q: want a duration from 1s to 30s, such as \"5s\"", c.RedisBreakerCooldownRaw)
 		}
 		cooldown = d
 	}

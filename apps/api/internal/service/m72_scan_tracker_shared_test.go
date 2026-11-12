@@ -112,6 +112,12 @@ func trackerOn(store scanStatusStore, hb time.Duration) *ScanTracker {
 	return t
 }
 
+// settle waits until tr's writes of id reached the store (they are async).
+func settle(t *testing.T, tr *ScanTracker, id uuid.UUID) {
+	t.Helper()
+	waitFor(t, "the shared writes to land", func() bool { return !tr.pendingShared(id) })
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -132,10 +138,12 @@ func TestM72Tracker_SharedStateIsReadByAnotherProcess(t *testing.T) {
 		t.Fatalf("before: %s", st)
 	}
 	gen := a.Begin(id)
+	settle(t, a, id)
 	if st, _, _ := b.GetDetail(id); st != ScanStateRunning {
 		t.Fatalf("B during A's scan: %s, want running", st)
 	}
 	a.Finish(id, gen, []string{ScanReasonFetchFailed}, "nvd: scan failed (fetch_failed)")
+	settle(t, a, id)
 	st, msg, reasons := b.GetDetail(id)
 	if st != ScanStateFailed || msg != "nvd: scan failed (fetch_failed)" || !slices.Equal(reasons, []string{ScanReasonFetchFailed}) {
 		t.Fatalf("B after A failed: %s %q %v", st, msg, reasons)
@@ -239,4 +247,178 @@ func TestM72Tracker_RunGenerationsAreRandomAndNonZero(t *testing.T) {
 		}
 		seen[g] = true
 	}
+}
+
+// slowStore delays every call, to model a black-holed Redis under its bound.
+type slowStore struct {
+	*memStore
+	delay time.Duration
+}
+
+func (s slowStore) begin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	time.Sleep(s.delay)
+	return s.memStore.begin(ctx, id, gen)
+}
+
+func (s slowStore) heartbeat(ctx context.Context, id uuid.UUID, gen uint64) (bool, error) {
+	time.Sleep(s.delay)
+	return s.memStore.heartbeat(ctx, id, gen)
+}
+
+// Codex M72 R1 High-1: GetDetail raced Begin/Finish on the entry's map.
+func TestM72R1_GetDetailDoesNotRaceBeginFinish(t *testing.T) {
+	a := trackerOn(newMemStore(), time.Hour)
+	id := uuid.New()
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				a.GetDetail(id)
+			}
+		}
+	}()
+	for i := 0; i < 300; i++ {
+		g1 := a.Begin(id)
+		g2 := a.Begin(id)
+		a.Finish(id, g1, nil, "")
+		a.Finish(id, g2, nil, "")
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// Codex M72 R1 High-2: process A finished (its Redis finish pending) while
+// process B's run of the same SBOM is still running. A must not answer its
+// local "completed".
+func TestM72R1_PendingFinishNeverReadsCompletedWhileAnotherRunIsActive(t *testing.T) {
+	store := newMemStore()
+	a, b := trackerOn(store, time.Hour), trackerOn(store, time.Hour)
+	id := uuid.New()
+	ga := a.Begin(id)
+	b.Begin(id)
+	waitFor(t, "both begins in the store", func() bool {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		return len(store.runs[id]) == 2
+	})
+	store.setDown(true)
+	a.Finish(id, ga, nil, "") // its shared finish fails
+	store.setDown(false)
+	if st, _, _ := a.GetDetail(id); st != ScanStateRunning {
+		t.Fatalf("A answered %s while B's run is active", st)
+	}
+}
+
+// Codex M72 R1 Medium-5: Begin and Finish must not wait on the shared store
+// (they run on the request path / at the end of the scan).
+func TestM72R1_BeginAndFinishDoNotWaitOnTheStore(t *testing.T) {
+	store := slowStore{memStore: newMemStore(), delay: 300 * time.Millisecond}
+	a := trackerOn(store, time.Hour)
+	id := uuid.New()
+	start := time.Now()
+	gen := a.Begin(id)
+	if d := time.Since(start); d > beginWait+100*time.Millisecond {
+		t.Fatalf("Begin took %s with a 300ms store, want <= %s", d, beginWait)
+	}
+	start = time.Now()
+	a.Finish(id, gen, nil, "")
+	if d := time.Since(start); d > 50*time.Millisecond {
+		t.Fatalf("Finish took %s with a 300ms store", d)
+	}
+	other := trackerOn(store.memStore, time.Hour)
+	waitFor(t, "the writes to land", func() bool {
+		st, _, _ := other.GetDetail(id)
+		return st == ScanStateCompleted
+	})
+}
+
+// Codex M72 R1 Medium-6: one pass of lease renewals must not take the sum of
+// every run's round trip.
+func TestM72R1_HeartbeatRenewsRunsConcurrently(t *testing.T) {
+	store := slowStore{memStore: newMemStore(), delay: 50 * time.Millisecond}
+	a := trackerOn(store, time.Hour)
+	const runs = 40
+	for i := 0; i < runs; i++ {
+		a.Begin(uuid.New())
+	}
+	waitFor(t, "begins", func() bool {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		return len(store.runs) == runs
+	})
+	start := time.Now()
+	a.heartbeatPass()
+	if d := time.Since(start); d > runs*50*time.Millisecond/4 {
+		t.Fatalf("a renewal pass of %d runs took %s (serial would be %s)", runs, d, runs*50*time.Millisecond)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.beats != runs {
+		t.Fatalf("renewed %d of %d", store.beats, runs)
+	}
+}
+
+// Overlapping runs on two processes stay one group when the second begins
+// right before the first finishes: Begin's write lands before it returns
+// (Redis healthy), so the first run's failure is not dropped.
+func TestM72R1_ImmediateOverlapStaysOneGroup(t *testing.T) {
+	store := newGroupStore()
+	a, b := trackerOn(store, time.Hour), trackerOn(store, time.Hour)
+	id := uuid.New()
+	ga := a.Begin(id)
+	gb := b.Begin(id)
+	a.Finish(id, ga, []string{ScanReasonFetchFailed}, "nvd: scan failed (fetch_failed)")
+	b.Finish(id, gb, nil, "")
+	settle(t, a, id)
+	settle(t, b, id)
+	if st, _, _ := trackerOn(store, time.Hour).GetDetail(id); st != ScanStateFailed {
+		t.Fatalf("group outcome %s, want failed", st)
+	}
+}
+
+// groupStore is memStore with the shared store's group rule: failed if any
+// run of the group failed, terminal only when none is active.
+type groupStore struct {
+	*memStore
+	failed map[uuid.UUID]bool
+}
+
+func newGroupStore() *groupStore {
+	return &groupStore{memStore: newMemStore(), failed: map[uuid.UUID]bool{}}
+}
+
+func (g *groupStore) begin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	g.mu.Lock()
+	if len(g.runs[id]) == 0 {
+		g.failed[id] = false
+	}
+	g.mu.Unlock()
+	return g.memStore.begin(ctx, id, gen)
+}
+
+func (g *groupStore) finish(_ context.Context, id uuid.UUID, gen uint64, msg string, _ []string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.runs[id][gen] {
+		return false, nil
+	}
+	delete(g.runs[id], gen)
+	if msg != "" {
+		g.failed[id] = true
+	}
+	switch {
+	case len(g.runs[id]) > 0:
+		g.state[id] = ScanStateRunning
+	case g.failed[id]:
+		g.state[id] = ScanStateFailed
+	default:
+		g.state[id] = ScanStateCompleted
+	}
+	return true, nil
 }

@@ -267,13 +267,17 @@ func (t *ScanTracker) MarkFailedWithReasons(sbomID uuid.UUID, errMsg string, rea
 
 // GetDetail is Get plus the failed scan's reason codes, read atomically.
 //
-// With a shared store (M72) the shared state answers — it covers runs of
-// every process — unless this process knows better: a run of this SBOM is
-// active here (it is running, whatever Redis says), or this process's last
-// write of it to Redis failed and has not been retried yet. When Redis cannot
-// be read the in-memory state answers, as before M72.
+// With a shared store (M72):
+//   - a run of this SBOM active in THIS process: running, whatever Redis says;
+//   - else the shared state, which covers every process's runs; a shared
+//     "running" always wins, so a terminal state this process has not yet
+//     written cannot hide another process's run (Codex M72 R1 High-2);
+//   - a shared terminal state yields to this process's own unwritten one
+//     (it is newer);
+//   - Redis unreadable or without an entry: this process's memory, as before
+//     M72.
 func (t *ScanTracker) GetDetail(sbomID uuid.UUID) (ScanState, string, []string) {
-	if t.shared == nil || t.preferLocal(sbomID) {
+	if t.shared == nil || t.localActive(sbomID) {
 		return t.getDetailLocal(sbomID)
 	}
 	state, msg, reasons, found, err := t.shared.get(context.Background(), sbomID)
@@ -282,6 +286,12 @@ func (t *ScanTracker) GetDetail(sbomID uuid.UUID) (ScanState, string, []string) 
 		return t.getDetailLocal(sbomID)
 	}
 	if !found {
+		return t.getDetailLocal(sbomID)
+	}
+	if state == ScanStateRunning {
+		return state, "", nil
+	}
+	if t.pendingShared(sbomID) {
 		return t.getDetailLocal(sbomID)
 	}
 	return state, msg, reasons

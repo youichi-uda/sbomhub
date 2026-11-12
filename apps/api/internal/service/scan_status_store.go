@@ -260,7 +260,7 @@ type redisScanStatusStore struct {
 func (s *redisScanStatusStore) opCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	// Detached from the caller's cancellation: a status write at the end of
 	// a cancelled scan must still be attempted (bounded).
-	ctx = sbomredis.WithBreakerClass(context.WithoutCancel(ctx), sbomredis.ClassBestEffort)
+	ctx = sbomredis.WithBreakerClass(context.WithoutCancel(ctx), sbomredis.ClassStatus)
 	return context.WithTimeout(ctx, scanStatusOpTimeout)
 }
 

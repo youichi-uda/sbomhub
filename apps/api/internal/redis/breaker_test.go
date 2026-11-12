@@ -335,3 +335,12 @@ func TestBreakers_ClassesOpenIndependently(t *testing.T) {
 		t.Fatalf("cache call: %v, want ErrCircuitOpen", err)
 	}
 }
+
+// Codex M72 R1 Medium-7: the scan-status store has its own class, so slow
+// cache reads cannot keep its lease renewals failing fast.
+func TestBreakers_StatusClassIsSeparateFromTheCaches(t *testing.T) {
+	bs := NewBreakers(BreakerConfig{FailureThreshold: 1})
+	if bs.Class(ClassStatus) == bs.Class(ClassBestEffort) || bs.Class(ClassStatus) == bs.Class(ClassDefault) {
+		t.Fatal("ClassStatus shares a breaker")
+	}
+}

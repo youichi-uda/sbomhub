@@ -280,15 +280,22 @@ const (
 	// ClassDefault: security bookkeeping (rate limiters) and anything
 	// untagged.
 	ClassDefault BreakerClass = iota
-	// ClassBestEffort: callers that treat every error as a miss or skip it
-	// (NVD / distro caches, the scan-status store).
+	// ClassBestEffort: callers that treat every error as a miss (the NVD and
+	// distro caches).
 	ClassBestEffort
+	// ClassStatus: the scan-status store. Its own class (Codex M72 R1
+	// Medium-7): its calls are tiny and its leases must be renewed, so slow
+	// cache reads must not keep it failing fast.
+	ClassStatus
 	numBreakerClasses
 )
 
 func (c BreakerClass) String() string {
-	if c == ClassBestEffort {
+	switch c {
+	case ClassBestEffort:
 		return "best_effort"
+	case ClassStatus:
+		return "status"
 	}
 	return "default"
 }
