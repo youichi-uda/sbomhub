@@ -1099,10 +1099,6 @@ func main() {
 	// text; see appmw.AccessLog.
 	e.Use(appmw.AccessLog(slog.Default()))
 	e.Use(middleware.Recover())
-	// M71: refuse U+0000 / invalid UTF-8 in path parameters and the query
-	// string with 400 before any group middleware (auth, TenantTx, audit) or
-	// handler sees them; PostgreSQL cannot store them (they used to be 500s).
-	e.Use(appmw.TextGuardParams())
 	// SECURITY: Limit request body size to prevent memory exhaustion DoS attacks
 	// 10MB should be sufficient for most SBOM files while preventing abuse
 	e.Use(middleware.BodyLimit("10M"))
@@ -1126,6 +1122,12 @@ func main() {
 			"X-Evidence-Pack-Format", "X-Evidence-Pack-VEX-Count", "X-Evidence-Pack-CRA-Count",
 		},
 	}))
+	// M71: refuse U+0000 / invalid UTF-8 in path parameters and the query
+	// string with 400 before any group middleware (auth, TenantTx, audit) or
+	// handler sees them; PostgreSQL cannot store them (they used to be 500s).
+	// Inside CORS (Codex R2), so an allowed cross-origin caller can read the
+	// 400 instead of a CORS failure.
+	e.Use(appmw.TextGuardParams())
 
 	// Webhook endpoints (no auth required)
 	e.POST("/api/webhooks/clerk", clerkWebhookHandler.Handle)
