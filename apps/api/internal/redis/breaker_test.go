@@ -372,3 +372,14 @@ func TestClassify_InheritedDeadlineIsNeutral(t *testing.T) {
 		t.Fatalf("i/o timeout with a live context: %v, want failure", got)
 	}
 }
+
+// Codex M72 R10 Low-2: an error REPLY is a success even when it arrives as the
+// operation's own deadline fires.
+func TestClassify_ReplyAtTheDeadlineIsASuccess(t *testing.T) {
+	expired, cancel := context.WithTimeoutCause(context.Background(), time.Nanosecond, ErrOpTimeout)
+	defer cancel()
+	<-expired.Done()
+	if got := classify(expired, replyErr("BUSY Redis is busy running a script")); got != outcomeSuccess {
+		t.Fatalf("error reply at the deadline: %v, want success", got)
+	}
+}
