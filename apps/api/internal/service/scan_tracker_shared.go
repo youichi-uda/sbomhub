@@ -33,9 +33,14 @@ const (
 	// heartbeatBatch is how many lease renewals go in one pipelined round
 	// trip (Codex M72 R2 Medium-4).
 	heartbeatBatch = 256
-	// maxDrainWorkers bounds the goroutines one heartbeat uses to retry
-	// stalled queues (Codex M72 R7/R8 High-1).
+	// maxDrainWorkers bounds the goroutines draining queues (Codex M72
+	// R7/R8 High-1, R12 Medium-4); priorityWorkers more may run for writes
+	// to idle queues (R13 High-2).
 	maxDrainWorkers = 32
+	priorityWorkers = 8
+	// drainQuantum: a worker applies at most this many writes of one queue
+	// before taking the next queue, so long backlogs share the workers.
+	drainQuantum = 16
 )
 
 type sharedEventKind int
@@ -102,7 +107,9 @@ func (t *ScanTracker) enqueueLocked(sbomID uuid.UUID, ev *sharedEvent) {
 	ev.done = make(chan struct{})
 	q.events = append(q.events, ev)
 	if !q.draining {
-		t.startDrainLocked(sbomID, q)
+		// A write to an idle queue (typically a fresh Begin) goes ahead of
+		// backlog retries (Codex M72 R13 High-2).
+		t.startDrainLocked(sbomID, q, true)
 	}
 	t.ensureHeartbeatLocked()
 }
@@ -138,11 +145,21 @@ func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedE
 
 // startDrainLocked hands sbomID's queue to the drain workers: at most
 // maxDrainWorkers drain at once, process-wide, whether a queue's first write
-// or a retry (Codex M72 R12 Medium-4). t.qMu is held.
-func (t *ScanTracker) startDrainLocked(sbomID uuid.UUID, q *sbomQueue) {
+// or a retry (Codex M72 R12 Medium-4). A priority queue (a write to an idle
+// queue, typically a fresh Begin) goes to the front, and may use one of
+// priorityWorkers extra workers when the others are all busy with backlogs,
+// so it reaches a healthy Redis within beginWait (Codex M72 R13 High-2).
+// t.qMu is held.
+func (t *ScanTracker) startDrainLocked(sbomID uuid.UUID, q *sbomQueue, priority bool) {
 	q.draining = true
-	t.ready = append(t.ready, sbomID)
-	if t.workers < maxDrainWorkers {
+	limit := maxDrainWorkers
+	if priority {
+		t.ready = append([]uuid.UUID{sbomID}, t.ready...)
+		limit += priorityWorkers
+	} else {
+		t.ready = append(t.ready, sbomID)
+	}
+	if t.workers < limit {
 		t.workers++
 		go t.drainWorker()
 	}
@@ -167,11 +184,17 @@ func (t *ScanTracker) drainWorker() {
 // drain applies sbomID's queued writes in order until the queue is empty or a
 // write fails (it then stays queued for the heartbeat loop to retry).
 func (t *ScanTracker) drain(sbomID uuid.UUID) {
-	for {
+	for applied := 0; ; applied++ {
 		t.qMu.Lock()
 		q := t.queues[sbomID]
 		if q == nil || len(q.events) == 0 {
 			delete(t.queues, sbomID)
+			t.qMu.Unlock()
+			return
+		}
+		if applied == drainQuantum {
+			// Its turn is over: back of the line, still draining.
+			t.ready = append(t.ready, sbomID)
 			t.qMu.Unlock()
 			return
 		}
@@ -349,7 +372,7 @@ func (t *ScanTracker) heartbeatPass() bool {
 	}
 	slices.SortFunc(stalled, func(x, y uuid.UUID) int { return t.queues[x].lastWrite.Compare(t.queues[y].lastWrite) })
 	for _, id := range stalled {
-		t.startDrainLocked(id, t.queues[id])
+		t.startDrainLocked(id, t.queues[id], false)
 	}
 	var renew []runKey
 	for k, lr := range t.live {
@@ -401,7 +424,7 @@ func (t *ScanTracker) kickQueues() {
 	defer t.qMu.Unlock()
 	for id, q := range t.queues {
 		if len(q.events) > 0 && !q.draining {
-			t.startDrainLocked(id, q)
+			t.startDrainLocked(id, q, false)
 		}
 	}
 }
