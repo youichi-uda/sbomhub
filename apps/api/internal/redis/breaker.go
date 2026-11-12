@@ -351,6 +351,15 @@ func (bs *Breakers) Class(c BreakerClass) *Breaker {
 	return bs.byClass[c]
 }
 
+// WithoutBreaker marks ctx so its calls bypass every breaker: they are
+// neither refused while it is open nor counted, and never take the
+// half-open slot. Only for rare capability probes whose answer says nothing
+// about the data path (Codex M72 eviction R1 Medium-3: a CONFIG GET refused
+// by a managed Redis reset the scan-status breaker's failure count).
+func WithoutBreaker(ctx context.Context) context.Context {
+	return context.WithValue(ctx, admittedKey{}, true)
+}
+
 // Hook routes each call to the breaker of its context's class.
 func (bs *Breakers) Hook() redis.Hook {
 	return breakerHook{pick: func(ctx context.Context) *Breaker {

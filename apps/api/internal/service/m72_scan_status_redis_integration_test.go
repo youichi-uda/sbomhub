@@ -657,3 +657,81 @@ func TestM72NoEvictionRedisSkipsYoungHold(t *testing.T) {
 		t.Fatalf("fresh key, eviction possible: %s, want running (young hold)", v.state)
 	}
 }
+
+// Codex M72 eviction R1 Medium-1: the first probe runs before WithRedis
+// returns, so the very first scan already uses what Redis reports.
+func TestM72WithRedisProbesBeforeFirstScan(t *testing.T) {
+	rdb := m72Redis(t)
+	ctx := context.Background()
+	cfg, err := rdb.ConfigGet(ctx, "maxmemory*").Result()
+	if err != nil || !redisCannotEvict(cfg) {
+		t.Skip("test Redis can evict keys or refuses CONFIG")
+	}
+	tr := NewScanTracker().WithRedis(rdb)
+	if !tr.shared.(*redisScanStatusStore).noEvict.Load() {
+		t.Fatal("WithRedis returned before learning that Redis cannot evict")
+	}
+}
+
+// Codex M72 eviction R1 Medium-2: a young key completed while Redis could not
+// evict reads running again once the holding scripts are back in use (Redis
+// became able to evict, or stopped answering CONFIG), until it is no longer
+// young. A held key reads completed as soon as the immediate scripts apply.
+func TestM72YoungHoldFollowsModeSwitches(t *testing.T) {
+	rdb := m72Redis(t)
+	store := &redisScanStatusStore{client: rdb, ttl: time.Hour, lease: ScanStatusLease}
+	maxAge := DefaultScanDeadline + 5*time.Minute
+	store.scripts = newStatusScriptsYoung(maxAge, 400*time.Millisecond)
+	store.immediate = newStatusScriptsSpan(maxAge, 0, 400*time.Millisecond)
+	ctx := context.Background()
+	run := func(id uuid.UUID) {
+		if err := store.begin(ctx, id, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.finish(ctx, id, 1, "", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := func(id uuid.UUID) ScanState {
+		v, err := store.get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v.state
+	}
+	// immediate → holding
+	store.noEvict.Store(true)
+	a := uuid.New()
+	run(a)
+	if s := state(a); s != ScanStateCompleted {
+		t.Fatalf("immediate: %s, want completed", s)
+	}
+	store.noEvict.Store(false)
+	if s := state(a); s != ScanStateRunning {
+		t.Fatalf("back to holding while young: %s, want running", s)
+	}
+	// holding → immediate
+	b := uuid.New()
+	run(b)
+	if s := state(b); s != ScanStateRunning {
+		t.Fatalf("holding: %s, want running", s)
+	}
+	store.noEvict.Store(true)
+	if s := state(b); s != ScanStateCompleted {
+		t.Fatalf("switched to immediate: %s, want completed", s)
+	}
+	// Once no longer young, completed in either mode.
+	time.Sleep(450 * time.Millisecond)
+	store.noEvict.Store(false)
+	if s := state(a); s != ScanStateCompleted {
+		t.Fatalf("aged out, holding: %s, want completed", s)
+	}
+	// A direct mark is not re-held.
+	c := uuid.New()
+	if err := store.mark(ctx, c, ScanStateCompleted, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if s := state(c); s != ScanStateCompleted {
+		t.Fatalf("marked completed: %s", s)
+	}
+}

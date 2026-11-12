@@ -100,7 +100,9 @@ func scanStatusKeys(sbomID uuid.UUID) []string {
 //	lost_dropped  when a tombstone was dropped (or the runs were found lost)
 //	born          when this incarnation of the key was created (+ nonce)
 //	rev           write counter; the version is born:rev
-//	young_hold    the state was held running because the key is young
+//	young_hold    '1': the state was held running because the key is young;
+//	              'c': completed while young without a hold (Redis could
+//	              not evict), re-held if the holding scripts read it young
 const scanStatusLua = `
 local K = KEYS[1]
 local function nowms()
@@ -265,9 +267,16 @@ local function publish(now)
   -- A key younger than one heartbeat may have replaced an evicted one whose
   -- runs have not rejoined yet: it does not read completed until they could
   -- have (Codex M72 R19 High-2).
+  -- YOUNG is 0 while Redis cannot evict (the immediate scripts); such a
+  -- young completion is marked 'c' so the holding scripts re-hold it if
+  -- eviction becomes possible while the key is still young.
   local b = born_ms()
   if b and now - b < YOUNG then
     redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated', now, 'young_hold', '1')
+    return
+  end
+  if b and now - b < YOUNG_SPAN then
+    redis.call('HSET', K, 'state', 'completed', 'error', '', 'reasons', '[]', 'updated', now, 'young_hold', 'c')
     return
   end
   redis.call('HDEL', K, 'young_hold')
@@ -304,8 +313,15 @@ func newStatusScripts(maxRunAge time.Duration) *statusScripts {
 const scanStatusYoung = 2*ScanStatusHeartbeat + 15*time.Second
 
 func newStatusScriptsYoung(maxRunAge, young time.Duration) *statusScripts {
-	prelude := fmt.Sprintf("local INTERRUPTED_MSG = %q\nlocal INTERRUPTED_REASON = %q\nlocal MAX_LOST = %d\nlocal MAX_RUN_AGE = %d\nlocal YOUNG = %d\n",
-		scanInterruptedMarker, ScanReasonInterrupted, scanStatusMaxLost, maxRunAge.Milliseconds(), young.Milliseconds())
+	return newStatusScriptsSpan(maxRunAge, young, young)
+}
+
+// newStatusScriptsSpan: young is the hold these scripts apply (0 for the
+// immediate scripts); span is how long a key counts as young at all, so a
+// completion inside it is marked for re-holding (see publish).
+func newStatusScriptsSpan(maxRunAge, young, span time.Duration) *statusScripts {
+	prelude := fmt.Sprintf("local INTERRUPTED_MSG = %q\nlocal INTERRUPTED_REASON = %q\nlocal MAX_LOST = %d\nlocal MAX_RUN_AGE = %d\nlocal YOUNG = %d\nlocal YOUNG_SPAN = %d\n",
+		scanInterruptedMarker, ScanReasonInterrupted, scanStatusMaxLost, maxRunAge.Milliseconds(), young.Milliseconds(), span.Milliseconds())
 	mk := func(body string) *redis.Script { return redis.NewScript(prelude + scanStatusLua + body) }
 	return &statusScripts{
 		begin: mk(scanStatusBeginLua), finish: mk(scanStatusFinishLua), merge: mk(scanStatusMergeLua),
@@ -470,10 +486,16 @@ local now = nowms()
 local changed = sweep(now, nil) > 0
 local runs_now, _, intents_now = fields()
 local idle = count(runs_now) == 0 and count(intents_now) == 0
-if not changed and idle and redis.call('HGET', K, 'young_hold') == '1' then
+local yh = redis.call('HGET', K, 'young_hold')
+if not changed and idle and yh == '1' then
   -- held as running while the key was young: re-evaluate
   local b = born_ms()
   if not b or now - b >= YOUNG then changed = true end
+elseif not changed and idle and yh == 'c' then
+  -- completed young under the immediate scripts: hold it now if these
+  -- scripts hold and the key is still young
+  local b = born_ms()
+  if b and now - b < YOUNG then changed = true end
 elseif not changed and idle and redis.call('HGET', K, 'state') == 'running' then
   -- running with no active run and none just swept: interrupted, without a
   -- run to revive.
@@ -540,7 +562,7 @@ const evictionProbeEvery = 30 * time.Second
 
 func (s *redisScanStatusStore) initScripts(maxRunAge time.Duration) {
 	s.scripts = newStatusScripts(maxRunAge)
-	s.immediate = newStatusScriptsYoung(maxRunAge, 0)
+	s.immediate = newStatusScriptsSpan(maxRunAge, 0, scanStatusYoung)
 }
 
 // sc returns the scripts to run now.
@@ -552,6 +574,14 @@ func (s *redisScanStatusStore) sc() *statusScripts {
 		return s.immediate
 	}
 	return s.scripts
+}
+
+// probeNow reads the eviction settings and waits for the answer (bounded by
+// the store's operation timeout): used once, before the first scan (Codex
+// M72 eviction R1 Medium-1).
+func (s *redisScanStatusStore) probeNow() {
+	s.probeAt.Store(time.Now().UnixNano())
+	s.noEvict.Store(s.probeNoEviction())
 }
 
 // maybeProbe re-reads the eviction settings in the background when the last
@@ -574,8 +604,11 @@ func (s *redisScanStatusStore) maybeProbe() {
 // probeNoEviction reports whether Redis says it cannot evict a key. Any
 // error (CONFIG disabled on managed Redis, Redis down) answers false.
 func (s *redisScanStatusStore) probeNoEviction() bool {
+	// Outside every breaker (Codex M72 eviction R1 Medium-3): a refused
+	// CONFIG says nothing about the status scripts' health.
 	ctx, cancel := s.opCtx(context.Background())
 	defer cancel()
+	ctx = sbomredis.WithoutBreaker(ctx)
 	cfg, err := s.client.ConfigGet(ctx, "maxmemory*").Result()
 	if err != nil {
 		return false

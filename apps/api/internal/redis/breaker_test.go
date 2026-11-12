@@ -429,3 +429,35 @@ func TestBreaker_SlowSuccessesOpenIt(t *testing.T) {
 		t.Fatalf("fast answers: %v, want closed", st)
 	}
 }
+
+// Codex M72 eviction R1 Medium-3: a capability probe (CONFIG GET) bypasses
+// the breaker. Its error reply on a managed Redis must not reset the
+// failure count, and it must not take the half-open slot.
+func TestBreakerHook_WithoutBreakerIsNeitherGatedNorCounted(t *testing.T) {
+	clk := newFakeClock()
+	b := newTestBreaker(t, clk, nil)
+	h := b.Hook().ProcessHook(func(context.Context, goredis.Cmder) error { return replyErr("NOPERM no CONFIG") })
+	ctx := WithoutBreaker(context.Background())
+	_ = call(b, timeoutErr())
+	_ = call(b, timeoutErr())
+	_ = h(ctx, goredis.NewCmd(ctx, "config", "get", "maxmemory*")) // must not reset
+	_ = call(b, timeoutErr())
+	if b.State() != BreakerOpen {
+		t.Fatalf("state %v, want open: the bypassed probe reset the count", b.State())
+	}
+	// While open, the bypassed probe still reaches Redis.
+	reached := false
+	h2 := b.Hook().ProcessHook(func(context.Context, goredis.Cmder) error { reached = true; return nil })
+	if err := h2(ctx, goredis.NewCmd(ctx, "config", "get", "maxmemory*")); err != nil || !reached {
+		t.Fatalf("bypassed call while open: err %v reached %v", err, reached)
+	}
+	// It did not close the breaker or use the half-open slot.
+	clk.Add(10 * time.Second)
+	_ = h2(ctx, goredis.NewCmd(ctx, "config", "get", "maxmemory*"))
+	if b.State() == BreakerClosed {
+		t.Fatal("a bypassed call closed the breaker")
+	}
+	if err := call(b, nil); err != nil {
+		t.Fatalf("the real probe after the bypassed call: %v (slot taken?)", err)
+	}
+}

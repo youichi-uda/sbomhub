@@ -165,7 +165,7 @@ func (t *ScanTracker) WithRedis(client *redis.Client) *ScanTracker {
 	if client != nil {
 		st := &redisScanStatusStore{client: client, ttl: t.retention, lease: ScanStatusLease, probe: true}
 		st.initScripts(t.maxRunAge)
-		st.maybeProbe() // learn the eviction settings before the first scan
+		st.probeNow() // learn the eviction settings before the first scan
 		t.shared = st
 	}
 	return t
