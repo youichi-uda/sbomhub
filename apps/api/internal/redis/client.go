@@ -4,6 +4,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"time"
@@ -119,5 +120,15 @@ func NewClientWithBreaker(redisURL string, cfg BreakerConfig) (*redis.Client, *B
 // CommandContext derives the context for one Redis operation: the parent's
 // values and cancellation, and a deadline at most CommandTimeout away.
 func CommandContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, CommandTimeout)
+	return OpContext(parent, CommandTimeout)
+}
+
+// ErrOpTimeout is the cause of a Redis operation's own deadline (OpContext).
+// The circuit breaker counts only this deadline as a Redis failure; one the
+// operation inherited from its caller is not Redis's fault.
+var ErrOpTimeout = errors.New("redis operation timed out")
+
+// OpContext bounds one Redis operation by d with cause ErrOpTimeout.
+func OpContext(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeoutCause(parent, d, ErrOpTimeout)
 }

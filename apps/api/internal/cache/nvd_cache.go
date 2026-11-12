@@ -106,7 +106,7 @@ const OpTimeout = 1 * time.Second
 // (M72): a slow cache read fails the cache fast, it does not open the
 // breaker of the rate limiters.
 func opContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(sbomredis.WithBreakerClass(ctx, sbomredis.ClassBestEffort), OpTimeout)
+	return sbomredis.OpContext(sbomredis.WithBreakerClass(ctx, sbomredis.ClassBestEffort), OpTimeout)
 }
 
 // NewNVDCache creates a new NVD cache instance

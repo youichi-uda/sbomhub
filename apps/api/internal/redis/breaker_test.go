@@ -344,3 +344,31 @@ func TestBreakers_StatusClassIsSeparateFromTheCaches(t *testing.T) {
 		t.Fatal("ClassStatus shares a breaker")
 	}
 }
+
+// Codex M72 R2 Low-5: a deadline the call INHERITED (the scan's) is not a
+// Redis failure; only the call's own bound (ErrOpTimeout) is.
+func TestClassify_InheritedDeadlineIsNeutral(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-parent.Done()
+	own, cancel2 := CommandContext(parent) // parent already expired
+	defer cancel2()
+	if got := classify(own, context.DeadlineExceeded); got != outcomeNeutral {
+		t.Fatalf("inherited deadline: %v, want neutral", got)
+	}
+	if got := classify(own, timeoutErr()); got != outcomeNeutral {
+		t.Fatalf("i/o timeout under an inherited deadline: %v, want neutral", got)
+	}
+	mine, cancel3 := CommandContext(context.Background())
+	defer cancel3()
+	<-time.After(0)
+	expired, cancel4 := context.WithTimeoutCause(context.Background(), time.Nanosecond, ErrOpTimeout)
+	defer cancel4()
+	<-expired.Done()
+	if got := classify(expired, context.DeadlineExceeded); got != outcomeFailure {
+		t.Fatalf("own bound: %v, want failure", got)
+	}
+	if got := classify(mine, timeoutErr()); got != outcomeFailure {
+		t.Fatalf("i/o timeout with a live context: %v, want failure", got)
+	}
+}

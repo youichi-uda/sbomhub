@@ -237,11 +237,15 @@ func classify(ctx context.Context, err error) outcome {
 	if errors.Is(err, ErrCircuitOpen) || errors.Is(err, redis.ErrClosed) {
 		return outcomeNeutral
 	}
-	// The caller gave up (request finished, scan cancelled): says nothing
-	// about Redis. A DEADLINE is different — the call sites bound each call
-	// with their own short deadline (CommandContext, cache OpTimeout), so
-	// hitting it means Redis did not answer in time.
-	if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+	// The call's context ended. Only the call's OWN bound (ErrOpTimeout, set
+	// by CommandContext / OpContext) says Redis did not answer in time; a
+	// cancellation, or a deadline the call inherited (a scan's, a request's),
+	// says nothing about Redis (Codex M72 R2 Low-5) — whatever error go-redis
+	// reported for it (context error or socket timeout).
+	if ctx.Err() != nil {
+		if errors.Is(context.Cause(ctx), ErrOpTimeout) {
+			return outcomeFailure
+		}
 		return outcomeNeutral
 	}
 	var nerr net.Error

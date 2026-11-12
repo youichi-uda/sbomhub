@@ -425,7 +425,9 @@ func RateLimitPublicLink(rdb *redis.Client, perToken, perIP int, window time.Dur
 			// slow legitimate downloads throttle the link they belong to.
 			base := context.WithoutCancel(c.Request().Context())
 			redisCtx := func() (context.Context, context.CancelFunc) {
-				return context.WithTimeout(base, publicLinkRedisTimeout)
+				// OpContext: its own deadline is what the Redis circuit
+				// breaker counts as a failure (M72).
+				return sbomredis.OpContext(base, publicLinkRedisTimeout)
 			}
 
 			windowKey := calculateWindowKey(time.Now().UTC(), window)
