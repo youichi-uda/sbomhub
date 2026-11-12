@@ -84,3 +84,19 @@ func (d *CvssData) UnmarshalJSON(b []byte) error {
 	}
 	return json.Unmarshal(raw, &d.BaseScore)
 }
+
+// UnmarshalJSON starts every metric from "no score" (Codex M67 R5, High).
+// CvssData.UnmarshalJSON only runs when the cvssData key is on the wire; a
+// metric with no cvssData at all left baseScoreMissing false and its zero
+// BaseScore was selected as a real 0.0 — an empty v3.1 entry beat a valid
+// v4.0 9.8 CRITICAL. When cvssData IS present, its own UnmarshalJSON
+// overwrites the default from what the wire actually carries.
+func (m *CvssMetric) UnmarshalJSON(b []byte) error {
+	type plain CvssMetric
+	aux := plain{CvssData: CvssData{baseScoreMissing: true}}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	*m = CvssMetric(aux)
+	return nil
+}

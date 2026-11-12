@@ -167,7 +167,7 @@ func TestM67CVESync_MissingBaseScoreIsNotZero(t *testing.T) {
 			"vulnerabilities": [{"cve": {"id": "CVE-2026-0002",
 				"published": "2026-01-01T00:00:00.000", "lastModified": "2026-07-01T00:00:00.000",
 				"descriptions": [{"lang": "en", "value": "x"}],
-				"metrics": {"cvssMetricV31": [{"type": "Primary", "cvssData": {"baseScore": null}}],
+				"metrics": {"cvssMetricV31": [{"type": "Primary", "cvssData": {"baseScore": null}}, {"type": "Secondary"}],
 				            "cvssMetricV40": [{"type": "Secondary", "cvssData": {"baseScore": 9.8, "baseSeverity": "CRITICAL"}}]},
 				"configurations": []}}]}`)
 	}))
