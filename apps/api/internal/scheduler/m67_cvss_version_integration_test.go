@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -248,7 +249,7 @@ func TestM67_ReconcileConvergesARowTheOldSyncDated(t *testing.T) {
 	fake := &m67NVD{}
 	fake.set(m67Record(t, cveID, modified), modified)
 	j := m58Job(appDB, fake.server(t).URL)
-	j.canonicalNVD = true // stands in for services.nvd.nist.gov
+	j.canonicalEndpoint, _ = url.Parse(j.baseURL) // stands in for services.nvd.nist.gov
 	m55PinWatermark(t, migDB, time.Now().UTC().Add(-time.Hour))
 
 	out, err := j.reconcileCatalogue(context.Background(), time.Now().UTC())
@@ -373,10 +374,21 @@ func TestM67_CVSSVersionCheckConstraint(t *testing.T) {
 // and the one-statement recovery — clearing the marker returns every scored
 // row to the re-derivable state, and the next offer re-derives it from the
 // genuine record.
-// m67MixedBinaryRecovery is the statement migration 069's header documents.
-const m67MixedBinaryRecovery = `UPDATE vulnerabilities SET cvss_version = NULL WHERE cvss_version IS NOT NULL AND source = 'NVD'`
+// m67MixedBinaryRecovery / m67MixedBinaryRecoveryMirror are the statements
+// migration 069's header documents, for an install that reads NVD itself and
+// for one that reads a mirror (Codex M67 R8, Medium: against a mirror the
+// equal-timestamp re-derivation is off, so clearing the version alone left
+// the row refused).
+const (
+	m67MixedBinaryRecovery       = `UPDATE vulnerabilities SET cvss_version = NULL WHERE cvss_version IS NOT NULL AND source = 'NVD'`
+	m67MixedBinaryRecoveryMirror = `UPDATE vulnerabilities SET cvss_version = NULL, source_modified_at = NULL WHERE source = 'NVD' AND (cvss_version IS NOT NULL OR source_modified_at IS NOT NULL)`
+)
 
-func TestM67_MixedVersionWindowAndItsRecovery(t *testing.T) {
+func TestM67_MixedVersionWindowAndItsRecovery(t *testing.T) { m67MixedVersion(t, false) }
+
+func TestM67_MixedVersionWindowAndItsRecoveryOnAMirror(t *testing.T) { m67MixedVersion(t, true) }
+
+func m67MixedVersion(t *testing.T, mirror bool) {
 	appURL, migURL := schedIntEnv(t)
 	appDB := schedOpenOrSkip(t, appURL)
 	migDB := schedOpenOrSkip(t, migURL)
@@ -403,7 +415,11 @@ func TestM67_MixedVersionWindowAndItsRecovery(t *testing.T) {
 	fake := &m67NVD{}
 	fake.set(m67Record(t, cveID, t2), t2)
 	j := m58Job(appDB, fake.server(t).URL)
-	j.canonicalNVD = true
+	recovery := m67MixedBinaryRecoveryMirror
+	if !mirror {
+		j.canonicalEndpoint, _ = url.Parse(j.baseURL)
+		recovery = m67MixedBinaryRecovery
+	}
 	m55PinWatermark(t, migDB, time.Now().UTC().Add(-time.Hour))
 	if out, err := j.reconcileCatalogue(context.Background(), time.Now().UTC()); err != nil || !out.Finished {
 		t.Fatalf("reconcileCatalogue = %+v, %v", out, err)
@@ -424,7 +440,7 @@ func TestM67_MixedVersionWindowAndItsRecovery(t *testing.T) {
 
 	// The documented recovery, verbatim, run once after the last pre-069
 	// process stopped.
-	if _, err := migDB.Exec(m67MixedBinaryRecovery); err != nil {
+	if _, err := migDB.Exec(recovery); err != nil {
 		t.Fatalf("recovery: %v", err)
 	}
 	if got := m67Read(t, migDB, jvnID); !got.version.Valid || got.version.String != "3.0" {
@@ -477,7 +493,7 @@ func TestM67_MirrorCannotUseTheEqualTimestampException(t *testing.T) {
 
 // TestM67_CanonicalNVDURLIsRecognised pins which base URLs count as canonical.
 func TestM67_CanonicalNVDURLIsRecognised(t *testing.T) {
-	for url, want := range map[string]bool{
+	for base, want := range map[string]bool{
 		"": true,
 		"https://services.nvd.nist.gov/rest/json/cves/2.0":      true,
 		"https://services.nvd.nist.gov/rest/json/cves/2.0/":     true,
@@ -485,8 +501,8 @@ func TestM67_CanonicalNVDURLIsRecognised(t *testing.T) {
 		"https://nvd-mirror.example/rest/json/cves/2.0":         false,
 		"https://services.nvd.nist.gov.evil/rest/json/cves/2.0": false,
 	} {
-		if got := NewCVESyncJob(nil, nil, "", time.Hour, nil, url, false).canonicalNVD; got != want {
-			t.Errorf("canonicalNVD(%q) = %v, want %v", url, got, want)
+		if got := NewCVESyncJob(nil, nil, "", time.Hour, nil, base, false).canonicalEndpoint != nil; got != want {
+			t.Errorf("canonical(%q) = %v, want %v", base, got, want)
 		}
 	}
 }

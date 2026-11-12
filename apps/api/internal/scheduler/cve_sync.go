@@ -286,11 +286,13 @@ type CVESyncJob struct {
 	// orchestrator config value as NVDService.baseURL (cfg.NVDURL), so the
 	// scheduled feed and on-demand scans share one override.
 	baseURL string
-	// canonicalNVD is true when baseURL is NVD itself (cveSyncAPIURL), not a
-	// mirror. Only then may a write use UpdateMetadata's one-shot equal-
-	// timestamp re-derivation (M67, Codex R6 High): a mirror can serve a
-	// stale or partial body under an unchanged lastModified.
-	canonicalNVD bool
+	// canonicalEndpoint is NVD itself (cveSyncAPIURL) when baseURL is, nil
+	// for a mirror. Only a record that provably came from it may use
+	// UpdateMetadata's one-shot equal-timestamp re-derivation (M67): a mirror
+	// (Codex R6, High), a caching proxy or a redirect (R8, High) can serve a
+	// stale or partial body under an unchanged lastModified. Provenance is
+	// decided per response — see responseIsCanonical.
+	canonicalEndpoint *url.URL
 	// offline short-circuits the scheduled feed when true (M40 Wave B
 	// air-gapped degrade mode): Run() returns nil before any pagination/network.
 	offline bool
@@ -349,18 +351,18 @@ func NewCVESyncJob(db *sql.DB, tenantRepo *repository.TenantRepository, nvdAPIKe
 		baseURL = cveSyncAPIURL
 	}
 	return &CVESyncJob{
-		db:               db,
-		tenantRepo:       tenantRepo,
-		httpClient:       &http.Client{Timeout: 60 * time.Second},
-		nvdAPIKey:        nvdAPIKey,
-		interval:         interval,
-		advisoryExcerpts: advisoryExcerpts,
-		baseURL:          baseURL,
-		canonicalNVD:     strings.TrimRight(baseURL, "/") == cveSyncAPIURL,
-		offline:          offline,
-		osv:              client.NewOSVClient().WithOffline(offline),
-		vulnRepo:         repository.NewVulnerabilityRepository(db),
-		pageDelay:        cveSyncPageDelay(nvdAPIKey),
+		db:                db,
+		tenantRepo:        tenantRepo,
+		httpClient:        &http.Client{Timeout: 60 * time.Second},
+		nvdAPIKey:         nvdAPIKey,
+		interval:          interval,
+		advisoryExcerpts:  advisoryExcerpts,
+		baseURL:           baseURL,
+		canonicalEndpoint: canonicalNVDEndpoint(baseURL),
+		offline:           offline,
+		osv:               client.NewOSVClient().WithOffline(offline),
+		vulnRepo:          repository.NewVulnerabilityRepository(db),
+		pageDelay:         cveSyncPageDelay(nvdAPIKey),
 	}
 }
 
@@ -658,9 +660,11 @@ type CVEInfo struct {
 	ID          string
 	Description string
 	Severity    string
-	// CVSSScore is nil when NVD published NO CVSS metrics for the CVE
-	// ("Awaiting Analysis" / "Undergoing Analysis"), which is the
-	// majority state for freshly-published CVEs.
+	// CVSSScore is nil when NVD published no usable numeric score for the CVE
+	// — most often no CVSS metrics at all ("Awaiting Analysis" / "Undergoing
+	// Analysis"), the majority state for freshly-published CVEs. Since M67 a
+	// nil score can still come with a qualitative Severity and a CVSSVersion
+	// (e.g. a v2 metric that states its rating but carries no usable score).
 	//
 	// M46 B-1 High-3: this used to be a bare float64, so a metrics-less
 	// CVE was persisted as cvss_score = 0.0. 0.0 is a REAL CVSS score
@@ -673,6 +677,10 @@ type CVEInfo struct {
 	// CVSSVersion is the version CVSSScore was taken from (cvss.Select, M67);
 	// nil when unscored.
 	CVSSVersion *string
+	// Canonical is true when the page this record came from was answered by
+	// NVD itself — no proxy, no redirect away from cveSyncAPIURL (M67,
+	// Codex R8 High). See CVESyncJob.responseIsCanonical.
+	Canonical   bool
 	PublishedAt time.Time
 	ModifiedAt  time.Time
 	// Keywords extracted from CVE for matching
@@ -791,6 +799,7 @@ func (j *CVESyncJob) fetchModifiedPage(ctx context.Context, start, end time.Time
 		resp.Body.Close()
 		return nil, 0, fmt.Errorf("NVD API error: %d - %s", resp.StatusCode, string(body))
 	}
+	canonical := j.responseIsCanonical(resp)
 
 	var page []CVEInfo
 	var nvdResp struct {
@@ -865,6 +874,7 @@ func (j *CVESyncJob) fetchModifiedPage(ctx context.Context, start, end time.Time
 
 		// Extract keywords from CPE for matching
 		cve.Keywords = extractKeywordsFromCPE(v.CVE.Configurations)
+		cve.Canonical = canonical
 
 		page = append(page, cve)
 	}
@@ -887,8 +897,9 @@ func (j *CVESyncJob) fetchModifiedPage(ctx context.Context, start, end time.Time
 // v4.0 score by the sync and the v3.1 score by the scanner: CVE-2026-34479
 // flipped between MEDIUM 6.9 and HIGH 7.5 depending on which path wrote last.
 //
-// A nil score means the CVE has no usable CVSS metrics at all — see
-// CVEInfo.CVSSScore (M46 B-1 High-3); it is NOT the same as a score of 0.
+// A nil score means no usable NUMERIC score — see CVEInfo.CVSSScore (M46 B-1
+// High-3); it is NOT the same as a score of 0. The severity and version may
+// still be set when the chosen assessment states a rating without a score.
 func extractCVSSFromMetrics(metrics service.NVDMetrics) (*float64, string, *string) {
 	sel := service.SelectNVDCVSS(metrics)
 	return sel.Score, sel.Severity, sel.Version.Ptr()
@@ -1718,7 +1729,7 @@ func catalogueCtx(ctx context.Context) context.Context {
 // downgrade.
 func (j *CVESyncJob) writeCatalogueMetadata(ctx context.Context, cve CVEInfo) (repository.MetadataWriteOutcome, error) {
 	m := catalogueMetadata(cve, time.Now())
-	m.CanonicalNVD = j.canonicalNVD
+	m.CanonicalNVD = cve.Canonical
 	if m.SourceModifiedAt == nil {
 		slog.Warn("CVE sync: NVD record carries no believable lastModified; not written",
 			"cve_id", cve.ID)
@@ -4558,4 +4569,58 @@ func emitOSVVulnFuncsWriteLogs(events []osvVulnFuncsWriteLogEvent) {
 				"tenant_id", e.tenantID, "cve_id", e.cveID)
 		}
 	}
+}
+
+// canonicalNVDEndpoint returns NVD's own endpoint when baseURL is it (a
+// trailing slash tolerated), nil for anything else — a mirror configured with
+// SBOMHUB_NVD_URL.
+func canonicalNVDEndpoint(baseURL string) *url.URL {
+	if strings.TrimRight(baseURL, "/") != cveSyncAPIURL {
+		return nil
+	}
+	u, err := url.Parse(cveSyncAPIURL)
+	if err != nil {
+		return nil
+	}
+	return u
+}
+
+// responseIsCanonical reports whether resp was answered by NVD itself (M67,
+// Codex M67 R6 / R8, High). UpdateMetadata's equal-timestamp re-derivation
+// trusts that one lastModified means one record, which holds only for NVD:
+//
+//   - the configured base URL must be NVD's (canonicalEndpoint non-nil);
+//   - the FINAL request — after any redirect the client followed — must still
+//     be that endpoint's scheme, host and path;
+//   - the transport must not have routed it through a proxy (HTTPS_PROXY and
+//     friends — a caching proxy can serve a stale body). A transport whose
+//     proxy decision cannot be inspected counts as proxied.
+//
+// What it cannot see: TLS interception by a proxy the operator's trust store
+// accepts, which is indistinguishable from NVD by construction. Answering
+// "not canonical" only switches the re-derivation off; the record is still
+// written under the strict freshness guard.
+func (j *CVESyncJob) responseIsCanonical(resp *http.Response) bool {
+	ep := j.canonicalEndpoint
+	if ep == nil || resp == nil || resp.Request == nil || resp.Request.URL == nil {
+		return false
+	}
+	final := resp.Request.URL
+	if !strings.EqualFold(final.Scheme, ep.Scheme) || !strings.EqualFold(final.Host, ep.Host) ||
+		strings.TrimRight(final.Path, "/") != strings.TrimRight(ep.Path, "/") {
+		return false
+	}
+	rt := j.httpClient.Transport
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	tr, ok := rt.(*http.Transport)
+	if !ok {
+		return false
+	}
+	if tr.Proxy == nil {
+		return true
+	}
+	proxyURL, err := tr.Proxy(resp.Request)
+	return err == nil && proxyURL == nil
 }

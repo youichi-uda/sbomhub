@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -204,3 +205,85 @@ func TestM67CVESync_V2MetricLevelSeverity(t *testing.T) {
 		t.Errorf("sync extracted %s/%v/v%s, want HIGH/nil/v2.0", c.Severity, deref(c.CVSSScore), derefS(c.CVSSVersion))
 	}
 }
+
+// m67Page1 is one NVD page holding a single scored record.
+const m67Page1 = `{"totalResults": 1, "startIndex": 0, "resultsPerPage": 2000,
+	"vulnerabilities": [{"cve": {"id": "CVE-2026-0004",
+		"published": "2026-01-01T00:00:00.000", "lastModified": "2026-07-01T00:00:00.000",
+		"descriptions": [{"lang": "en", "value": "x"}],
+		"metrics": {"cvssMetricV31": [{"type": "Primary", "cvssData": {"baseScore": 7.5, "baseSeverity": "HIGH"}}]},
+		"configurations": []}}]}`
+
+// TestM67CVESync_CanonicalProvenanceIsPerResponse (Codex M67 R8, High). The
+// equal-timestamp re-derivation may only use a record that really came from
+// NVD. The configured URL alone does not establish that: the client honours
+// HTTPS_PROXY (a caching proxy can serve a stale body) and follows redirects.
+// Each page is therefore marked canonical only when the request was not
+// routed through a proxy and the final URL is still the canonical endpoint.
+func TestM67CVESync_CanonicalProvenanceIsPerResponse(t *testing.T) {
+	serve := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, m67Page1)
+	}
+	canonicalOf := func(t *testing.T, j *CVESyncJob) bool {
+		t.Helper()
+		cves, err := j.fetchModifiedCVEs(context.Background(), time.Now().Add(-24*time.Hour))
+		if err != nil || len(cves) != 1 {
+			t.Fatalf("fetchModifiedCVEs = %v, %v", cves, err)
+		}
+		return cves[0].Canonical
+	}
+
+	nvd := httptest.NewServer(http.HandlerFunc(serve))
+	defer nvd.Close()
+
+	t.Run("direct to the canonical endpoint", func(t *testing.T) {
+		j := NewCVESyncJob(nil, nil, "", time.Hour, nil, nvd.URL, false)
+		j.canonicalEndpoint, _ = url.Parse(nvd.URL) // stands in for services.nvd.nist.gov
+		if !canonicalOf(t, j) {
+			t.Error("a direct answer from the canonical endpoint was not marked canonical")
+		}
+	})
+	t.Run("a mirror URL", func(t *testing.T) {
+		j := NewCVESyncJob(nil, nil, "", time.Hour, nil, nvd.URL, false)
+		if canonicalOf(t, j) {
+			t.Error("a mirror's answer was marked canonical")
+		}
+	})
+	t.Run("through a proxy", func(t *testing.T) {
+		proxy := httptest.NewServer(http.HandlerFunc(serve)) // a caching proxy answering itself
+		defer proxy.Close()
+		proxyURL, _ := url.Parse(proxy.URL)
+		j := NewCVESyncJob(nil, nil, "", time.Hour, nil, nvd.URL, false)
+		j.canonicalEndpoint, _ = url.Parse(nvd.URL)
+		j.httpClient = &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+		if canonicalOf(t, j) {
+			t.Error("an answer routed through a proxy was marked canonical")
+		}
+	})
+	t.Run("redirected away", func(t *testing.T) {
+		other := httptest.NewServer(http.HandlerFunc(serve))
+		defer other.Close()
+		redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, other.URL+"?"+r.URL.RawQuery, http.StatusFound)
+		}))
+		defer redirect.Close()
+		j := NewCVESyncJob(nil, nil, "", time.Hour, nil, redirect.URL, false)
+		j.canonicalEndpoint, _ = url.Parse(redirect.URL)
+		if canonicalOf(t, j) {
+			t.Error("an answer that was redirected to another host was marked canonical")
+		}
+	})
+	t.Run("an unknown transport", func(t *testing.T) {
+		j := NewCVESyncJob(nil, nil, "", time.Hour, nil, nvd.URL, false)
+		j.canonicalEndpoint, _ = url.Parse(nvd.URL)
+		j.httpClient = &http.Client{Transport: roundTripFunc(http.DefaultTransport.RoundTrip)}
+		if canonicalOf(t, j) {
+			t.Error("an answer through a transport whose proxy use cannot be inspected was marked canonical")
+		}
+	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
