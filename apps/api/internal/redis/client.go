@@ -86,7 +86,8 @@ func urlSetsOption(redisURL, key string) bool {
 }
 
 // NewClient builds the client from Options and checks connectivity, giving up
-// after StartupPingTimeout.
+// after StartupPingTimeout. It has no circuit breaker; the API uses
+// NewClientWithBreaker.
 func NewClient(redisURL string) (*redis.Client, error) {
 	opts, err := Options(redisURL)
 	if err != nil {
@@ -100,6 +101,19 @@ func NewClient(redisURL string) (*redis.Client, error) {
 		return nil, fmt.Errorf("failed to connect to redis: %w", err)
 	}
 	return client, nil
+}
+
+// NewClientWithBreaker is NewClient with circuit breakers (M72, one per
+// BreakerClass) installed on the client after the startup ping, so every
+// command of every caller goes through one. They are returned for State.
+func NewClientWithBreaker(redisURL string, cfg BreakerConfig) (*redis.Client, *Breakers, error) {
+	client, err := NewClient(redisURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	bs := NewBreakers(cfg)
+	client.AddHook(bs.Hook())
+	return client, bs, nil
 }
 
 // CommandContext derives the context for one Redis operation: the parent's

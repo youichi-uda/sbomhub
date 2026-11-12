@@ -57,6 +57,13 @@ type Config struct {
 	// (M62). Read it through ScanDeadline.
 	ScanDeadlineRaw string
 
+	// M72: Redis circuit breaker and per-tenant scan concurrency, as the
+	// operator spelled them. Read them through RedisBreaker and
+	// ScanTenantConcurrency (config/m72.go).
+	RedisBreakerThresholdRaw string
+	RedisBreakerCooldownRaw  string
+	ScanTenantConcurrencyRaw string
+
 	// Clerk authentication (SaaS mode)
 	ClerkSecretKey     string
 	ClerkWebhookSecret string
@@ -249,6 +256,10 @@ func Load() *Config {
 
 		NVDReconcileIntervalRaw: getEnv("SBOMHUB_NVD_RECONCILE_INTERVAL", ""),
 		ScanDeadlineRaw:         getEnv("SBOMHUB_SCAN_DEADLINE", ""),
+
+		RedisBreakerThresholdRaw: getEnv("SBOMHUB_REDIS_BREAKER_THRESHOLD", ""),
+		RedisBreakerCooldownRaw:  getEnv("SBOMHUB_REDIS_BREAKER_COOLDOWN", ""),
+		ScanTenantConcurrencyRaw: getEnv("SBOMHUB_SCAN_TENANT_CONCURRENCY", ""),
 
 		// Clerk
 		ClerkSecretKey:     getEnv("CLERK_SECRET_KEY", ""),

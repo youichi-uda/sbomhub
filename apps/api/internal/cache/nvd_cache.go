@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	sbomredis "github.com/sbomhub/sbomhub/internal/redis"
 )
 
 const (
@@ -100,8 +102,11 @@ type NVDCache struct {
 // the NVD request that would happen anyway.
 const OpTimeout = 1 * time.Second
 
+// opContext also tags the call best-effort for the Redis circuit breaker
+// (M72): a slow cache read fails the cache fast, it does not open the
+// breaker of the rate limiters.
 func opContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, OpTimeout)
+	return context.WithTimeout(sbomredis.WithBreakerClass(ctx, sbomredis.ClassBestEffort), OpTimeout)
 }
 
 // NewNVDCache creates a new NVD cache instance

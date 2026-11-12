@@ -557,7 +557,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	rdb, err := redis.NewClient(cfg.RedisURL)
+	// M72: every Redis caller goes through one circuit breaker.
+	breakerThreshold, breakerCooldown, err := cfg.RedisBreaker()
+	if err != nil {
+		slog.Error("Refusing to start", "error", err)
+		os.Exit(1)
+	}
+	rdb, _, err := redis.NewClientWithBreaker(cfg.RedisURL, redis.BreakerConfig{FailureThreshold: breakerThreshold, Cooldown: breakerCooldown})
 	if err != nil {
 		slog.Error("Failed to connect to redis", "error", err)
 		os.Exit(1)
