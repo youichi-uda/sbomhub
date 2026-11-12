@@ -2400,7 +2400,7 @@ The project vulnerability list now shows the M70 labels (§21):
 
 **Who must act:** only deployments that inject their own scripts into the web pages.
 
-- Content-Security-Policy `script-src` is now `'self' 'nonce-…' 'strict-dynamic'`; `'unsafe-inline'` is gone. The proxy (`src/proxy.ts`) sets the CSP on every page request, so no page is prerendered. `/api`, `/_next` and `/_vercel` bypass the proxy and get a fallback CSP that allows no scripts; files under `/_next/static/` get it only when loaded as a document or frame, and ordinary script / style / image loads of them carry no CSP. `style-src` keeps `'unsafe-inline'`: React `style` attributes and Clerk's runtime styles cannot carry a nonce.
+- Content-Security-Policy `script-src` is now `'self' 'nonce-…' 'strict-dynamic'`; `'unsafe-inline'` is gone. The proxy (`src/proxy.ts`) sets the CSP on every page request, so no page is prerendered. `/api`, `/_next` and `/_vercel` bypass the proxy and get a fallback CSP that allows no scripts; files under `/_next/static/` get it only when loaded as a document or frame, or by a client that sends no `Sec-Fetch-Dest`; ordinary browser script / style / image loads of them carry no CSP. `style-src` keeps `'unsafe-inline'`: React `style` attributes and Clerk's runtime styles cannot carry a nonce.
 - `SBOMHUB_CSP_REPORT_ONLY=true` still applies at build time.
 - A script you inject must now carry the nonce. The proxy passes it to the app in the `x-nonce` request header.
 - The vulnerability list's distro badges (§22) can be reached by keyboard and touch. Evidence timestamps follow the viewer's locale and time zone.
@@ -2437,7 +2437,8 @@ the parameter, never the value. Before, these reached PostgreSQL and answered
 
 `llm_calls.finish_reason` stores the provider's value, with surrounding
 whitespace trimmed, when it is 1-30 ASCII letters, digits, `_ . : -` (every
-value OpenAI, Anthropic, Gemini and Ollama document today). An empty value is
+value OpenAI, Anthropic and Gemini document today; Ollama calls are recorded
+as `stop`, as before). An empty value is
 stored as NULL, as before. Anything else is stored as `unrecognized`. Before,
 a longer value, or one with U+0000 or invalid UTF-8, failed the insert, and
 with it the triage / CRA run. No migration.
@@ -2460,8 +2461,8 @@ carry it yet.
 **Who must act:** operators of more than one API replica (read §25.3); anyone whose CI relies on many simultaneous scans of one tenant (§25.2).
 
 ### 25.1 Redis circuit breaker
-Every Redis call now goes through a circuit breaker. After `SBOMHUB_REDIS_BREAKER_THRESHOLD` (default 5) consecutive failures — a dial/read error, the call's own timeout, or an answer that took 1s or more — Redis calls fail at once for `SBOMHUB_REDIS_BREAKER_COOLDOWN` (default 5s, 1s–30s), then one probe call decides. The caches, the rate limiters and the scan-status store have separate breakers. Transitions are logged (`redis circuit breaker opened` / `half-open` / `closed`).
-What each caller does when Redis is down is unchanged, only faster: the NVD and distro caches count a miss, API-key rate limiting answers 500, public-link rate limiting answers 503 — now immediately instead of after 1–3s per call. Measured against a frozen Redis (docker pause): 20 cache lookups 20.0s → 5.0s, 10 rate-limited calls 20.0s → 10.0s. Recovery after Redis returns takes up to one cool-down.
+Every Redis call now goes through a circuit breaker. After `SBOMHUB_REDIS_BREAKER_THRESHOLD` (default 5, 1–1000) consecutive failures — a dial/read error, the call's own timeout, or an answer that took 1s or more — Redis calls fail at once for `SBOMHUB_REDIS_BREAKER_COOLDOWN` (default 5s, 1s–30s), then one probe call decides. The caches, the rate limiters and the scan-status store have separate breakers. Transitions are logged (`redis circuit breaker opened` / `half-open` / `closed`).
+For the caches and rate limiters, what happens when Redis is down is unchanged, only faster: the NVD and distro caches count a miss, API-key rate limiting answers 500, public-link rate limiting answers 503 — now immediately instead of after 1–3s per call. Measured against a frozen Redis (docker pause): 20 cache lookups 20.0s → 5.0s, 10 rate-limited calls 20.0s → 10.0s. Recovery after Redis returns takes up to one cool-down. Starting a scan (an upload, for example) now waits up to 250ms for the shared scan-status write (§25.3) before going on without it.
 
 ### 25.2 Per-tenant scan concurrency: `SBOMHUB_SCAN_TENANT_CONCURRENCY` (default 2)
 At most this many upload, manual (`POST .../scan`) and forced (`POST /settings/scan/force`) scans of one tenant run at once per API process (`off` disables it, 1–64 otherwise). The periodic scheduler takes no slot, so its one scan at a time may run in addition. A scan that finds the slots taken waits, first come first served, within its own `SBOMHUB_SCAN_DEADLINE`: if the deadline fires while it waits it is reported failed (`deadline_exceeded`) without running. At most 32 scans per slot may wait; one beyond that fails at once with the new reason `queue_full`.
@@ -2469,7 +2470,7 @@ At most this many upload, manual (`POST .../scan`) and forced (`POST /settings/s
 ### 25.3 scan-status is shared through Redis
 `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` now reads a status kept in Redis, so a scan started on one replica is visible from every replica and survives restarts.
 - A scan whose API process stopped (crash, restart, kill) reads `failed` with the new reason `interrupted` once its 90s lease has run out and no other scan of the same SBOM is still running (until then it reads `running`), instead of `running` until retention or `unknown`.
-- If Redis cannot be read, or holds no entry, a scan that completed in the answering process reads `unknown` (another replica may be scanning), or `running` while that process still has status writes to Redis pending; `running` and `failed` are answered from the process itself.
+- If Redis cannot be read, or holds no entry, a scan that completed in the answering process reads `unknown` (another replica may be scanning). When Redis was read but held no entry while that process still has status writes to Redis pending, it reads `running` instead; `running` and `failed` are answered from the process itself.
 - A status entry younger than 75s does not read `completed`; such a scan reads `running` until then.
 - The response shape is unchanged; the new reason codes are `interrupted` and `queue_full`. The status is only read after the SBOM was found in the caller's project.
 
