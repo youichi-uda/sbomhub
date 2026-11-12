@@ -301,7 +301,7 @@ func (p *GeminiProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 		InputTokens:  parsed.UsageMetadata.PromptTokenCount,
 		OutputTokens: parsed.UsageMetadata.CandidatesTokenCount,
 		Model:        p.model, // Gemini does not echo the model id in the response
-		FinishReason: first.FinishReason,
+		FinishReason: NormalizeFinishReason(first.FinishReason),
 		CostUSD:      0,
 		RawResponse:  rawBody,
 	}, nil

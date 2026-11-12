@@ -204,7 +204,7 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req CompleteRequest) (
 		InputTokens:  parsed.Usage.InputTokens,
 		OutputTokens: parsed.Usage.OutputTokens,
 		Model:        parsed.Model,
-		FinishReason: parsed.StopReason,
+		FinishReason: NormalizeFinishReason(parsed.StopReason),
 		CostUSD:      0, // computed downstream in audit layer
 		RawResponse:  rawBody,
 	}, nil

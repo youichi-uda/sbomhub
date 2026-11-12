@@ -348,7 +348,7 @@ func (p *AzureOpenAIProvider) Complete(ctx context.Context, req CompleteRequest)
 		InputTokens:  parsed.Usage.PromptTokens,
 		OutputTokens: parsed.Usage.CompletionTokens,
 		Model:        parsed.Model,
-		FinishReason: choice.FinishReason,
+		FinishReason: NormalizeFinishReason(choice.FinishReason),
 		// ※要確認: Azure billing is per-deployment with a different price
 		// schedule than OpenAI direct; we leave CostUSD = 0 here and let
 		// the audit layer compute it once a per-deployment price table is

@@ -16,6 +16,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 // Provider is the common abstraction over LLM backends.
@@ -158,3 +159,49 @@ const (
 	RoleSystem    = "system"
 	RoleTool      = "tool"
 )
+
+// MaxFinishReasonLen is the width of llm_calls.finish_reason (VARCHAR(30),
+// migration 032).
+const MaxFinishReasonLen = 30
+
+// FinishReasonUnrecognized replaces a provider finish reason that is not a
+// short plain token (see NormalizeFinishReason). No provider uses it.
+const FinishReasonUnrecognized = "unrecognized"
+
+// NormalizeFinishReason bounds a provider-reported finish reason before it
+// reaches CompleteResponse.FinishReason, and from there llm_calls (M71).
+//
+// A value of 1-30 ASCII letters, digits, '_', '.', ':' or '-' is returned as
+// the provider spelled it (after trimming surrounding space), so stored
+// values keep their meaning across providers: "stop", "end_turn",
+// "MAX_TOKENS", and the longest one documented today,
+// "model_context_window_exceeded" (29). Anything else — longer, containing
+// NUL, invalid UTF-8, spaces, non-ASCII — becomes FinishReasonUnrecognized.
+// The empty string stays empty and is stored as NULL.
+//
+// Why normalise rather than widen the column: providers' values are
+// untrusted input, and PostgreSQL refuses U+0000 and invalid UTF-8 in any
+// text column whatever its width, so a write-time rule is needed either way.
+// With it, every value the column can receive fits VARCHAR(30), and the
+// column keeps meaning "a provider's termination code" instead of holding
+// arbitrary text. The original value is not lost for diagnosis: the raw
+// provider response is what response_hash covers (and response_body holds,
+// when stored).
+func NormalizeFinishReason(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if len(s) > MaxFinishReasonLen {
+		return FinishReasonUnrecognized
+	}
+	for i := 0; i < len(s); i++ {
+		switch b := s[i]; {
+		case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		case b == '_' || b == '.' || b == ':' || b == '-':
+		default:
+			return FinishReasonUnrecognized
+		}
+	}
+	return s
+}

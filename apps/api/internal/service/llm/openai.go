@@ -254,7 +254,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 		InputTokens:  parsed.Usage.PromptTokens,
 		OutputTokens: parsed.Usage.CompletionTokens,
 		Model:        parsed.Model,
-		FinishReason: choice.FinishReason,
+		FinishReason: NormalizeFinishReason(choice.FinishReason),
 		// ※要確認: cost computation deferred to audit layer (it has the
 		// per-model price table). We leave CostUSD = 0 here.
 		CostUSD:     0,
