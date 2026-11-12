@@ -47,6 +47,7 @@ var ErrCircuitOpen = errors.New("redis: circuit breaker open")
 const (
 	DefaultBreakerThreshold = 5
 	DefaultBreakerCooldown  = 5 * time.Second
+	DefaultBreakerSlowCall  = 1 * time.Second
 )
 
 // BreakerState is the breaker's state.
@@ -76,6 +77,11 @@ type BreakerConfig struct {
 	FailureThreshold int
 	// Cooldown is how long the breaker stays open before a probe.
 	Cooldown time.Duration
+	// SlowCall: an answer that took at least this long counts as a failure
+	// (Codex M72 R12 Medium-3). A healthy Redis answers in milliseconds; one
+	// answering each command in a second or more fails every multi-command
+	// caller's deadline while its single successes kept resetting the count.
+	SlowCall time.Duration
 	// Now is the clock (tests); nil is time.Now.
 	Now func() time.Time
 	// Logger receives the state transitions; nil is slog.Default().
@@ -87,6 +93,7 @@ type BreakerConfig struct {
 type Breaker struct {
 	threshold int
 	cooldown  time.Duration
+	slowCall  time.Duration
 	now       func() time.Time
 	log       *slog.Logger
 
@@ -108,7 +115,10 @@ type Breaker struct {
 
 // NewBreaker returns a closed breaker.
 func NewBreaker(cfg BreakerConfig) *Breaker {
-	b := &Breaker{threshold: cfg.FailureThreshold, cooldown: cfg.Cooldown, now: cfg.Now, log: cfg.Logger}
+	b := &Breaker{threshold: cfg.FailureThreshold, cooldown: cfg.Cooldown, slowCall: cfg.SlowCall, now: cfg.Now, log: cfg.Logger}
+	if b.slowCall <= 0 {
+		b.slowCall = DefaultBreakerSlowCall
+	}
 	if b.threshold <= 0 {
 		b.threshold = DefaultBreakerThreshold
 	}
@@ -139,6 +149,7 @@ func (b *Breaker) State() BreakerState {
 type ticket struct {
 	epoch uint64
 	probe bool
+	start time.Time
 }
 
 // allow admits a call or refuses it with ErrCircuitOpen.
@@ -147,7 +158,7 @@ func (b *Breaker) allow() (ticket, error) {
 	defer b.mu.Unlock()
 	switch b.state {
 	case BreakerClosed:
-		return ticket{epoch: b.epoch}, nil
+		return ticket{epoch: b.epoch, start: b.now()}, nil
 	case BreakerOpen:
 		if b.now().Before(b.openedAt.Add(b.cooldown)) {
 			b.rejected++
@@ -161,7 +172,7 @@ func (b *Breaker) allow() (ticket, error) {
 			return ticket{}, ErrCircuitOpen
 		}
 		b.probing = true
-		return ticket{epoch: b.epoch, probe: true}, nil
+		return ticket{epoch: b.epoch, probe: true, start: b.now()}, nil
 	}
 }
 
@@ -177,6 +188,9 @@ const (
 func (b *Breaker) record(t ticket, o outcome) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if o == outcomeSuccess && !t.start.IsZero() && b.now().Sub(t.start) >= b.slowCall {
+		o = outcomeFailure // answered, but too slowly to count as healthy
+	}
 	if t.epoch != b.epoch {
 		return // admitted before a transition; its answer is stale
 	}

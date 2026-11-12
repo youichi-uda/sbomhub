@@ -383,3 +383,49 @@ func TestClassify_ReplyAtTheDeadlineIsASuccess(t *testing.T) {
 		t.Fatalf("error reply at the deadline: %v, want success", got)
 	}
 }
+
+// slowServer answers every command successfully but advances the fake clock
+// by d first: a Redis that answers, slowly.
+type slowServer struct {
+	clk *fakeClock
+	d   time.Duration
+}
+
+func (s slowServer) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+func (s slowServer) ProcessHook(goredis.ProcessHook) goredis.ProcessHook {
+	return func(ctx context.Context, cmd goredis.Cmder) error { s.clk.Add(s.d); cmd.SetErr(nil); return nil }
+}
+func (s slowServer) ProcessPipelineHook(goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []goredis.Cmder) error { s.clk.Add(s.d); return nil }
+}
+
+// Codex M72 R12 Medium-3: answers slower than the slow-call bound count as
+// failures, so a Redis answering every command in seconds (each phase of a
+// request still failing its own deadline) opens the breaker.
+func TestBreaker_SlowSuccessesOpenIt(t *testing.T) {
+	clk := newFakeClock()
+	bs := NewBreakers(BreakerConfig{FailureThreshold: 3, Cooldown: 10 * time.Second, Now: clk.Now})
+	c := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = c.Close() })
+	c.AddHook(bs.Hook())
+	c.AddHook(slowServer{clk, 2 * time.Second})
+	for i := 0; i < 3; i++ {
+		_ = c.Incr(context.Background(), "k").Err()
+	}
+	if st := bs.Class(ClassDefault).State(); st != BreakerOpen {
+		t.Fatalf("after 3 answers of 2s each: %v, want open", st)
+	}
+	// Fast answers keep it closed.
+	clk2 := newFakeClock()
+	bs2 := NewBreakers(BreakerConfig{FailureThreshold: 3, Now: clk2.Now})
+	c2 := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = c2.Close() })
+	c2.AddHook(bs2.Hook())
+	c2.AddHook(slowServer{clk2, 10 * time.Millisecond})
+	for i := 0; i < 10; i++ {
+		_ = c2.Incr(context.Background(), "k").Err()
+	}
+	if st := bs2.Class(ClassDefault).State(); st != BreakerClosed {
+		t.Fatalf("fast answers: %v, want closed", st)
+	}
+}
