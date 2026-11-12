@@ -214,6 +214,13 @@ test.describe('M70 distro labels', () => {
       );
       await panel.screenshot({ path: test.info().outputPath(`distro-evidence-${locale}.png`) });
 
+      // Hide closes it again (Codex M71 R1 Medium: it used to stay open).
+      await fixedEntry.getByRole('button', { name: m.hideEvidenceFor.replace('{cve}', DISTRO.fixed) }).click();
+      await expect(panel).toHaveCount(0);
+      await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      await toggle.click();
+      await expect(panel).toBeVisible();
+
       // distro_affected with basis = release: no caveat, no review note
       const affectedEntry = page.locator(`[data-vuln-cve-id="${DISTRO.affected}"]`);
       await affectedEntry.getByRole('button', { name: m.showEvidenceFor.replace('{cve}', DISTRO.affected) }).click();
