@@ -41,6 +41,7 @@ const (
 	evFinish
 	evMark
 	evRejoin
+	evMerge
 )
 
 type sharedEvent struct {
@@ -51,6 +52,9 @@ type sharedEvent struct {
 	reasons []string
 	at      time.Time
 	done    chan struct{} // closed once applied
+	merged  *mergeSet     // evMerge
+	// applying: an evMerge being applied; it takes no more writes.
+	applying bool
 }
 
 type sbomQueue struct {
@@ -67,15 +71,18 @@ func (t *ScanTracker) logSharedError(msg string, sbomID uuid.UUID, err error) {
 }
 
 // enqueue appends ev to sbomID's queue and starts its drain. t.qMu is held.
-func (t *ScanTracker) enqueueLocked(sbomID uuid.UUID, ev *sharedEvent) bool {
+func (t *ScanTracker) enqueueLocked(sbomID uuid.UUID, ev *sharedEvent) {
 	q := t.queues[sbomID]
 	if q == nil {
 		q = &sbomQueue{}
 		t.queues[sbomID] = q
 	}
-	if len(q.events) >= maxQueuedWrites {
-		slog.Warn("scan status: too many unwritten shared writes for the SBOM; dropping one", "sbom_id", sbomID)
-		return false
+	if len(q.events) >= t.queueCap {
+		// Full: coalesce into one merge event at the tail (Codex M72 R5
+		// High-3). It stays last, so call order is kept, and nothing that
+		// carries a failure is dropped.
+		t.coalesceLocked(sbomID, q, ev)
+		return
 	}
 	ev.at = time.Now()
 	ev.done = make(chan struct{})
@@ -85,7 +92,40 @@ func (t *ScanTracker) enqueueLocked(sbomID uuid.UUID, ev *sharedEvent) bool {
 		go t.drain(sbomID)
 	}
 	t.ensureHeartbeatLocked()
-	return true
+}
+
+// coalesceLocked folds ev into an open merge event at the queue's tail.
+// t.qMu is held.
+func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedEvent) {
+	tail := q.events[len(q.events)-1]
+	if tail.kind != evMerge || tail.applying {
+		tail = &sharedEvent{kind: evMerge, merged: &mergeSet{}, at: time.Now(), done: make(chan struct{})}
+		q.events = append(q.events, tail)
+		slog.Warn("scan status: shared writes of the SBOM are backing up; coalescing them",
+			"sbom_id", sbomID, "queued", len(q.events))
+	}
+	m := tail.merged
+	room := len(m.begins)+len(m.finishes) < maxMergeRuns
+	switch ev.kind {
+	case evBegin, evRejoin:
+		if room {
+			m.begins = append(m.begins, ev.gen)
+		}
+	case evFinish:
+		if room {
+			m.finishes = append(m.finishes, ev.gen)
+		}
+		if ev.msg != "" {
+			m.addFailure(ev.msg, ev.reasons)
+		}
+	case evMark:
+		if ev.state == ScanStateFailed && ev.msg != "" {
+			m.addFailure(ev.msg, ev.reasons)
+		}
+	}
+	// ev itself is never queued: a Begin waiting on it waits on the merge.
+	ev.at = tail.at
+	ev.done = tail.done
 }
 
 // drain applies sbomID's queued writes in order until the queue is empty or a
@@ -100,9 +140,20 @@ func (t *ScanTracker) drain(sbomID uuid.UUID) {
 			return
 		}
 		ev := q.events[0]
+		var merged *mergeSet
+		if ev.kind == evMerge {
+			// Frozen from now on: later overflow opens a new merge event.
+			ev.applying = true
+			merged = ev.merged.clone()
+		}
 		t.qMu.Unlock()
 
-		err := t.apply(sbomID, ev)
+		var err error
+		if merged != nil {
+			err = t.shared.merge(context.Background(), sbomID, merged)
+		} else {
+			err = t.apply(sbomID, ev)
+		}
 
 		t.qMu.Lock()
 		if err != nil {
@@ -125,9 +176,10 @@ func (t *ScanTracker) apply(sbomID uuid.UUID, ev *sharedEvent) error {
 	case evRejoin:
 		return t.shared.rejoin(ctx, sbomID, ev.gen)
 	case evFinish:
-		recorded, err := t.shared.finish(ctx, sbomID, ev.gen, ev.msg, ev.reasons)
-		if err == nil && !recorded {
-			slog.Info("scan status: outcome not recorded in the shared store; the run was superseded", "sbom_id", sbomID)
+		known, err := t.shared.finish(ctx, sbomID, ev.gen, ev.msg, ev.reasons)
+		if err == nil && !known {
+			slog.Info("scan status: the shared store did not know this run; its outcome was merged into the current group",
+				"sbom_id", sbomID, "failed", ev.msg != "")
 		}
 		return err
 	default:
@@ -150,9 +202,7 @@ func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) *sharedEven
 	t.qMu.Lock()
 	defer t.qMu.Unlock()
 	t.live[runKey{sbomID, gen}] = time.Now()
-	if !t.enqueueLocked(sbomID, ev) {
-		return nil
-	}
+	t.enqueueLocked(sbomID, ev)
 	return ev
 }
 
@@ -278,14 +328,6 @@ func (t *ScanTracker) heartbeatPass() bool {
 		t.qMu.Unlock()
 	}
 	return true
-}
-
-// localActive reports whether a run of sbomID is active in this process.
-func (t *ScanTracker) localActive(sbomID uuid.UUID) bool {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	e, ok := t.entries[sbomID]
-	return ok && len(e.active) > 0 && time.Since(e.updatedAt) <= t.retention
 }
 
 // pendingShared reports whether this process has writes of sbomID that have

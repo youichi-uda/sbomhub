@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -210,24 +211,57 @@ redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated
 expire(ARGV[3])
 return 1`)
 
-// ARGV: gen, ttl ms, error marker (” = completed), reasons JSON.
-// Returns 1 if recorded, 0 if the run was not (or no longer) part of the group.
+// ARGV: gen, ttl ms, error marker (empty = completed), reasons JSON.
+// Returns 1 if the run was active or swept as interrupted, 2 if Redis did not
+// know it (its begin never landed, or it lapsed and a new group started). A
+// failure is recorded EITHER WAY (Codex M72 R5 High-2): a failure is never
+// dropped, at worst it is attributed to a later group — a conservative
+// "failed", never a false "completed".
 var scanStatusFinish = scanStatusScript(`
 local now = nowms()
-local exists = redis.call('EXISTS', K) == 1
 local active = redis.call('ZREM', R, ARGV[1]) == 1
 sweep(now, ARGV[1])
 local wasLost = redis.call('ZREM', L, ARGV[1]) == 1
-if not active and exists and not wasLost then
-  -- Only a run swept as interrupted (its process lost Redis for longer than
-  -- the lease) may still report; anything else was superseded.
-  return 0
-end
 local ok, rs = pcall(cjson.decode, ARGV[4])
 if not ok or type(rs) ~= 'table' then rs = {} end
 add_failure(ARGV[3], rs)
 publish(now)
 expire(ARGV[2])
+if active or wasLost then return 1 end
+return 2`)
+
+// ARGV: JSON {"b": [gen...], "f": [gen...], "x": [[marker, [reason...]]...]},
+// lease ms, ttl ms. The coalesced writes of a queue that overflowed: runs
+// that began (joined to the current group, never a new one), runs that
+// finished, and the failures among them (Codex M72 R5 High-3).
+var scanStatusMerge = scanStatusScript(`
+local now = nowms()
+local ok, m = pcall(cjson.decode, ARGV[1])
+if not ok or type(m) ~= 'table' then return redis.error_reply('bad merge') end
+sweep(now, nil)
+if type(m.b) == 'table' then
+  for _, g in ipairs(m.b) do
+    redis.call('ZREM', L, g)
+    redis.call('ZADD', R, now + tonumber(ARGV[2]), g)
+  end
+end
+if type(m.f) == 'table' then
+  for _, g in ipairs(m.f) do
+    redis.call('ZREM', R, g)
+    redis.call('ZREM', L, g)
+  end
+end
+if type(m.x) == 'table' then
+  for _, x in ipairs(m.x) do
+    if type(x) == 'table' and type(x[1]) == 'string' then
+      local rs = {}
+      if type(x[2]) == 'table' then rs = x[2] end
+      add_failure(x[1], rs)
+    end
+  end
+end
+publish(now)
+expire(ARGV[3])
 return 1`)
 
 // ARGV: gen, lease ms, ttl ms. Returns 1 while the run is (again) active, 0
@@ -295,12 +329,16 @@ return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or 
 // scanStatusStore is what the tracker needs from shared storage.
 type scanStatusStore interface {
 	begin(ctx context.Context, sbomID uuid.UUID, gen uint64) error
-	finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) (recorded bool, err error)
+	// finish records run gen's outcome; known is false when the store did
+	// not know the run (its failure is recorded anyway).
+	finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) (known bool, err error)
 	// heartbeatMany renews the leases of runs in one round trip; active[i]
 	// is false for a run that was superseded.
 	heartbeatMany(ctx context.Context, runs []runKey) (active []bool, err error)
 	// rejoin makes a live run active again in the current group.
 	rejoin(ctx context.Context, sbomID uuid.UUID, gen uint64) error
+	// merge applies a coalesced overflow (see scanStatusMerge).
+	merge(ctx context.Context, sbomID uuid.UUID, m *mergeSet) error
 	mark(ctx context.Context, sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) error
 	get(ctx context.Context, sbomID uuid.UUID) (state ScanState, errMsg string, reasons []string, found bool, err error)
 }
@@ -344,6 +382,76 @@ func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen
 	n, err := scanStatusFinish.Run(ctx, s.client, scanStatusKeys(sbomID),
 		genString(gen), s.ttl.Milliseconds(), errMsg, reasonsJSON(reasons)).Int()
 	return n == 1, err
+}
+
+// mergeSet is a queue overflow's coalesced writes.
+type mergeSet struct {
+	begins   []uint64
+	finishes []uint64
+	failures []mergeFailure
+}
+
+type mergeFailure struct {
+	msg     string
+	reasons []string
+}
+
+// maxMergeRuns bounds the run ids one overflow keeps; beyond it a begin is
+// dropped (the run rejoins on its next heartbeat) and a finish leaves its run
+// to be swept as interrupted — conservative either way. Failures are kept
+// whatever the count (their set is bounded by the marker vocabulary).
+const maxMergeRuns = 4096
+
+func (m *mergeSet) addFailure(msg string, reasons []string) {
+	for i := range m.failures {
+		if m.failures[i].msg == msg {
+			for _, r := range reasons {
+				if !slices.Contains(m.failures[i].reasons, r) {
+					m.failures[i].reasons = append(m.failures[i].reasons, r)
+				}
+			}
+			return
+		}
+	}
+	m.failures = append(m.failures, mergeFailure{msg, append([]string(nil), reasons...)})
+}
+
+func (m *mergeSet) clone() *mergeSet {
+	c := &mergeSet{begins: slices.Clone(m.begins), finishes: slices.Clone(m.finishes)}
+	for _, f := range m.failures {
+		c.failures = append(c.failures, mergeFailure{f.msg, slices.Clone(f.reasons)})
+	}
+	return c
+}
+
+func (m *mergeSet) json() string {
+	gens := func(g []uint64) []string {
+		out := make([]string, len(g))
+		for i, v := range g {
+			out[i] = genString(v)
+		}
+		return out
+	}
+	x := make([][]any, 0, len(m.failures))
+	for _, f := range m.failures {
+		r := f.reasons
+		if r == nil {
+			r = []string{}
+		}
+		x = append(x, []any{f.msg, r})
+	}
+	b, err := json.Marshal(map[string]any{"b": gens(m.begins), "f": gens(m.finishes), "x": x})
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+func (s *redisScanStatusStore) merge(ctx context.Context, sbomID uuid.UUID, m *mergeSet) error {
+	ctx, cancel := s.opCtx(ctx)
+	defer cancel()
+	return scanStatusMerge.Run(ctx, s.client, scanStatusKeys(sbomID),
+		m.json(), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
 func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey) ([]bool, error) {

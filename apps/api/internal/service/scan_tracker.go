@@ -64,6 +64,7 @@ type ScanTracker struct {
 	queues map[uuid.UUID]*sbomQueue
 	// live: this process's active runs (lease renewal), with their start.
 	live       map[runKey]time.Time
+	queueCap   int // maxQueuedWrites; smaller in tests
 	hbActive   bool
 	hbInterval time.Duration
 }
@@ -99,6 +100,15 @@ func (t *ScanTracker) put(sbomID uuid.UUID, e scanEntry) {
 	t.entries[sbomID] = e
 }
 
+// snapshot returns, atomically, whether a run of sbomID is active in this
+// process and the entry's revision.
+func (t *ScanTracker) snapshot(sbomID uuid.UUID) (bool, uint64) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	e, ok := t.entries[sbomID]
+	return ok && len(e.active) > 0 && time.Since(e.updatedAt) <= t.retention, e.rev
+}
+
 // revision returns sbomID's entry revision (0 without an entry).
 func (t *ScanTracker) revision(sbomID uuid.UUID) uint64 {
 	t.mu.RLock()
@@ -115,6 +125,7 @@ func NewScanTracker() *ScanTracker {
 		retention:  1 * time.Hour,
 		queues:     map[uuid.UUID]*sbomQueue{},
 		live:       map[runKey]time.Time{},
+		queueCap:   maxQueuedWrites,
 		hbInterval: ScanStatusHeartbeat,
 	}
 }
@@ -203,6 +214,10 @@ func (t *ScanTracker) Begin(sbomID uuid.UUID) uint64 {
 	t.waitBegin(ev)
 	return gen
 }
+
+// testHookAfterLocalActiveCheck runs inside GetDetail after its local
+// snapshot, before the Redis read (tests only).
+var testHookAfterLocalActiveCheck func()
 
 // testHookAfterLocalBegin runs once Begin's local state change is visible
 // (tests only).
@@ -311,10 +326,15 @@ func (t *ScanTracker) GetDetail(sbomID uuid.UUID) (ScanState, string, []string) 
 		return t.getDetailLocal(sbomID)
 	}
 	for attempt := 0; attempt < 3; attempt++ {
-		if t.localActive(sbomID) {
+		// One snapshot of "active here" and the revision (Codex M72 R5
+		// High-1): any local transition after it changes the revision.
+		active, rev := t.snapshot(sbomID)
+		if active {
 			return t.getDetailLocal(sbomID)
 		}
-		rev := t.revision(sbomID)
+		if f := testHookAfterLocalActiveCheck; f != nil {
+			f()
+		}
 		state, msg, reasons, found, err := t.shared.get(context.Background(), sbomID)
 		if t.revision(sbomID) != rev {
 			continue

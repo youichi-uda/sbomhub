@@ -107,6 +107,25 @@ func (m *memStore) rejoin(ctx context.Context, id uuid.UUID, gen uint64) error {
 	return nil
 }
 
+func (m *memStore) merge(ctx context.Context, id uuid.UUID, ms *mergeSet) error {
+	for _, g := range ms.begins {
+		if err := m.rejoin(ctx, id, g); err != nil {
+			return err
+		}
+	}
+	for _, g := range ms.finishes {
+		if _, err := m.finish(ctx, id, g, "", nil); err != nil {
+			return err
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, f := range ms.failures {
+		m.state[id], m.msg[id], m.reasons[id] = ScanStateFailed, f.msg, f.reasons
+	}
+	return nil
+}
+
 func (m *memStore) mark(_ context.Context, id uuid.UUID, st ScanState, msg string, reasons []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -437,13 +456,51 @@ func (g *groupStore) begin(ctx context.Context, id uuid.UUID, gen uint64) error 
 func (g *groupStore) finish(_ context.Context, id uuid.UUID, gen uint64, msg string, _ []string) (bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.runs[id][gen] {
-		return false, nil
+	if g.down {
+		return false, errStoreDown
 	}
+	known := g.runs[id][gen]
 	delete(g.runs[id], gen)
+	// Like the Redis store: a failure counts even for a run it did not know.
 	if msg != "" {
 		g.failed[id] = true
 	}
+	g.publishLocked(id)
+	return known, nil
+}
+
+func (g *groupStore) rejoin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	return g.memStore.rejoin(ctx, id, gen)
+}
+
+func (g *groupStore) merge(ctx context.Context, id uuid.UUID, ms *mergeSet) error {
+	if err := func() error {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.down {
+			return errStoreDown
+		}
+		if g.runs[id] == nil {
+			g.runs[id] = map[uint64]bool{}
+		}
+		for _, b := range ms.begins {
+			g.runs[id][b] = true
+		}
+		for _, f := range ms.finishes {
+			delete(g.runs[id], f)
+		}
+		if len(ms.failures) > 0 {
+			g.failed[id] = true
+		}
+		g.publishLocked(id)
+		return nil
+	}(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (g *groupStore) publishLocked(id uuid.UUID) {
 	switch {
 	case len(g.runs[id]) > 0:
 		g.state[id] = ScanStateRunning
@@ -452,7 +509,6 @@ func (g *groupStore) finish(_ context.Context, id uuid.UUID, gen uint64, msg str
 	default:
 		g.state[id] = ScanStateCompleted
 	}
-	return true, nil
 }
 
 // delayBeginStore delays the begin of one generation.
@@ -612,5 +668,59 @@ func TestM72R4_UnreadableStoreNeverYieldsALocalCompleted(t *testing.T) {
 	}
 	if st, _, _ := a.GetDetail(running); st != ScanStateRunning {
 		t.Errorf("running, store unreadable: %s, want running", st)
+	}
+}
+
+// Codex M72 R5 High-1: GetDetail snapshots "active here" and the revision in
+// one step. A Begin landing between the two (and its write draining before
+// the pending check) must not let a stale "completed" through.
+func TestM72R5_SnapshotIsAtomic(t *testing.T) {
+	store := newMemStore()
+	a := trackerOn(store, time.Hour)
+	id := uuid.New()
+	a.Finish(id, a.Begin(id), nil, "")
+	settle(t, a, id)
+	testHookAfterLocalActiveCheck = func() {
+		testHookAfterLocalActiveCheck = nil
+		a.Begin(id)
+		settle(t, a, id)
+	}
+	defer func() { testHookAfterLocalActiveCheck = nil }()
+	// Redis answers as it was before the Begin (the read was in flight).
+	a.shared = staleGetStore{memStore: store, state: ScanStateCompleted}
+	if st, _, _ := a.GetDetail(id); st != ScanStateRunning {
+		t.Fatalf("Begin between the active check and the revision: %s, want running", st)
+	}
+}
+
+// staleGetStore answers every get with a fixed state.
+type staleGetStore struct {
+	*memStore
+	state ScanState
+}
+
+func (s staleGetStore) get(context.Context, uuid.UUID) (ScanState, string, []string, bool, error) {
+	return s.state, "", nil, true, nil
+}
+
+// Codex M72 R5 High-3: queue overflow must not lose a failure. With the
+// queue full, a failed run's outcome is still applied once Redis catches up.
+func TestM72R5_OverflowKeepsFailures(t *testing.T) {
+	store := newGroupStore()
+	store.setDown(true)
+	a := trackerOn(store, 5*time.Millisecond)
+	a.queueCap = 8
+	id := uuid.New()
+	long := a.Begin(id)
+	for i := 0; i < a.queueCap; i++ { // fill the queue with harmless runs
+		a.Finish(id, a.Begin(id), nil, "")
+	}
+	failing := a.Begin(id)
+	a.Finish(id, failing, []string{ScanReasonFetchFailed}, "nvd: scan failed (fetch_failed)")
+	a.Finish(id, long, nil, "")
+	store.setDown(false)
+	settle(t, a, id)
+	if st, _, _ := trackerOn(store, time.Hour).GetDetail(id); st != ScanStateFailed {
+		t.Fatalf("after overflow: %s, want failed", st)
 	}
 }

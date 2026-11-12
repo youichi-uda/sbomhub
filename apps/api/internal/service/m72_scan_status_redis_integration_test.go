@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -289,5 +290,27 @@ func TestM72R4_LostKeyCreatedByAReadExpires(t *testing.T) {
 	detail(reader, id, dead)
 	if ttl := rdb.PTTL(context.Background(), scanStatusKeys(id)[2]).Val(); ttl <= 0 {
 		t.Fatalf(":lost PTTL %s, want a positive TTL", ttl)
+	}
+}
+
+// Codex M72 R5 High-2: a finish Redis does not know (its run lapsed and a new
+// group started, and the rejoin never happened) still contributes its
+// failure; it is never dropped.
+func TestM72R5_UnknownFinishStillCountsItsFailure(t *testing.T) {
+	rdb := m72Redis(t)
+	lapsing := process(rdb, 40*time.Millisecond, time.Hour)
+	other := process(rdb, 0, time.Hour)
+	reader := process(rdb, 0, time.Hour)
+	id := uuid.New()
+	ga := lapsing.Begin(id)
+	time.Sleep(80 * time.Millisecond)
+	detail(reader, id, lapsing) // sweeps A as interrupted
+	gb := other.Begin(id)       // no active run: a new group
+	settle(t, other, id)
+	lapsing.Finish(id, ga, []string{ScanReasonFetchFailed}, "nvd: scan failed (fetch_failed)")
+	other.Finish(id, gb, nil, "")
+	st, msg, _ := detail(reader, id, lapsing, other)
+	if st != ScanStateFailed || !strings.Contains(msg, "nvd: scan failed (fetch_failed)") {
+		t.Fatalf("group outcome %s %q, want failed with A's failure", st, msg)
 	}
 }
