@@ -310,8 +310,15 @@ func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) <-chan stru
 			return
 		}
 		t.qMu.Lock()
+		defer t.qMu.Unlock()
+		if t.live[runKey{sbomID, gen}] != lr {
+			// The run already finished (its finish may have landed before
+			// this intent): remove the intent again, behind that finish
+			// (Codex M72 R19 Medium-3).
+			t.enqueueLocked(sbomID, &sharedEvent{kind: evFinish, gen: gen})
+			return
+		}
 		lr.acked = true // its lease (as an intent) is renewed from now on
-		t.qMu.Unlock()
 	}()
 	return done
 }
