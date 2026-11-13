@@ -95,6 +95,28 @@ func TestCVSSVersion_DashboardSSVC_Integration(t *testing.T) {
 		}
 	}
 
+	// Another tenant's immediate assessment on a vulnerability with a version.
+	// GetImmediateAssessments has no tenant filter of its own (RLS scopes it),
+	// so it must not surface this row — and with it the version — to tenant A
+	// (Codex R1 Low: the assertions below ignored rows they did not seed).
+	other := seedIntegrationTenant(t, migDB, "cvssver-dash-ssvc-other")
+	otherProject := uuid.New()
+	if err := execAsTenant(t, migDB, other, `
+		INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, 'cvssver-other')
+	`, otherProject, other); err != nil {
+		t.Fatalf("seed other project: %v", err)
+	}
+	otherAssessment := uuid.New()
+	if err := execAsTenant(t, migDB, other, `
+		INSERT INTO ssvc_assessments (id, project_id, tenant_id, vulnerability_id, cve_id,
+			exploitation, automatable, technical_impact, mission_prevalence, safety_impact,
+			decision, exploitation_auto, automatable_auto, assessed_by, assessed_at, notes)
+		VALUES ($1, $2, $3, $4, $5, 'none', 'no', 'partial', 'minimal', 'minimal',
+			'immediate', false, false, NULL, NOW(), NULL)
+	`, otherAssessment, otherProject, other, scoredID, cves[scoredID]); err != nil {
+		t.Fatalf("seed other tenant ssvc_assessment: %v", err)
+	}
+
 	want := map[string]*string{}
 	for _, s := range seed {
 		if v, ok := s.version.(string); ok {
@@ -148,6 +170,10 @@ func TestCVSSVersion_DashboardSSVC_Integration(t *testing.T) {
 		}
 		seen := 0
 		for _, a := range imm {
+			if a.ID == otherAssessment || a.TenantID != tenant {
+				t.Fatalf("GetImmediateAssessments returned another tenant's assessment %s (tenant %s)",
+					a.ID, a.TenantID)
+			}
 			if _, ok := want[a.CVEID]; ok {
 				seen++
 			}
