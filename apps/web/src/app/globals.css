@@ -42,6 +42,18 @@
   --color-background: hsl(var(--background));
   --color-foreground: hsl(var(--foreground));
 
+  /*
+    card / popover were never defined (not in the v3 tailwind.config.ts
+    either), so `bg-card` / `bg-popover` generated no CSS and the Tooltip /
+    Select panels were transparent. src/app/theme-tokens.test.mjs fails
+    when a used token utility has no definition.
+  */
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
   --color-primary: hsl(var(--primary));
   --color-primary-foreground: hsl(var(--primary-foreground));
 
@@ -117,6 +129,10 @@
   :root {
     --background: 0 0% 100%;
     --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
     --primary: 222.2 47.4% 11.2%;
     --primary-foreground: 210 40% 98%;
     --secondary: 210 40% 96.1%;
@@ -136,6 +152,10 @@
   .dark {
     --background: 222.2 84% 4.9%;
     --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
     --primary: 210 40% 98%;
     --primary-foreground: 222.2 47.4% 11.2%;
     --secondary: 217.2 32.6% 17.5%;

@@ -154,7 +154,12 @@ function TooltipContent({
       role="tooltip"
       id={context.tooltipId}
       className={cn(
-        "absolute z-50 overflow-hidden rounded-md border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95",
+        // w-max + max-w-xs: the panel is positioned inside the trigger's
+        // inline-block wrapper, so without an explicit width it shrank to
+        // the badge's width and wrapped every word. The former
+        // `animate-in fade-in-0 zoom-in-95` came from tailwindcss-animate,
+        // which was never installed, and generated nothing.
+        "absolute z-50 w-max max-w-xs overflow-hidden rounded-md border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md",
         positionClasses[side],
         className
       )}
