@@ -134,7 +134,10 @@ const TabsList = React.forwardRef<
         // max-w-full + overflow-x-auto: a tab row wider than a phone screen
         // scrolls inside itself instead of widening the page;
         // justify-center-safe keeps the first tab reachable when it does.
-        "inline-flex h-10 max-w-full items-center justify-center-safe overflow-x-auto rounded-md bg-muted p-1 text-muted-foreground",
+        // min-h-10 (not h-10) + overflow-y-hidden: a classic scrollbar
+        // (Windows / Firefox) adds its height below the tabs instead of
+        // clipping them (e2e/classic-scrollbars.spec.ts).
+        "inline-flex min-h-10 max-w-full items-center justify-center-safe overflow-x-auto overflow-y-hidden rounded-md bg-muted p-1 text-muted-foreground",
         className
       )}
       {...props}
