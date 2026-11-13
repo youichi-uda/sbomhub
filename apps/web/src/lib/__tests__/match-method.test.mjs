@@ -399,10 +399,19 @@ describe("findingMatchBadge", () => {
     assert.equal(findingMatchBadge("nvd_cpe", "unknown")?.confidence, "unknown");
     assert.equal(findingMatchBadge("nvd_keyword", "high")?.confidence, "low");
     assert.equal(findingMatchBadge("nvd_cpe_distro", "high")?.confidence, "medium");
-    // absent or unrecognised API value: the method decides
-    assert.equal(findingMatchBadge("nvd_cpe", undefined)?.confidence, "high");
-    assert.equal(findingMatchBadge("nvd_cpe", "distro_fixed")?.confidence, "high");
-    assert.equal(findingMatchBadge("nvd_keyword", "certain")?.confidence, "low");
+  });
+
+  // Codex R1 Low-1: an absent or unrecognised match_confidence must not
+  // fail open to the method's maximum (a version-skewed or malformed
+  // response would otherwise show "high confidence" with no review).
+  test("an absent or unrecognised API confidence reads as unknown, for review", () => {
+    for (const c of [undefined, null, "", "distro_fixed", "certain", "very_low", 3]) {
+      const b = findingMatchBadge("nvd_cpe", c);
+      assert.equal(b?.confidence, "unknown", String(c));
+      assert.equal(b?.needsReview, true, String(c));
+      assert.equal(b?.label, "methodNvdCpe");
+    }
+    assert.equal(findingMatchBadge("nvd_keyword", "certain")?.confidence, "unknown");
   });
 
   test("a pre-M60 link is shown as not recorded, for review", () => {

@@ -75,9 +75,15 @@ function* sourceFiles(dir) {
 
 // A string literal is treated as a class list when it holds at least one
 // unmistakable utility; only then are its other tokens checked.
-const UTILITY_HINT =
-  /^(?:[a-z-]+:)*-?(?:flex|grid|inline-flex|block|hidden|text-|bg-|border|rounded|p[xytrbl]?-|m[xytrbl]?-|w-|h-|gap-|items-|justify-|space-[xy]-|font-|shadow|ring)/;
-const CLASS_TOKEN = /^!?-?[a-z][a-z0-9:\-/[\]().%#_,]*[a-z0-9\])%]$/;
+// Variants, including arbitrary ones (`[&_tr]:`, `data-[state=selected]:`).
+const VARIANTS = String.raw`(?:(?:[a-z0-9-]*\[[^\]\s]+\]|[a-z0-9-]+):)*`;
+const UTILITY_HINT = new RegExp(
+  `^${VARIANTS}-?(?:flex|grid|inline-flex|block|hidden|text-|bg-|border|rounded|p[xytrbl]?-|m[xytrbl]?-|w-|h-|gap-|items-|justify-|space-[xy]-|font-|shadow|ring)`,
+);
+// A utility candidate, optionally behind (arbitrary) variants. The utility
+// itself must end in a letter, digit, `]`, `)` or `%`, which keeps prose
+// such as "block:" out.
+const CLASS_TOKEN = new RegExp(String.raw`^${VARIANTS}!?-?[a-z][a-z0-9\-/[\]().%#_,]*[a-z0-9\])%]$`);
 // Classes that intentionally generate no CSS of their own.
 const MARKER_CLASSES = new Set(["group", "peer"]);
 
@@ -86,8 +92,10 @@ function collectClassTokens() {
   const uses = new Map();
   for (const file of sourceFiles(srcRoot)) {
     const text = readFileSync(file, "utf8");
-    for (const m of text.matchAll(/["'`]([^"'`\n]{2,600})["'`]/g)) {
-      const tokens = m[1].split(/\s+/).filter(Boolean);
+    // Single-line '...' / "..." literals, and `...` template literals that
+    // may span lines (a class list broken across lines).
+    for (const m of text.matchAll(/["']([^"'`\n]{2,600})["']|`([^`]{2,2000})`/g)) {
+      const tokens = (m[1] ?? m[2]).split(/\s+/).filter(Boolean);
       if (!tokens.some((t) => UTILITY_HINT.test(t))) continue;
       for (const t of tokens) {
         // Only hyphenated / variant tokens: a bare word in a class-ish
@@ -194,6 +202,17 @@ describe("every class-like token in src/ generates CSS", () => {
   test("the scan sees the class lists", () => {
     assert.ok(classUses.size > 200, `only ${classUses.size} class tokens found — the class scan is broken`);
     assert.ok(classUses.has("text-muted-foreground"));
+    // Codex R1 Low-2: arbitrary variants must be scanned too (table.tsx,
+    // alert.tsx), not dropped as non-class tokens.
+    for (const t of ["[&_tr]:border-b", "data-[state=selected]:bg-muted", "[&>svg]:text-destructive"]) {
+      assert.ok(classUses.has(t), `${t} not collected by the class scan`);
+    }
+  });
+
+  test("the compile check itself rejects a dead token behind an arbitrary variant", async () => {
+    assert.notEqual(await cssFor("[&_tr]:border-b"), "");
+    assert.equal(await cssFor("[&_tr]:border-bogus-token"), "");
+    assert.equal(await cssFor("data-[state=selected]:bg-popover-bogus"), "");
   });
 
   test("no utility in src/ compiles to nothing", async () => {

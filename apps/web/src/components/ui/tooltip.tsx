@@ -137,8 +137,30 @@ function TooltipContent({
 }) {
   const context = React.useContext(TooltipContext);
   if (!context) throw new Error("TooltipContent must be used within Tooltip");
+  const ref = React.useRef<HTMLDivElement>(null);
+  const open = context.open;
 
-  if (!context.open) return null;
+  // The panel is centred on its trigger with CSS only; near a viewport edge
+  // (a phone-width screen) it would run off-screen (Codex M73 R1 Medium-1).
+  // After layout, cap its width to the viewport and shift it back inside,
+  // with an 8px inset.
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    if (!open || !el) return;
+    const inset = 8;
+    el.style.marginLeft = "";
+    el.style.maxWidth = "";
+    const vw = document.documentElement.clientWidth;
+    if (el.getBoundingClientRect().width > vw - 2 * inset) {
+      el.style.maxWidth = `${vw - 2 * inset}px`;
+    }
+    const rect = el.getBoundingClientRect();
+    const shift =
+      rect.left < inset ? inset - rect.left : rect.right > vw - inset ? vw - inset - rect.right : 0;
+    if (shift !== 0) el.style.marginLeft = `${shift}px`;
+  }, [open]);
+
+  if (!open) return null;
 
   const positionClasses = {
     top: "bottom-full left-1/2 -translate-x-1/2 mb-2",
@@ -149,6 +171,7 @@ function TooltipContent({
 
   return (
     <div
+      ref={ref}
       // F209: `role="tooltip"` + the shared `id` complete the WAI-ARIA
       // tooltip contract started by the trigger's `aria-describedby`.
       role="tooltip"

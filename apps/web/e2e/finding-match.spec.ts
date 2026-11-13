@@ -185,6 +185,36 @@ test.describe('M60 NVD / JVN confidence labels', () => {
     });
   }
 
+  // Codex R1 Medium-2: some mobile browsers do not focus a tapped button,
+  // so neither blur nor mouseleave fires on a tap elsewhere. A tap that
+  // opened the explanation without focus must still close on a tap
+  // outside, and a second tap on the badge closes it.
+  test('an explanation opened by a tap without focus closes on an outside tap', async ({ page }) => {
+    await openVulnerabilities(page, 'en', projectId!, 4);
+    const entry = page.locator(`[data-vuln-cve-id="${NVD.low}"]`);
+    const badge = entry.getByTestId('finding-match-badge');
+    const hint = entry.getByTestId('finding-match-hint');
+
+    // click without focus or hover (what such a browser delivers)
+    await badge.dispatchEvent('click');
+    await expect(badge).not.toBeFocused();
+    await expect(hint).toBeVisible();
+    await page.locator('h1').first().dispatchEvent('pointerdown');
+    await expect(hint).toBeHidden();
+
+    // tap again on the badge: open, then a second tap closes it
+    await badge.dispatchEvent('click');
+    await expect(hint).toBeVisible();
+    await badge.dispatchEvent('click');
+    await expect(hint).toBeHidden();
+
+    // a pointerdown anywhere outside closes it
+    await badge.dispatchEvent('click');
+    await expect(hint).toBeVisible();
+    await page.locator('body').dispatchEvent('pointerdown');
+    await expect(hint).toBeHidden();
+  });
+
   test('the strongest link of the SBOM decides the label, one entry per CVE', async ({ page, request }) => {
     // vuln-fixture-critical links CVE-2021-44228 / -45046 by nvd_keyword;
     // vuln-fixture-nvd links them by nvd_cpe / nvd_cpe_distro. The list
@@ -217,4 +247,46 @@ test.describe('M60 NVD / JVN confidence labels', () => {
     expect(bg).toBe('rgb(255, 255, 255)');
     await tip.screenshot({ path: test.info().outputPath('kev-tooltip.png') });
   });
+});
+
+// Codex R1 Medium-1: the Tooltip is positioned inside its trigger's
+// wrapper, centred on it; with a real width (w-max max-w-xs) it could run
+// off a phone-width viewport. It must stay inside the viewport.
+test.describe('shared Tooltip on a narrow viewport', () => {
+  let narrowProjectId: string | undefined;
+  test.beforeAll(async ({ request }) => {
+    const project = await createProject(request, uniqueName('Tooltip Narrow Project'));
+    narrowProjectId = project.id;
+    await uploadSbom(request, project.id, sbom(nvdComponent));
+    await expect.poll(async () => (await listVulns(request, project.id)).length, { timeout: 15_000 }).toBe(4);
+  });
+  test.afterAll(async ({ request }) => {
+    await deleteProject(request, narrowProjectId);
+  });
+
+  for (const width of [320, 390]) {
+    test(`the KEV tooltip stays inside a ${width}px viewport`, async ({ browser, baseURL }) => {
+      const context = await browser.newContext({ baseURL, hasTouch: true, viewport: { width, height: 800 } });
+      const page = await context.newPage();
+      try {
+        await openVulnerabilities(page, 'en', narrowProjectId!, 4);
+        const entry = page.locator(`[data-vuln-cve-id="${NVD.high}"]`);
+        const kev = entry.locator('span.bg-red-600[aria-describedby]');
+        await kev.scrollIntoViewIfNeeded();
+        // touchend is what opens it on a touch screen; dispatched directly
+        // because Chromium's tap emulation follows up with synthetic mouse
+        // moves that can land outside the badge and close it again.
+        await kev.dispatchEvent('touchend');
+        const tip = entry.getByRole('tooltip');
+        await expect(tip).toBeVisible();
+        const box = (await tip.boundingBox())!;
+        const vw = await page.evaluate(() => document.documentElement.clientWidth);
+        expect(box.x, 'tooltip left edge').toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width, 'tooltip right edge').toBeLessThanOrEqual(vw);
+        await page.screenshot({ path: test.info().outputPath(`kev-tooltip-${width}.png`) });
+      } finally {
+        await context.close();
+      }
+    });
+  }
 });

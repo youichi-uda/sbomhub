@@ -241,8 +241,9 @@ export function distroEvidenceView(method: unknown, evidence: unknown): DistroEv
 //
 // The method -> confidence table mirrors model.MatchMethod.Confidence
 // (apps/api/internal/model/match_method.go). The API also sends
-// match_confidence; when both are recognised the LOWER one is shown, so a
-// disagreement can only ever ask for more review, never less.
+// match_confidence; the LOWER of the two is shown (an absent or
+// unrecognised match_confidence counting as "unknown"), so a disagreement
+// can only ever ask for more review, never less.
 
 export type NvdMatchMethod =
   | "nvd_cpe"
@@ -322,8 +323,12 @@ export function findingMatchBadge(method: unknown, confidence: unknown): Finding
   const m = typeof method === "string" ? method.trim() : "";
 
   if (isNvdMatchMethod(m)) {
-    let c = NVD_CONFIDENCE[m];
-    if (apiConfidence !== undefined && CONFIDENCE_RANK[apiConfidence] < CONFIDENCE_RANK[c]) c = apiConfidence;
+    // An absent or unrecognised match_confidence reads as "unknown" (Codex
+    // R1 Low-1): the API always sends one with the method, so its absence
+    // means a malformed or version-skewed response, which must not fail
+    // open to the method's maximum.
+    const api = apiConfidence ?? "unknown";
+    const c = CONFIDENCE_RANK[api] < CONFIDENCE_RANK[NVD_CONFIDENCE[m]] ? api : NVD_CONFIDENCE[m];
     return { method: m, confidence: c, needsReview: c !== "high", label: METHOD_LABEL[m] };
   }
   if (m === "") {
