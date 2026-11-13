@@ -583,6 +583,10 @@ ON CONFLICT (id) DO NOTHING;
 --   vuln-fixture-distro@1.0.0   -> CVE-2021-23337 distro_affected, CVE-2021-45046
 --                                  distro_unfixed, CVE-2020-8203 distro_fixed
 --                                  (M70 labels with evidence)
+--   vuln-fixture-nvd@1.0.0      -> CVE-2021-44228 nvd_cpe, CVE-2021-45046
+--                                  nvd_cpe_distro, CVE-2021-23337 jvn_keyword,
+--                                  CVE-2020-8203 NULL (pre-M60, "unknown")
+--                                  (M60 confidence labels)
 -- Specs use apps/web/e2e/fixtures/vuln-project.ts rather than these
 -- literals.
 --
@@ -626,7 +630,19 @@ BEGIN
                 ('pkg:generic/sbomhub-e2e/vuln-fixture-distro@1.0.0',   'CVE-2021-45046', 'distro_unfixed',
                  '{"source":"osv","status":"unfixed","basis":"release","release":"Debian:12","package":"apache-log4j2","installed":"2.14.1-1","records":["DEBIAN-CVE-2021-45046"],"fetched_at":"2026-11-10T00:00:00Z","source_url":"https://osv.mirror.example"}'::jsonb),
                 ('pkg:generic/sbomhub-e2e/vuln-fixture-distro@1.0.0',   'CVE-2020-8203',  'distro_fixed',
-                 '{"source":"osv","status":"fixed","basis":"later_releases","release":"Debian:10","ecosystems":["Debian:11","Debian:12"],"package":"node-lodash","installed":"4.17.15+dfsg-3","fixed":"4.17.15+dfsg-2","records":["DEBIAN-CVE-2020-8203","DLA-0000-1"],"fetched_at":"2026-11-10T00:00:00Z","source_url":"https://api.osv.dev","data_modified":"2026-11-09T00:00:00Z","source_id":"e2e-internal-source-hash","prior_method":"nvd_keyword","wm_source":"e2e-internal-source-hash","wm_rev":"2026-11-09T00:00:00Z","wm_by_source":{"e2e-internal-source-hash":"2026-11-09T00:00:00Z"}}'::jsonb)
+                 '{"source":"osv","status":"fixed","basis":"later_releases","release":"Debian:10","ecosystems":["Debian:11","Debian:12"],"package":"node-lodash","installed":"4.17.15+dfsg-3","fixed":"4.17.15+dfsg-2","records":["DEBIAN-CVE-2020-8203","DLA-0000-1"],"fetched_at":"2026-11-10T00:00:00Z","source_url":"https://api.osv.dev","data_modified":"2026-11-09T00:00:00Z","source_id":"e2e-internal-source-hash","prior_method":"nvd_keyword","wm_source":"e2e-internal-source-hash","wm_rev":"2026-11-09T00:00:00Z","wm_by_source":{"e2e-internal-source-hash":"2026-11-09T00:00:00Z"}}'::jsonb),
+                -- M60 confidence labels on the web list
+                -- (apps/web/e2e/finding-match.spec.ts). Like the distro rows,
+                -- these stand in for the scanners' WRITE so the UI can be
+                -- driven through one label per confidence tier: high
+                -- (nvd_cpe), medium (nvd_cpe_distro), low (jvn_keyword) and
+                -- unknown (NULL, a link made before migration 067). The
+                -- methods are asserted by the spec, not established by any
+                -- CPE or keyword lookup.
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-nvd@1.0.0',      'CVE-2021-44228', 'nvd_cpe',        NULL::jsonb),
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-nvd@1.0.0',      'CVE-2021-45046', 'nvd_cpe_distro', NULL::jsonb),
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-nvd@1.0.0',      'CVE-2021-23337', 'jvn_keyword',    NULL::jsonb),
+                ('pkg:generic/sbomhub-e2e/vuln-fixture-nvd@1.0.0',      'CVE-2020-8203',  NULL,             NULL::jsonb)
            ) AS f(purl, cve_id, method, evidence)
       JOIN vulnerabilities v ON v.cve_id = f.cve_id
      WHERE f.purl = NEW.purl

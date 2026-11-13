@@ -231,3 +231,117 @@ export function distroEvidenceView(method: unknown, evidence: unknown): DistroEv
     publicOsv: isPublicOsvOrigin(ev.source_url),
   };
 }
+
+// ---------------------------------------------------------------------------
+// M60 NVD / JVN labels (docs/UPGRADE.md §13.2): the confidence indicator for
+// every finding that is NOT a distro label. Until now the web UI dropped
+// these labels, so a keyword-only match looked exactly like a verified CPE
+// match. The indicator never hides or demotes a finding: it only says how
+// the CVE was matched and whether a person should check it.
+//
+// The method -> confidence table mirrors model.MatchMethod.Confidence
+// (apps/api/internal/model/match_method.go). The API also sends
+// match_confidence; when both are recognised the LOWER one is shown, so a
+// disagreement can only ever ask for more review, never less.
+
+export type NvdMatchMethod =
+  | "nvd_cpe"
+  | "nvd_cpe_distro"
+  | "nvd_cpe_unverified"
+  | "nvd_keyword"
+  | "jvn_keyword"
+  | "cve_sync_keyword";
+
+export type MatchConfidence = "high" | "medium" | "low" | "unknown";
+
+const NVD_CONFIDENCE: Record<NvdMatchMethod, MatchConfidence> = {
+  nvd_cpe: "high",
+  nvd_cpe_distro: "medium",
+  nvd_cpe_unverified: "low",
+  nvd_keyword: "low",
+  jvn_keyword: "low",
+  cve_sync_keyword: "low",
+};
+
+const CONFIDENCE_RANK: Record<MatchConfidence, number> = { unknown: 0, low: 1, medium: 2, high: 3 };
+
+export function isNvdMatchMethod(m: unknown): m is NvdMatchMethod {
+  return typeof m === "string" && Object.prototype.hasOwnProperty.call(NVD_CONFIDENCE, m);
+}
+
+function asConfidence(c: unknown): MatchConfidence | undefined {
+  return c === "high" || c === "medium" || c === "low" || c === "unknown" ? c : undefined;
+}
+
+/** next-intl key under "MatchMethod" naming how the finding was matched. */
+export type FindingMethodLabel =
+  | "methodNvdCpe"
+  | "methodNvdCpeDistro"
+  | "methodNvdCpeUnverified"
+  | "methodNvdKeyword"
+  | "methodJvnKeyword"
+  | "methodCveSyncKeyword"
+  | "methodNotRecorded"
+  | "methodOther"
+  | "methodOtherUnnamed";
+
+const METHOD_LABEL: Record<NvdMatchMethod, FindingMethodLabel> = {
+  nvd_cpe: "methodNvdCpe",
+  nvd_cpe_distro: "methodNvdCpeDistro",
+  nvd_cpe_unverified: "methodNvdCpeUnverified",
+  nvd_keyword: "methodNvdKeyword",
+  jvn_keyword: "methodJvnKeyword",
+  cve_sync_keyword: "methodCveSyncKeyword",
+};
+
+export interface FindingMatchBadge {
+  /** The API's match_method; "" when the link predates M60 (not recorded). */
+  method: string;
+  confidence: MatchConfidence;
+  /** true for everything but a verified CPE match: a person should check it. */
+  needsReview: boolean;
+  label: FindingMethodLabel;
+  /** For "methodOther" only: the unrecognised method (a plain id). */
+  otherMethod?: string;
+}
+
+// A method this page does not know is displayed only when it looks like an
+// API identifier; anything else is shown generically.
+const METHOD_ID = /^[a-z][a-z0-9_]{0,63}$/;
+
+/**
+ * The confidence indicator for one finding of the vulnerability list.
+ * Returns null for a distro label (DistroMatchBadge renders those) and when
+ * the API sent neither field (a reader that does not project them): no
+ * label is invented. Every other case yields a badge; only nvd_cpe is not
+ * marked for review.
+ */
+export function findingMatchBadge(method: unknown, confidence: unknown): FindingMatchBadge | null {
+  if (isDistroMatchMethod(method)) return null;
+  const apiConfidence = asConfidence(confidence);
+  const m = typeof method === "string" ? method.trim() : "";
+
+  if (isNvdMatchMethod(m)) {
+    let c = NVD_CONFIDENCE[m];
+    if (apiConfidence !== undefined && CONFIDENCE_RANK[apiConfidence] < CONFIDENCE_RANK[c]) c = apiConfidence;
+    return { method: m, confidence: c, needsReview: c !== "high", label: METHOD_LABEL[m] };
+  }
+  if (m === "") {
+    // A pre-M60 link: the API reports "unknown". Neither field: nothing to show.
+    if (confidence === undefined || confidence === null || confidence === "") return null;
+    return { method: "", confidence: "unknown", needsReview: true, label: "methodNotRecorded" };
+  }
+  // A method this version of the page does not know (a newer API): shown,
+  // always for review, with the API's confidence when it is a known value.
+  const badge: FindingMatchBadge = {
+    method: m,
+    confidence: apiConfidence ?? "unknown",
+    needsReview: true,
+    label: "methodOtherUnnamed",
+  };
+  if (METHOD_ID.test(m)) {
+    badge.label = "methodOther";
+    badge.otherMethod = m;
+  }
+  return badge;
+}

@@ -23,6 +23,8 @@ export const FIXTURE_PURLS = {
     high: 'pkg:generic/sbomhub-e2e/vuln-fixture-high@1.0.0',
     /** M70: linked with distro labels + evidence (distro-match.spec.ts only). */
     distro: 'pkg:generic/sbomhub-e2e/vuln-fixture-distro@1.0.0',
+    /** M60: one NVD / JVN label per confidence tier (finding-match.spec.ts only). */
+    nvd: 'pkg:generic/sbomhub-e2e/vuln-fixture-nvd@1.0.0',
 } as const;
 
 export interface FixtureCve {

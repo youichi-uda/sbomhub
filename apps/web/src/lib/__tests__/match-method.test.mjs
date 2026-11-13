@@ -22,6 +22,8 @@ import { describe, test } from "node:test";
 import {
   distroBadge,
   distroEvidenceView,
+  findingMatchBadge,
+  isNvdMatchMethod,
   isDistroMatchMethod,
   osvRecordUrl,
   parseDistroEvidence,
@@ -316,5 +318,181 @@ describe("distro_fixed badge wording", () => {
   });
   test("both locales define the same keys", () => {
     assert.deepEqual(Object.keys(load("en")).sort(), Object.keys(load("ja")).sort());
+  });
+});
+
+// M60 NVD / JVN labels: the confidence indicator (findingMatchBadge).
+//
+// What is pinned and why:
+//   - the method -> confidence table is the API's own
+//     (model.MatchMethod.Confidence, read from the Go source below, so the
+//     two cannot drift apart silently);
+//   - only a verified CPE match (nvd_cpe) is not marked for review; every
+//     keyword / unverified / upstream-version / unknown match is;
+//   - a disagreeing match_confidence can only LOWER the confidence shown;
+//   - a pre-M60 link ("unknown") and a method this page does not know are
+//     still shown (for review), never dropped;
+//   - distro labels are left to distroBadge, and nothing is invented when
+//     the API sent neither field.
+describe("findingMatchBadge", () => {
+  const goSource = readFileSync(
+    new URL("../../../../api/internal/model/match_method.go", import.meta.url),
+    "utf8",
+  );
+  const goConst = (name) => {
+    const m = new RegExp(`\\b${name}\\s+(?:MatchMethod\\s+)?=\\s+"([^"]*)"`).exec(goSource);
+    assert.ok(m, `constant ${name} not found in match_method.go`);
+    return m[1];
+  };
+  // case A, B: return MatchConfidenceX  inside func (m MatchMethod) Confidence()
+  const goConfidence = (() => {
+    const body = goSource.slice(goSource.indexOf("func (m MatchMethod) Confidence() string"));
+    const fn = body.slice(0, body.indexOf("\n}\n"));
+    const out = {};
+    for (const c of fn.matchAll(/case ([^:]+):\s*return (MatchConfidence\w+)/g)) {
+      for (const name of c[1].split(",").map((x) => x.trim())) out[goConst(name)] = goConst(c[2]);
+    }
+    return out;
+  })();
+
+  test("mirrors model.MatchMethod.Confidence for every NVD / JVN method", () => {
+    const nvd = Object.keys(goConfidence).filter((m) => !m.startsWith("distro_"));
+    assert.deepEqual(
+      nvd.sort(),
+      ["cve_sync_keyword", "jvn_keyword", "nvd_cpe", "nvd_cpe_distro", "nvd_cpe_unverified", "nvd_keyword"],
+    );
+    for (const m of nvd) {
+      assert.equal(isNvdMatchMethod(m), true, m);
+      const b = findingMatchBadge(m, goConfidence[m]);
+      assert.equal(b?.confidence, goConfidence[m], m);
+      assert.equal(b?.method, m);
+    }
+  });
+
+  test("only a verified CPE match is not marked for review", () => {
+    assert.deepEqual(findingMatchBadge("nvd_cpe", "high"), {
+      method: "nvd_cpe",
+      confidence: "high",
+      needsReview: false,
+      label: "methodNvdCpe",
+    });
+    for (const [m, label] of [
+      ["nvd_cpe_distro", "methodNvdCpeDistro"],
+      ["nvd_cpe_unverified", "methodNvdCpeUnverified"],
+      ["nvd_keyword", "methodNvdKeyword"],
+      ["jvn_keyword", "methodJvnKeyword"],
+      ["cve_sync_keyword", "methodCveSyncKeyword"],
+    ]) {
+      const b = findingMatchBadge(m, goConfidence[m]);
+      assert.equal(b?.needsReview, true, m);
+      assert.equal(b?.label, label, m);
+    }
+    assert.equal(findingMatchBadge("jvn_keyword", "low")?.confidence, "low");
+    assert.equal(findingMatchBadge("nvd_cpe_distro", "medium")?.confidence, "medium");
+  });
+
+  test("a disagreeing API confidence only ever lowers the label", () => {
+    assert.deepEqual(
+      [findingMatchBadge("nvd_cpe", "low")?.confidence, findingMatchBadge("nvd_cpe", "low")?.needsReview],
+      ["low", true],
+    );
+    assert.equal(findingMatchBadge("nvd_cpe", "unknown")?.confidence, "unknown");
+    assert.equal(findingMatchBadge("nvd_keyword", "high")?.confidence, "low");
+    assert.equal(findingMatchBadge("nvd_cpe_distro", "high")?.confidence, "medium");
+    // absent or unrecognised API value: the method decides
+    assert.equal(findingMatchBadge("nvd_cpe", undefined)?.confidence, "high");
+    assert.equal(findingMatchBadge("nvd_cpe", "distro_fixed")?.confidence, "high");
+    assert.equal(findingMatchBadge("nvd_keyword", "certain")?.confidence, "low");
+  });
+
+  test("a pre-M60 link is shown as not recorded, for review", () => {
+    for (const method of [undefined, null, "", "  "]) {
+      assert.deepEqual(findingMatchBadge(method, "unknown"), {
+        method: "",
+        confidence: "unknown",
+        needsReview: true,
+        label: "methodNotRecorded",
+      });
+    }
+  });
+
+  test("neither field: nothing is invented", () => {
+    assert.equal(findingMatchBadge(undefined, undefined), null);
+    assert.equal(findingMatchBadge("", ""), null);
+    assert.equal(findingMatchBadge(null, null), null);
+  });
+
+  test("distro labels are left to distroBadge", () => {
+    for (const m of ["distro_affected", "distro_unfixed", "distro_fixed"]) {
+      assert.equal(findingMatchBadge(m, goConfidence[m]), null, m);
+    }
+  });
+
+  test("a method this page does not know is still shown, for review", () => {
+    assert.deepEqual(findingMatchBadge("osv_ecosystem", "high"), {
+      method: "osv_ecosystem",
+      confidence: "high",
+      needsReview: true,
+      label: "methodOther",
+      otherMethod: "osv_ecosystem",
+    });
+    assert.equal(findingMatchBadge("osv_ecosystem", "bogus")?.confidence, "unknown");
+    const odd = findingMatchBadge("<img src=x>", "low");
+    assert.equal(odd?.label, "methodOtherUnnamed");
+    assert.equal(odd?.otherMethod, undefined);
+    assert.equal(odd?.needsReview, true);
+    assert.equal(findingMatchBadge(42, "low")?.label, "methodNotRecorded");
+  });
+});
+
+describe("finding confidence wording", () => {
+  const load = (loc) =>
+    JSON.parse(readFileSync(new URL(`../../../messages/${loc}.json`, import.meta.url), "utf8")).MatchMethod;
+  test("every label and hint key exists in both locales", () => {
+    const keys = [
+      "methodNvdCpe",
+      "methodNvdCpeDistro",
+      "methodNvdCpeUnverified",
+      "methodNvdKeyword",
+      "methodJvnKeyword",
+      "methodCveSyncKeyword",
+      "methodNotRecorded",
+      "methodOther",
+      "methodOtherUnnamed",
+      "confidenceHigh",
+      "confidenceMedium",
+      "confidenceLow",
+      "confidenceUnknown",
+      "findingBadge",
+      "findingBadgeReview",
+      "findingReviewNote",
+      "findingHintWithNote",
+    ];
+    for (const loc of ["en", "ja"]) {
+      const m = load(loc);
+      for (const k of keys) assert.equal(typeof m[k], "string", `${loc}.${k}`);
+      for (const k of keys.filter((k) => k.startsWith("method"))) {
+        const hint = `hint${k.slice("method".length)}`;
+        assert.equal(typeof m[hint], "string", `${loc}.${hint}`);
+      }
+    }
+  });
+  test("the review badge leads with the review state and keeps the finding", () => {
+    assert.match(load("en").findingBadgeReview, /^Needs review: \{method\}/);
+    assert.match(load("ja").findingBadgeReview, /^要確認: \{method\}/);
+    // never suggests the finding was dropped or resolved
+    for (const loc of ["en", "ja"]) {
+      const m = load(loc);
+      assert.doesNotMatch(m.findingReviewNote, /not_affected/, loc);
+    }
+    assert.match(load("en").findingReviewNote, /counted/);
+    assert.match(load("ja").findingReviewNote, /件数/);
+  });
+  test("keyword labels say the version was not checked", () => {
+    assert.match(load("en").methodNvdKeyword, /keyword/i);
+    assert.match(load("en").methodNvdKeyword, /unverified/);
+    assert.match(load("en").methodJvnKeyword, /JVN keyword/);
+    assert.match(load("ja").methodNvdKeyword, /キーワード/);
+    assert.match(load("ja").methodJvnKeyword, /JVN キーワード/);
   });
 });

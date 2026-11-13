@@ -13,6 +13,7 @@ import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck,
 import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
 import { KEVBadge } from "@/components/vulnerability/kev-badge";
 import { DistroEvidencePanel, DistroMatchBadge } from "@/components/vulnerability/distro-match";
+import { FindingMatchBadge } from "@/components/vulnerability/finding-match";
 import { EOLBadge } from "@/components/component/eol-badge";
 import { DependencyPathPanel } from "@/components/component/dependency-path";
 import { LoadError } from "@/components/ui/load-error";
@@ -786,11 +787,18 @@ export default function ProjectDetailPage() {
                           kevDueDate={vuln.kev_due_date}
                           kevRansomwareUse={vuln.kev_ransomware_use}
                         />
-                        {/* M70: distro label (UPGRADE.md §21). NVD / JVN
-                            labels are not rendered here. */}
+                        {/* M70: distro label (UPGRADE.md §21). */}
                         <DistroMatchBadge
                           method={vuln.match_method}
                           evidence={vuln.match_evidence}
+                        />
+                        {/* M60 NVD / JVN label with its confidence
+                            (UPGRADE.md §13.2); renders nothing for a
+                            distro label. Shown, never filtered: a low-
+                            confidence match is marked for review. */}
+                        <FindingMatchBadge
+                          method={vuln.match_method}
+                          confidence={vuln.match_confidence}
                         />
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
