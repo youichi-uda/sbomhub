@@ -2481,32 +2481,61 @@ At most this many upload, manual (`POST .../scan`) and forced (`POST /settings/s
 New environment variables: `SBOMHUB_REDIS_BREAKER_THRESHOLD`, `SBOMHUB_REDIS_BREAKER_COOLDOWN`, `SBOMHUB_SCAN_TENANT_CONCURRENCY`. An invalid value stops the API at startup.
 
 
-## 26. JVN outage is reported as `source_unavailable`; the sweep stops querying a dead MyJVN
+## 26. JVN outage: `source_unavailable`, early stop, and `SBOMHUB_JVN=off`
 
-JPCERT/CC suspended JVN iPedia and MyJVN on 2026-10-22 for system maintenance with
-no resumption date (https://jvn.jp/nav/info2026102281.html). Every MyJVN API URL
-answers HTTP 404, so every online scan that looks up at least one component in
-JVN (not with `SBOMHUB_OFFLINE=true`) is reported `failed`.
+JPCERT/CC suspended JVN iPedia and MyJVN for system maintenance on 2026-10-22
+with no resumption date (https://jvn.jp/nav/info2026102281.html). Every MyJVN
+API URL answers HTTP 404. With JVN on (the default), every online scan that
+looks up at least one component in JVN (not with SBOMHUB_OFFLINE=true) is
+reported `failed`.
 
-What changes:
+### 26.1 The outage is named, and the sweep stops asking
 
 - A JVN lookup that gets no HTTP 200 at all (404, 410, 403, 408, 429, 5xx, or a
-  network error / client timeout) is now distinguished from one whose answer
-  failed validation. When MyJVN is unavailable, the scan-status `reasons` gain
-  `source_unavailable` **in addition to** `fetch_failed`, and the `error` marker
+  network error / client timeout) is distinguished from one whose answer failed
+  validation. When MyJVN is unavailable, scan-status `reasons` gain
+  `source_unavailable` in addition to `fetch_failed`, and the `error` marker
   reads `jvn: scan failed (fetch_failed, source_unavailable)`. The verdict is
-  unchanged: the scan is still `failed`, `sbomhub scan --fail-on` still exits 2,
-  and NVD findings are still committed.
-- After 3 consecutive unavailable lookups the JVN sweep stops querying MyJVN; the
-  remaining components are reported as not checked (server log:
-  `abandoned_unavailable=N`). Before, the sweep sent one request per component
-  at 2/s into the outage.
-- API change is additive: one new reason code, `source_unavailable`. No field was
-  renamed or removed.
+  unchanged: the scan is `failed`, `sbomhub scan --fail-on` exits 2, NVD
+  findings are still committed.
+- After 3 consecutive unavailable lookups the JVN sweep stops querying MyJVN;
+  the remaining components are reported as not checked.
 
-Workaround while MyJVN is down: on-demand scans can exclude JVN with
-`POST /api/v1/projects/:id/scan?sbom_id=<id>&sources=nvd` (completes normally).
-Upload scans always include JVN.
+### 26.2 `SBOMHUB_JVN=off`: scan without JVN until MyJVN returns
+
+New setting `SBOMHUB_JVN`: `on` (default, also when unset) or `off`,
+case-insensitive. Any other value (including `false`, `0`, `disabled`) refuses
+startup, before migrations run. With `off` the API logs a WARN at startup.
+
+With `off`:
+
+- The scan after an upload and `POST /api/v1/projects/:id/scan` send no request
+  to MyJVN. A scan whose other sources succeeded reads `completed`; one whose
+  other sources failed reads `failed` with their reasons.
+- `GET .../sboms/:sbom_id/scan-status` adds `"skipped_sources": ["jvn"]` to a
+  `completed` or `failed` scan that skipped JVN (absent when nothing was
+  skipped). It is stored in the shared scan status (Redis), so every replica
+  reports it. The MCP tools report it as `skipped_sources` next to
+  `counts_final`.
+- `POST /api/v1/projects/:id/scan?sources=jvn` (or `nvd,jvn`) still answers
+  `202`; JVN is skipped and reported in `skipped_sources`.
+- The scheduled scan (periodic and forced) runs NVD and the distro step only,
+  with JVN on or off; this setting does not change it.
+- Findings earlier scans made with JVN stay linked: `off` adds and removes no
+  JVN finding, so a scan with `skipped_sources: ["jvn"]` may still list older
+  JVN findings, which are not re-checked.
+
+Undo: unset `SBOMHUB_JVN` (or set `on`) and restart; the next scan queries JVN
+again.
+
+Several replicas: set `off` only once every replica sharing the Redis runs this
+version. An older replica cannot report `skipped_sources`, so a scan polled
+through it reads a bare `completed`. The `sbomhub` CLI does not display
+`skipped_sources` yet; read scan-status directly to see it.
+
+API changes are additive only: reason code `source_unavailable`, scan-status
+field `skipped_sources`, MCP payload field `skipped_sources`.
+
 
 ## 27. `cvss_version` on the dashboard and SSVC, Ollama finish reasons, project lookup errors
 
