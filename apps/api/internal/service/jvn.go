@@ -72,6 +72,23 @@ const (
 	// page requests are paced identically rather than bursting.
 	jvnRequestDelay = 500 * time.Millisecond
 
+	// jvnUnavailableAbandonAfter is how many CONSECUTIVE lookups may fail
+	// with MyJVN unavailable (no HTTP 200 at all; see jvnUnavailableError)
+	// before the sweep stops asking.
+	//
+	// JPCERT/CC suspended JVN iPedia and MyJVN on 2026-10-22 with no
+	// resumption date (https://jvn.jp/nav/info2026102281.html,
+	// 「再開時期は未定です」); measured on 2026-11-13, every API URL answers
+	// 404 from the load balancer. Without a stop the sweep kept pacing one
+	// request per component into that 404 — ~17 minutes of the scan's
+	// deadline and its tenant scan slot for a 2,000-component SBOM, all of it
+	// traffic the operator's FAQ asks clients not to send. Three in a row is
+	// enough to tell an outage from one component's transient 5xx while
+	// costing at most 1.5 s. The verdict is unchanged either way (the scan
+	// fails, fetch_failed); the components not asked are counted in
+	// JVNScanReport.AbandonedUnavailable and reported as missing coverage.
+	jvnUnavailableAbandonAfter = 3
+
 	// The request values the Status echo is checked against.
 	jvnMethodOverviewList = "getVulnOverviewList"
 	jvnFeedHND            = "hnd"
@@ -264,6 +281,53 @@ func (c JVNCVSS) Version() string  { return jvnAttr(c.Attrs, "version") }
 func (c JVNCVSS) Severity() string { return jvnAttr(c.Attrs, "severity") }
 func (c JVNCVSS) Score() string    { return jvnAttr(c.Attrs, "score") }
 
+// jvnUnavailableError is a lookup that got NO MyJVN answer at all: the
+// endpoint did not return HTTP 200 (404, 410, 403, 408, 429 or any 5xx), or
+// the request never completed (DNS, connection refused, client timeout).
+//
+// It is kept apart from every other lookup failure on purpose. A 200 whose
+// body fails validation is MyJVN — or something in front of it — ANSWERING
+// wrongly, and that is a per-component data problem. This is the service not
+// being there, which is a property of the whole sweep: it is what makes the
+// sweep stop early (jvnUnavailableAbandonAfter) and what the
+// source_unavailable reason reports.
+//
+// 400 and the other 4xx are deliberately NOT here: MyJVN reports parameter
+// errors through retCd with a 200, so a bare 4xx is more likely our request or
+// a misconfigured SBOMHUB_JVN_URL than an outage, and it stays a plain
+// fetch_failed.
+type jvnUnavailableError struct {
+	status int   // HTTP status, or 0 when the request did not complete
+	err    error // the transport error when status == 0
+}
+
+func (e *jvnUnavailableError) Error() string {
+	if e.status != 0 {
+		return fmt.Sprintf("JVN API unavailable: HTTP %d (check https://jvn.jp/ for service notices — MyJVN was "+
+			"suspended on 2026-10-22 — or whether SBOMHUB_JVN_URL points at the wrong place)", e.status)
+	}
+	return fmt.Sprintf("JVN API unavailable: %v", e.err)
+}
+
+func (e *jvnUnavailableError) Unwrap() error { return e.err }
+
+// isJVNUnavailable reports whether err is (or wraps) a jvnUnavailableError.
+func isJVNUnavailable(err error) bool {
+	var u *jvnUnavailableError
+	return errors.As(err, &u)
+}
+
+// jvnStatusUnavailable reports whether an HTTP status means the API is not
+// being served (see jvnUnavailableError for the line drawn).
+func jvnStatusUnavailable(code int) bool {
+	switch code {
+	case http.StatusNotFound, http.StatusGone, http.StatusForbidden,
+		http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return true
+	}
+	return code >= 500 && code <= 599
+}
+
 // JVNScanReport is what one ScanComponents sweep did, as counts.
 //
 // It exists because the counts have to be REACHABLE BY THE CALLER, not just
@@ -317,6 +381,18 @@ type JVNScanReport struct {
 	// NewVulnerabilities is how many distinct vulnerabilities became linked
 	// to the SBOM in this sweep's write transaction (M62).
 	NewVulnerabilities int
+	// UnavailableFailures is the part of Failed whose lookup got no MyJVN
+	// answer at all (jvnUnavailableError).
+	UnavailableFailures int
+	// AbandonedUnavailable is how many named components were NOT looked up
+	// because the sweep had stopped asking an unavailable MyJVN
+	// (jvnUnavailableAbandonAfter). They are missing coverage exactly like
+	// Failed ones.
+	AbandonedUnavailable int
+	// SourceUnavailable records that MyJVN itself was unavailable: either
+	// the sweep stopped for it, or every lookup it made failed that way.
+	// Err then adds ErrScanSourceUnavailable to ErrScanFetchFailed.
+	SourceUnavailable bool
 }
 
 // Summary renders the report as a single log/diagnostic string.
@@ -324,10 +400,11 @@ func (r JVNScanReport) Summary() string {
 	return fmt.Sprintf(
 		"components=%d scanned=%d failed=%d skipped_no_name=%d unscanned=%d cancelled=%t deadline_exceeded=%t "+
 			"refused_writes=%d truncated_components=%d advisories=%d/%d wire_entries=%d "+
-			"requests=%d budget_exhausted=%t",
+			"requests=%d budget_exhausted=%t unavailable_failures=%d abandoned_unavailable=%d source_unavailable=%t",
 		r.Components, r.Scanned, r.Failed, r.SkippedNoName, r.Unscanned, r.Cancelled, r.DeadlineExceeded,
 		r.RefusedWrites, r.TruncatedComponents, r.EntriesRetrieved, r.EntriesAvailable,
-		r.EntriesReturned, r.Requests, r.BudgetExhausted)
+		r.EntriesReturned, r.Requests, r.BudgetExhausted, r.UnavailableFailures, r.AbandonedUnavailable,
+		r.SourceUnavailable)
 }
 
 // Err maps the report onto the single channel JVNService owns to the caller,
@@ -364,14 +441,20 @@ func (r JVNScanReport) Err() error {
 		errs = append(errs, fmt.Errorf("jvn: the scan %s with %d of %d component(s) never looked up; "+
 			"scan results are incomplete: %w", what, r.Unscanned, r.Components, cause))
 	}
-	if r.Failed > 0 {
-		if r.Scanned == 0 && !r.Cancelled {
-			errs = append(errs, fmt.Errorf("jvn: all %d component lookup(s) failed; the scan has no coverage: %w",
-				r.Failed, ErrScanFetchFailed))
-		} else {
-			errs = append(errs, fmt.Errorf("jvn: %d of %d component lookup(s) failed; the findings for those "+
-				"components are missing: %w", r.Failed, r.Components, ErrScanFetchFailed))
-		}
+	switch missing := r.Failed + r.AbandonedUnavailable; {
+	case missing > 0 && r.SourceUnavailable:
+		// Both sentinels: fetch_failed keeps every existing consumer's
+		// reading, source_unavailable says why.
+		errs = append(errs, fmt.Errorf("jvn: MyJVN is unavailable (%d lookup(s) got no answer, %d component(s) "+
+			"not asked after that); %d of %d component(s) were not checked against JVN: %w (%w)",
+			r.UnavailableFailures, r.AbandonedUnavailable, missing, r.Components,
+			ErrScanFetchFailed, ErrScanSourceUnavailable))
+	case missing > 0 && r.Scanned == 0 && !r.Cancelled:
+		errs = append(errs, fmt.Errorf("jvn: all %d component lookup(s) failed; the scan has no coverage: %w",
+			missing, ErrScanFetchFailed))
+	case missing > 0:
+		errs = append(errs, fmt.Errorf("jvn: %d of %d component lookup(s) failed; the findings for those "+
+			"components are missing: %w", missing, r.Components, ErrScanFetchFailed))
 	}
 	if r.TruncatedComponents > 0 {
 		errs = append(errs, fmt.Errorf("jvn: %d of %d component(s) match more advisories than the fetch budget "+
@@ -436,6 +519,9 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 	// requests is taken before every request except the first.
 	queried := 0
 	var groups [][]pendingLink
+	// consecutiveUnavailable counts unavailable lookups since the last
+	// lookup that got any answer (jvnUnavailableAbandonAfter).
+	consecutiveUnavailable := 0
 
 	for i := range components {
 		comp := &components[i]
@@ -443,6 +529,12 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 		if strings.TrimSpace(comp.Name) == "" {
 			slog.Warn("skipping JVN lookup for a component with no name", "component_id", comp.ID)
 			rep.SkippedNoName++
+			continue
+		}
+
+		if rep.SourceUnavailable {
+			// Stopped asking; see jvnUnavailableAbandonAfter.
+			rep.AbandonedUnavailable++
 			continue
 		}
 
@@ -486,10 +578,28 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 				"component", comp.Name,
 				"error", err)
 			rep.Failed++
+			if isJVNUnavailable(err) {
+				rep.UnavailableFailures++
+				consecutiveUnavailable++
+				if consecutiveUnavailable >= jvnUnavailableAbandonAfter {
+					rep.SourceUnavailable = true
+					slog.Warn("jvn: MyJVN unavailable; not asking about the remaining components",
+						"sbom_id", sbomID, "consecutive_unavailable", consecutiveUnavailable,
+						"notice", "https://jvn.jp/nav/info2026102281.html")
+				}
+			} else {
+				consecutiveUnavailable = 0
+			}
 			continue
 		}
+		consecutiveUnavailable = 0
 		groups = append(groups, out.Links)
 		rep.Scanned++
+	}
+	// A sweep too short to reach the threshold is still an outage when every
+	// lookup it made got no answer at all.
+	if rep.Failed > 0 && rep.Scanned == 0 && rep.UnavailableFailures == rep.Failed {
+		rep.SourceUnavailable = true
 	}
 	if rep.Cancelled && scanDeadlineFired(ctx) {
 		rep.DeadlineExceeded = true
@@ -784,11 +894,18 @@ func (s *JVNService) fetchPage(ctx context.Context, keyword string, startItem in
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			// The sweep being cut off, not MyJVN being down.
+			return nil, err
+		}
+		return nil, &jvnUnavailableError{err: err}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if jvnStatusUnavailable(resp.StatusCode) {
+			return nil, &jvnUnavailableError{status: resp.StatusCode}
+		}
 		return nil, fmt.Errorf("JVN API returned status %d", resp.StatusCode)
 	}
 

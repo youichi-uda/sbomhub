@@ -24,8 +24,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -393,4 +399,135 @@ func TestM55JVNScanReport_PartialFetchFailureIsCounted(t *testing.T) {
 			t.Errorf("partial failure must fail the sweep with ErrScanFetchFailed (M62), got %v", err)
 		}
 	})
+}
+
+// jvnOutageSweep seeds one SBOM with the given component names, points a JVN
+// service at handler, and runs one sweep. It returns the report, the error and
+// the keywords the server was asked about, in order.
+func jvnOutageSweep(t *testing.T, label string, names []string, handler http.HandlerFunc) (JVNScanReport, error, []string) {
+	t.Helper()
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	appDB := openOrSkipVS(t, appURL)
+	if !schemaReadyVS(t, migDB) {
+		t.SkipNow()
+	}
+	tenant := seedTenantVS(t, migDB, label)
+	project := uuid.New()
+	seedProjectVS(t, migDB, tenant, project, label+"-"+project.String())
+	sbom := seedSbomVS(t, migDB, tenant, project)
+	for i, n := range names {
+		seedComponentVS(t, migDB, tenant, sbom, n, "1.0", fmt.Sprintf("pkg:generic/c%d@1.0", i))
+	}
+
+	var mu sync.Mutex
+	var asked []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.Query().Get("keyword"))
+		mu.Unlock()
+		handler(w, r)
+	}))
+	t.Cleanup(ts.Close)
+
+	svc := NewJVNService(repository.NewVulnerabilityRepository(appDB),
+		repository.NewComponentRepository(appDB), ts.URL, false)
+	svc.requestDelay = 0
+	rep, err := svc.ScanComponentsReport(WithScanScope(context.Background(), appDB, tenant), sbom)
+	t.Logf("report: %s", rep.Summary())
+	mu.Lock()
+	defer mu.Unlock()
+	return rep, err, append([]string(nil), asked...)
+}
+
+// TestJVNOutage_SweepStopsAskingAnUnavailableMyJVN pins the early stop: with
+// MyJVN answering 404 to everything (measured live, 2026-11-13) the sweep asks
+// about jvnUnavailableAbandonAfter components, not all of them, and reports
+// the rest as unchecked with source_unavailable alongside fetch_failed.
+func TestJVNOutage_SweepStopsAskingAnUnavailableMyJVN(t *testing.T) {
+	names := []string{"   ", "c1", "c2", "c3", "c4", "c5", "c6"} // blank sorts first
+	rep, err, asked := jvnOutageSweep(t, "jvnoutage404", names, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "Not Found", http.StatusNotFound)
+	})
+	if len(asked) != jvnUnavailableAbandonAfter {
+		t.Errorf("MyJVN was asked %d times (%v), want %d", len(asked), asked, jvnUnavailableAbandonAfter)
+	}
+	if rep.Failed != 3 || rep.UnavailableFailures != 3 || rep.AbandonedUnavailable != 3 ||
+		rep.SkippedNoName != 1 || rep.Scanned != 0 || !rep.SourceUnavailable {
+		t.Errorf("report = %s, want failed=3 unavailable_failures=3 abandoned_unavailable=3 "+
+			"skipped_no_name=1 scanned=0 source_unavailable=true", rep.Summary())
+	}
+	want := []string{ScanReasonFetchFailed, ScanReasonSourceUnavailable}
+	if got := ScanReasons(err); !slices.Equal(got, want) {
+		t.Errorf("reasons = %v, want %v (err %v)", got, want, err)
+	}
+}
+
+// A sweep shorter than the threshold is still an outage when every lookup it
+// made got no answer.
+func TestJVNOutage_ShortSweepAllUnavailable(t *testing.T) {
+	rep, err, asked := jvnOutageSweep(t, "jvnoutageshort", []string{"a1", "a2"}, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	if len(asked) != 2 || rep.AbandonedUnavailable != 0 || !rep.SourceUnavailable {
+		t.Errorf("asked=%v report=%s, want both asked and source_unavailable", asked, rep.Summary())
+	}
+	if !errors.Is(err, ErrScanSourceUnavailable) || !errors.Is(err, ErrScanFetchFailed) {
+		t.Errorf("err = %v, want fetch_failed + source_unavailable", err)
+	}
+}
+
+// Transient unavailability interleaved with answers is not an outage: no
+// component is skipped and the reason stays plain fetch_failed.
+func TestJVNOutage_InterleavedFailuresDoNotStopTheSweep(t *testing.T) {
+	now := time.Now()
+	canned := &cannedMyJVN{
+		now:       now,
+		corpusFor: func(string) []cannedJVNAdvisory { return cannedCorpus(now, 1, 0) },
+		fail: func(q url.Values) int {
+			if strings.HasSuffix(q.Get("keyword"), "-x") {
+				return http.StatusBadGateway
+			}
+			return 0
+		},
+	}
+	inner := canned.start(t)
+	proxy := func(w http.ResponseWriter, r *http.Request) {
+		resp, err := http.Get(inner.URL + "?" + r.URL.RawQuery)
+		if err != nil {
+			t.Errorf("canned MyJVN: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}
+	// ORDER BY name: a-ok, b-x, c-x, d-ok, e-x, f-x — never three in a row.
+	names := []string{"a-ok", "b-x", "c-x", "d-ok", "e-x", "f-x"}
+	rep, err, asked := jvnOutageSweep(t, "jvnoutagemix", names, proxy)
+	if len(asked) != len(names) {
+		t.Errorf("asked %d of %d components (%v)", len(asked), len(names), asked)
+	}
+	if rep.Scanned != 2 || rep.Failed != 4 || rep.AbandonedUnavailable != 0 || rep.SourceUnavailable {
+		t.Errorf("report = %s, want scanned=2 failed=4 abandoned=0 source_unavailable=false", rep.Summary())
+	}
+	if got := ScanReasons(err); !slices.Equal(got, []string{ScanReasonFetchFailed}) {
+		t.Errorf("reasons = %v, want [fetch_failed]", got)
+	}
+}
+
+// A 200 that is not a MyJVN answer is MyJVN (or something in front of it)
+// answering WRONGLY: it is validated per component and never stops the sweep.
+func TestJVNOutage_InvalidAnswersAreNotUnavailability(t *testing.T) {
+	names := []string{"v1", "v2", "v3", "v4"}
+	rep, err, asked := jvnOutageSweep(t, "jvnoutagejunk", names, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("<html><body>maintenance</body></html>"))
+	})
+	if len(asked) != 4 || rep.Failed != 4 || rep.UnavailableFailures != 0 || rep.SourceUnavailable {
+		t.Errorf("asked=%d report=%s, want 4 asked, failed=4, no unavailability", len(asked), rep.Summary())
+	}
+	if got := ScanReasons(err); !slices.Equal(got, []string{ScanReasonFetchFailed}) {
+		t.Errorf("reasons = %v, want [fetch_failed]", got)
+	}
 }

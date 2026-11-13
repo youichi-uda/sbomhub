@@ -775,8 +775,11 @@ type ScanStatusResponse struct {
 	Error           string                    `json:"error,omitempty"`
 	Vulnerabilities VulnerabilitySummaryCount `json:"vulnerabilities"`
 	// Reasons (M62, additive) are the machine-readable reasons a failed scan
-	// is incomplete: deadline_exceeded, cancelled, fetch_failed, truncated,
-	// write_refused, scan_error. Present only when status=failed and known.
+	// is incomplete: deadline_exceeded, cancelled, fetch_failed,
+	// source_unavailable (with fetch_failed: the source served no answer at
+	// all, e.g. MyJVN since 2026-10-22), truncated, write_refused,
+	// distro_data_failed, queue_full, scan_error. Present only when
+	// status=failed and known.
 	Reasons []string `json:"reasons,omitempty"`
 }
 

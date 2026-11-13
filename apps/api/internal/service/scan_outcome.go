@@ -38,6 +38,13 @@ var (
 	// ErrScanQueueFull (M72): too many scans of the tenant already wait for
 	// a scan slot (SBOMHUB_SCAN_TENANT_CONCURRENCY); this one was not run.
 	ErrScanQueueFull = errors.New("tenant scan queue full")
+	// ErrScanSourceUnavailable (2026-11): the data source itself did not
+	// serve its API — no HTTP 200 answer at all (404 / 5xx / 429 / a
+	// transport error), as opposed to an answer that failed validation. It
+	// always accompanies ErrScanFetchFailed, never replaces it: the verdict
+	// is unchanged, only the reason is more specific. Raised by the JVN
+	// sweep, which met it when MyJVN was suspended on 2026-10-22.
+	ErrScanSourceUnavailable = errors.New("data source unavailable")
 )
 
 // Reason codes as reported in scan status (GET .../scan-status `reasons`,
@@ -52,6 +59,10 @@ const (
 	ScanReasonError            = "scan_error"
 	// ScanReasonQueueFull (M72): see ErrScanQueueFull.
 	ScanReasonQueueFull = "queue_full"
+	// ScanReasonSourceUnavailable: see ErrScanSourceUnavailable. Generic
+	// like the others — which source it was is the marker's prefix
+	// ("jvn: scan failed (fetch_failed, source_unavailable)").
+	ScanReasonSourceUnavailable = "source_unavailable"
 )
 
 // ScanReasons maps a scanner error to the reason codes it carries, in a fixed
@@ -69,6 +80,7 @@ func ScanReasons(err error) []string {
 		{ErrScanDeadlineExceeded, ScanReasonDeadlineExceeded},
 		{ErrScanCancelled, ScanReasonCancelled},
 		{ErrScanFetchFailed, ScanReasonFetchFailed},
+		{ErrScanSourceUnavailable, ScanReasonSourceUnavailable},
 		{ErrScanTruncated, ScanReasonTruncated},
 		{ErrScanWriteRefused, ScanReasonWriteRefused},
 		{ErrScanDistroDataFailed, ScanReasonDistroDataFailed},
