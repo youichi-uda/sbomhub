@@ -654,8 +654,10 @@ export default function ProjectDetailPage() {
             )}
             {pathComponent && (
               <div className="mt-6">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-muted-foreground">
+                {/* Name / version are SBOM data and may be one unbroken
+                    90-character word: wrap them (320px reflow). */}
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <span className="min-w-0 text-sm text-muted-foreground wrap-anywhere">
                     {t("DependencyPath.selectedLabel")}{" "}
                     <span className="font-medium text-foreground">
                       {pathComponent.name}

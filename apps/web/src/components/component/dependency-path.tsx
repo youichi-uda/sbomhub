@@ -230,11 +230,11 @@ export function DependencyPathPanel({
   return (
     <Card data-testid="dependency-path-panel">
       <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2">
-          <Route className="h-4 w-4" />
+        <CardTitle className="text-base flex flex-wrap items-center gap-2">
+          <Route className="h-4 w-4 shrink-0" />
           {t("title")}
           {heading && (
-            <span className="font-normal text-muted-foreground">
+            <span className="min-w-0 font-normal text-muted-foreground wrap-anywhere">
               — {heading}
               {headingVersion ? ` ${headingVersion}` : ""}
             </span>
@@ -422,7 +422,7 @@ export function PathChain({ nodes }: { nodes: ComponentPathNode[] }) {
             <span data-role={role} className={pathNodeClass(role)}>
               <span className="min-w-0 font-medium wrap-anywhere">{node.name || node.id}</span>
               {node.version && (
-                <span className="font-mono text-xs opacity-80">
+                <span className="min-w-0 font-mono text-xs opacity-80 wrap-anywhere">
                   {node.version}
                 </span>
               )}

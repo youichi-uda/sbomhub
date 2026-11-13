@@ -239,3 +239,73 @@ test.describe('Dependency path-to-root (M29-B)', () => {
     await expect(page.getByTestId('dependency-path-list')).toHaveCount(0);
   });
 });
+
+// Codex (web dark/narrow) R4 Medium: component names and versions come from
+// the uploaded SBOM, so an unbroken 90-character name or a git-hash version
+// is valid. The selected-component row, the panel heading and the path pills
+// kept that min-content width and widened the project page at 320px.
+test.describe('dependency path at 320px', () => {
+  test.use({ viewport: { width: 320, height: 800 } });
+
+  test('long unbroken names and versions wrap instead of widening the page', async ({ page }) => {
+    const longName = `component-${'x'.repeat(90)}`;
+    const longVersion = `git-${'f'.repeat(64)}`;
+    const node = (name: string, version: string, type = 'library') => ({ id: `pkg:npm/${name}`, name, version, type });
+    await page.route(`**/api/v1/projects/${PROJECT_ID}`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: PROJECT_ID,
+          name: 'Mock Project',
+          description: 'M29-B path view at 320px',
+          created_at: '2026-07-01T00:00:00Z',
+          updated_at: '2026-07-01T00:00:00Z',
+        }),
+      }),
+    );
+    await page.route(`**/api/v1/projects/${PROJECT_ID}/components`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          {
+            id: COMPONENT_ID,
+            sbom_id: '77777777-7777-4777-8777-777777777777',
+            name: longName,
+            version: longVersion,
+            type: 'library',
+            purl: `pkg:npm/${longName}@${longVersion}`,
+            license: 'MIT',
+            created_at: '2026-07-01T00:00:00Z',
+          },
+        ]),
+      }),
+    );
+    await page.route(`**/api/v1/projects/${PROJECT_ID}/components/*/paths`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          component_id: COMPONENT_ID,
+          component: { name: longName, version: longVersion, purl: `pkg:npm/${longName}` },
+          sbom_id: '77777777-7777-4777-8777-777777777777',
+          format: 'cyclonedx',
+          degraded: false,
+          is_direct: false,
+          paths: [[node(`app-${'y'.repeat(90)}`, longVersion, 'application'), node(`parent-${'z'.repeat(90)}`, longVersion), node(longName, longVersion)]],
+          path_count: 1,
+          truncated: false,
+        }),
+      }),
+    );
+    await openComponentsTabAndTriggerPath(page);
+    await expect(page.getByTestId('dependency-path-list')).toContainText(`parent-${'z'.repeat(90)}`);
+
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    expect(scrollWidth, 'the project page must not scroll sideways at 320px').toBeLessThanOrEqual(clientWidth);
+  });
+});
