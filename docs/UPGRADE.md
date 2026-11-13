@@ -2564,3 +2564,15 @@ field `skipped_sources`, MCP payload field `skipped_sources`.
 - **Narrow screens:** below 768px the dashboard sidebar becomes a menu button in the header. No main page scrolls sideways at 320px; wide tables and tab rows scroll inside their own box.
 - **Project page errors:** "Project not found" now appears only when the API answers 404 (or 400 for a malformed id). A server error (500, §27) or a network failure shows "Failed to load the project…" with a Retry button, instead of implying the project was deleted.
 - New UI strings: `Navigation.openMenu` / `closeMenu` / `mainMenu`, `Common.projectLoadFailed`.
+
+## 30. Web: the project page shows the scan state of the latest SBOM
+
+**Who must act:** nobody. The API is unchanged.
+
+- The project page now reads `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` for the latest SBOM. It reads the latest SBOM, its scan state and the vulnerability list in one fixed-order read, and shows them only when they agree.
+- **Running:** a "scan in progress" notice and provisional counts (`n · scanning`). Polled every 3s, every 10s after a minute; not in hidden tabs. **Failed:** an alert with the `reasons` in words (ja/en), including `source_unavailable` (MyJVN suspended since 2026-10-22) and `interrupted` / `queue_full`; the list may be incomplete. **Unknown** (scan status is kept for at least an hour, §25.3) or not loadable: "not confirmed", with Retry. **`skipped_sources`:** a persistent coverage notice (e.g. JVN not checked, `SBOMHUB_JVN=off`).
+- The page never says a bare "No vulnerabilities found.". `completed` does not prove every source and component was checked: offline mode, `?sources=nvd` and the scheduled scan complete without JVN. A completed scan's empty list is described as "recorded no vulnerabilities for what it could look up". Projects without an SBOM show "not scanned".
+- Counts on the tab, the heading and the truncation banner (now translated) are qualified (scanning / incomplete / unconfirmed / partial / checking / load failed) unless the scan completed with nothing skipped.
+- Settled states are re-read once a minute, and when the tab becomes visible again, so a rescan or a new upload (e.g. from CI) is picked up. A failed vulnerability list load is shown as an error, not as an empty list.
+- **Project page errors:** Retry now reloads every project query (components, vulnerabilities, VEX, …), not only the project itself.
+- New UI strings: `ScanStatus.*`.
