@@ -862,3 +862,58 @@ test.describe('project page: malformed settled answers, leaving mid-check (Codex
         expect(afterRelease).toBe(0);
     });
 });
+
+// Codex R8: every list read is checked against the scan state, not only
+// the ones the scan-status query starts.
+test.describe('project page: a list read while a new scan of the same SBOM runs (Codex R8)', () => {
+    let projectId: string | undefined;
+    test.beforeAll(async ({ request }) => {
+        projectId = (await createVulnerableProject(request, 'Scan Status R8')).projectId;
+    });
+    test.afterEach(async ({ page }) => {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+    });
+    test.afterAll(async ({ request }) => {
+        await deleteProject(request, projectId);
+    });
+
+    test('a sort switch during a rescan shows the scan as running, not the completed state', async ({ page }) => {
+        let state = 'completed';
+        await mockScanStatus(page, projectId!, () => ({ status: state }));
+        await page.goto(`/en/projects/${projectId}`);
+        await vulnTab(page).click();
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
+        await page.waitForLoadState('networkidle');
+        // A manual rescan of the same SBOM starts; the user switches the sort.
+        state = 'running';
+        await page.getByRole('button', { name: en.Vulnerabilities.sortByEpss }).click();
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, en.ScanStatus.tabCountRunning));
+    });
+
+    test('a list Retry during a rescan shows the scan as running', async ({ page }) => {
+        let state = 'completed';
+        let failList = false;
+        await mockScanStatus(page, projectId!, () => ({ status: state }));
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${projectId}/vulnerabilities`,
+            (route) => (failList ? route.fulfill({ status: 500, json: { error: 'internal' } }) : route.fallback()),
+        );
+        await page.goto(`/en/projects/${projectId}`);
+        await vulnTab(page).click();
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
+        await page.waitForLoadState('networkidle');
+        // The EPSS list fails to load…
+        failList = true;
+        await page.getByRole('button', { name: en.Vulnerabilities.sortByEpss }).click();
+        const err = page.getByTestId('vulnerabilities-load-error');
+        await expect(err).toBeVisible();
+        await page.waitForLoadState('networkidle');
+        // …a rescan of the same SBOM starts, the outage ends, the user retries.
+        failList = false;
+        state = 'running';
+        await err.getByRole('button', { name: en.Common.retry }).click();
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+        await expect(vulnTab(page)).toHaveText(new RegExp(`· scanning\\)$`));
+    });
+});

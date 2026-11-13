@@ -194,6 +194,25 @@ export default function ProjectDetailPage() {
   // slow response for the previous sort can never be shown for the new one
   // (this replaces the M38 Phase D F448 request-sequence guard). The
   // previous order stays on screen until the new one arrives (or fails).
+  // A list read that the scan-status query did not start (a sort switch, a
+  // Retry, opening the tab) is checked against the scan state too: if the
+  // page shows a settled state and the state read now (after the list) is
+  // different — e.g. a new scan of the same SBOM is running — the page shows
+  // it as running before this list is committed, and the scan-status query
+  // (polling fast again) re-validates it (Codex R8). Skipped while the
+  // scan-status query is fetching: its own settle check covers that list.
+  async function checkSettledStateAfterList(forSbom: string, signal: AbortSignal) {
+    const statusKey = queryKeys.projects.scanStatus(projectId, forSbom);
+    if (queryClient.isFetching({ queryKey: statusKey }) > 0) return;
+    const shown = queryClient.getQueryData<ScanStatus>(statusKey);
+    if (!shown || shown.status === "running") return;
+    const now = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom, signal));
+    signal.throwIfAborted();
+    if (!sameScanAnswer(now, shown)) {
+      queryClient.setQueryData<ScanStatus>(statusKey, { ...now, status: "running" });
+    }
+  }
+
   const vulnerabilitiesQuery = useQuery({
     queryKey: queryKeys.projects.vulnerabilities(projectId, vulnSort, sbomId),
     queryFn: ({ signal }) =>
@@ -217,6 +236,8 @@ export default function ProjectDetailPage() {
             queryKeys.projects.latestSbomId(projectId),
             (current) => latestAfterListRead(current ?? null, forSbom, latest),
           );
+        } else if (forSbom !== null) {
+          await checkSettledStateAfterList(forSbom, signal);
         }
         return { data: data || [], totalCount };
       }),
