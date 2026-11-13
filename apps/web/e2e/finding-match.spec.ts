@@ -284,6 +284,17 @@ test.describe('shared Tooltip on a narrow viewport', () => {
         expect(box.x, 'tooltip left edge').toBeGreaterThanOrEqual(0);
         expect(box.x + box.width, 'tooltip right edge').toBeLessThanOrEqual(vw);
         await page.screenshot({ path: test.info().outputPath(`kev-tooltip-${width}.png`) });
+
+        // Codex R2 Low-1: still inside after the viewport narrows (rotation,
+        // window resize) while it is open.
+        await page.setViewportSize({ width: width - 70, height: 800 });
+        await expect
+          .poll(async () => {
+            const b = (await tip.boundingBox())!;
+            const w = await page.evaluate(() => document.documentElement.clientWidth);
+            return b.x >= 0 && b.x + b.width <= w;
+          })
+          .toBe(true);
       } finally {
         await context.close();
       }

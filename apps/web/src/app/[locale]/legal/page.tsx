@@ -58,7 +58,7 @@ export default async function LegalPage({ params }: Props) {
           {isJapanese ? "特定商取引法に基づく表記" : "Commercial Transactions Act Disclosure"}
         </h1>
 
-        <div className="prose prose-gray max-w-none">
+        <div className="max-w-none">
           {isJapanese ? (
             <table className="w-full border-collapse">
               <tbody>

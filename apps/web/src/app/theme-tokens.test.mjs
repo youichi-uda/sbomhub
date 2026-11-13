@@ -87,6 +87,10 @@ const CLASS_TOKEN = new RegExp(String.raw`^${VARIANTS}!?-?[a-z][a-z0-9\-/[\]().%
 // Classes that intentionally generate no CSS of their own.
 const MARKER_CLASSES = new Set(["group", "peer"]);
 
+function isComparedLiteral(before, after) {
+  return /[=!]=\s*$/.test(before) || /^\s*[=!]=/.test(after);
+}
+
 /** token -> files using it */
 function collectClassTokens() {
   const uses = new Map();
@@ -94,13 +98,29 @@ function collectClassTokens() {
     const text = readFileSync(file, "utf8");
     // Single-line '...' / "..." literals, and `...` template literals that
     // may span lines (a class list broken across lines).
-    for (const m of text.matchAll(/["']([^"'`\n]{2,600})["']|`([^`]{2,2000})`/g)) {
-      const tokens = (m[1] ?? m[2]).split(/\s+/).filter(Boolean);
-      if (!tokens.some((t) => UTILITY_HINT.test(t))) continue;
+    // A literal right after `className=` is a class list whatever it holds
+    // (Codex R2 Low-2: "prose prose-gray max-w-none" has no hint token).
+    for (const m of text.matchAll(/(className=\{?\s*)?(?:["']([^"'`\n]{2,600})["']|`([^`]{2,2000})`)/g)) {
+      // In a template literal, ${...} is code, not classes: drop it, but keep
+      // the string literals inside it (`${x ? ' text-muted-foreground' : ''}`).
+      // A literal compared with === / !== is a value, not a class list
+      // (`authMode === "clerk" ? "bg-green-100" : ...`).
+      const end = m.index + m[0].length;
+      if (isComparedLiteral(text.slice(Math.max(0, m.index - 4), m.index), text.slice(end, end + 4))) continue;
+      const body =
+        m[2] ??
+        m[3].replace(/\$\{([^}]*)\}/g, (_, expr) =>
+          [...expr.matchAll(/["']([^"'\n]*)["']/g)]
+            .filter((q) => !isComparedLiteral(expr.slice(Math.max(0, q.index - 4), q.index), expr.slice(q.index + q[0].length, q.index + q[0].length + 4)))
+            .map((q) => ` ${q[1]} `)
+            .join(" ") || " ",
+        );
+      const tokens = body.split(/\s+/).filter(Boolean);
+      if (!m[1] && !tokens.some((t) => UTILITY_HINT.test(t))) continue;
       for (const t of tokens) {
         // Only hyphenated / variant tokens: a bare word in a class-ish
         // string ("null", "ticket.id") is not a utility candidate.
-        if (!CLASS_TOKEN.test(t) || !/[-:]/.test(t) || MARKER_CLASSES.has(t)) continue;
+        if (!CLASS_TOKEN.test(t) || (!m[1] && !/[-:]/.test(t)) || MARKER_CLASSES.has(t)) continue;
         if (!uses.has(t)) uses.set(t, new Set());
         uses.get(t).add(relative(webRoot, file));
       }
@@ -204,7 +224,7 @@ describe("every class-like token in src/ generates CSS", () => {
     assert.ok(classUses.has("text-muted-foreground"));
     // Codex R1 Low-2: arbitrary variants must be scanned too (table.tsx,
     // alert.tsx), not dropped as non-class tokens.
-    for (const t of ["[&_tr]:border-b", "data-[state=selected]:bg-muted", "[&>svg]:text-destructive"]) {
+    for (const t of ["[&_tr]:border-b", "data-[state=selected]:bg-muted", "[&>svg]:text-destructive", "max-w-none", "flex"]) {
       assert.ok(classUses.has(t), `${t} not collected by the class scan`);
     }
   });

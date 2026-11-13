@@ -144,20 +144,26 @@ function TooltipContent({
   // (a phone-width screen) it would run off-screen (Codex M73 R1 Medium-1).
   // After layout, cap its width to the viewport and shift it back inside,
   // with an 8px inset.
+  // Re-run on resize / rotation while open (Codex M73 R2 Low-1).
   React.useLayoutEffect(() => {
     const el = ref.current;
     if (!open || !el) return;
-    const inset = 8;
-    el.style.marginLeft = "";
-    el.style.maxWidth = "";
-    const vw = document.documentElement.clientWidth;
-    if (el.getBoundingClientRect().width > vw - 2 * inset) {
-      el.style.maxWidth = `${vw - 2 * inset}px`;
-    }
-    const rect = el.getBoundingClientRect();
-    const shift =
-      rect.left < inset ? inset - rect.left : rect.right > vw - inset ? vw - inset - rect.right : 0;
-    if (shift !== 0) el.style.marginLeft = `${shift}px`;
+    const clamp = () => {
+      const inset = 8;
+      el.style.marginLeft = "";
+      el.style.maxWidth = "";
+      const vw = document.documentElement.clientWidth;
+      if (el.getBoundingClientRect().width > vw - 2 * inset) {
+        el.style.maxWidth = `${vw - 2 * inset}px`;
+      }
+      const rect = el.getBoundingClientRect();
+      const shift =
+        rect.left < inset ? inset - rect.left : rect.right > vw - inset ? vw - inset - rect.right : 0;
+      if (shift !== 0) el.style.marginLeft = `${shift}px`;
+    };
+    clamp();
+    window.addEventListener("resize", clamp);
+    return () => window.removeEventListener("resize", clamp);
   }, [open]);
 
   if (!open) return null;

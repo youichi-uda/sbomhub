@@ -58,7 +58,7 @@ export default async function TermsPage({ params }: Props) {
           {isJapanese ? "利用規約" : "Terms of Service"}
         </h1>
 
-        <div className="prose prose-gray max-w-none">
+        <div className="max-w-none">
           {isJapanese ? (
             <>
               <p className="text-muted-foreground mb-6">最終更新日: 2025年1月26日</p>
