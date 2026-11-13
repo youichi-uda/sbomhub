@@ -119,7 +119,8 @@ test.describe('project page: full outage, then Retry', () => {
     await expect(alert).toBeVisible();
     // The outage really covered the sibling routes, not just the project.
     await expect.poll(() => failed.size).toBeGreaterThan(3);
-    expect([...failed]).toEqual(expect.arrayContaining([`${prefix}/components`, `${prefix}/vulnerabilities`]));
+    // (the vulnerability list is read after the latest SBOM, which failed)
+    expect([...failed]).toEqual(expect.arrayContaining([`${prefix}/components`, `${prefix}/sbom`]));
 
     await page.unrouteAll();
     await alert.getByRole('button', { name: en.Common.retry }).click();

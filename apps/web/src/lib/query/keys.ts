@@ -43,24 +43,17 @@ export const queryKeys = {
     byId,
     detail: (projectId: string) => [...byId(projectId), "detail"] as const,
     components: (projectId: string) => [...byId(projectId), "components"] as const,
-    // `sbomId` is the latest SBOM the page knows of (null: none, or not
-    // known): the list endpoint answers for the latest SBOM, so a new one
-    // (an upload, CI) is a new list — never the previous SBOM's rows under
-    // the new SBOM's scan state (Codex R4).
-    vulnerabilities: (projectId: string, sort: "cvss" | "epss", sbomId: string | null) =>
-      [...byId(projectId), "vulnerabilities", { sort, sbomId }] as const,
-    // Prefix of every sort's entry: a scan reaching a terminal state
-    // invalidates all of them (src/lib/scan-status.ts needsVulnRefetch).
+    // The project page's vulnerability list together with the latest SBOM
+    // and its scan state (src/lib/scan-snapshot.ts), one entry per sort.
+    vulnerabilities: (projectId: string, sort: "cvss" | "epss") =>
+      [...byId(projectId), "vulnerabilities", { sort }] as const,
+    // Prefix of every sort's entry (re-read them all at once).
     vulnerabilitiesAll: (projectId: string) => [...byId(projectId), "vulnerabilities"] as const,
     vex: (projectId: string) => [...byId(projectId), "vex"] as const,
     licensePolicies: (projectId: string) => [...byId(projectId), "license-policies"] as const,
     licenseViolations: (projectId: string, sbomId: string | null) =>
       [...byId(projectId), "license-violations", { sbomId }] as const,
     latestSbomId: (projectId: string) => [...byId(projectId), "latest-sbom-id"] as const,
-    scanStatus: (projectId: string, sbomId: string | null) =>
-      [...byId(projectId), "scan-status", { sbomId }] as const,
-    // Prefix of every SBOM's scan-status entry.
-    scanStatusAll: (projectId: string) => [...byId(projectId), "scan-status"] as const,
     sboms: (projectId: string) => [...byId(projectId), "sboms"] as const,
     notificationSettings: (projectId: string) =>
       [...byId(projectId), "notification-settings"] as const,

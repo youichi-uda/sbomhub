@@ -25,13 +25,11 @@ import { describe, test } from "node:test";
 import {
   countQualifierKey,
   emptyStateKey,
-  latestAfterListRead,
   sameScanAnswer,
   parseScanStatus,
   pollIntervalMs,
   reasonItems,
   scanView,
-  settleNeedsListRefetch,
   skippedSourceLabel,
 } from "../scan-status.ts";
 
@@ -204,10 +202,6 @@ describe("pollIntervalMs", () => {
   });
 });
 
-// Codex R1 High: client request-start times do not order server work, and
-// react-query v5 reuses an in-flight request that has no data yet. The list
-// is refetched (fresh, after the status answer arrived) whenever the status
-// settles into a state it was not in before.
 // Codex R4 High: two answers agree only if everything the page shows from
 // them agrees — not just state and total (skipped sources, reasons, error).
 describe("sameScanAnswer", () => {
@@ -225,33 +219,6 @@ describe("sameScanAnswer", () => {
     // A null total only occurs for running / unknown (a settled answer
     // without one parses as unknown), where agreement claims nothing.
     assert.equal(sameScanAnswer({ ...base, status: "unknown", total: null }, { ...base, status: "unknown", total: null }), true);
-  });
-});
-
-describe("settleNeedsListRefetch", () => {
-  const st = (status, total = 0) => ({ status, total, reasons: [], skippedSources: [] });
-  test("a settled state the page did not have before refetches the list", () => {
-    for (const prev of [undefined, st("running"), st("completed"), st("unknown")]) {
-      assert.equal(settleNeedsListRefetch(prev, st("failed")), true, String(prev?.status));
-    }
-    assert.equal(settleNeedsListRefetch(undefined, st("completed")), true);
-    assert.equal(settleNeedsListRefetch(st("running"), st("completed")), true);
-    assert.equal(settleNeedsListRefetch(st("running"), st("unknown")), true);
-  });
-  // Codex R2 High: a rescan of the same SBOM that finished between two
-  // reads reads completed → completed; its findings changed the SBOM's total.
-  test("the same settled state with a different total refetches the list", () => {
-    assert.equal(settleNeedsListRefetch(st("completed", 2), st("completed", 3)), true);
-    assert.equal(settleNeedsListRefetch(st("completed", 2), st("unknown", null)), true);
-    assert.equal(settleNeedsListRefetch(st("unknown", null), st("unknown", null)), false, "Codex R6: unknown settles");
-  });
-  test("a changed coverage (skipped sources) also refetches (Codex R4)", () => {
-    assert.equal(settleNeedsListRefetch(st("completed", 2), { ...st("completed", 2), skippedSources: ["jvn"] }), true);
-  });
-  test("not while running, and not when state and total are unchanged", () => {
-    assert.equal(settleNeedsListRefetch(undefined, st("running")), false);
-    assert.equal(settleNeedsListRefetch(st("completed"), st("running")), false);
-    assert.equal(settleNeedsListRefetch(st("completed", 2), st("completed", 2)), false);
   });
 });
 
@@ -285,21 +252,5 @@ describe("countQualifierKey", () => {
     // Codex R6: no SBOM is "not scanned", never a bare 0.
     assert.equal(countQualifierKey({ kind: "no-sbom" }, { failed: false, fresh: false }), "tabCountNotScanned");
     assert.equal(countQualifierKey({ kind: "no-sbom" }, FRESH), "tabCountNotScanned");
-  });
-});
-
-// Codex R7 Medium: a list read for SBOM A that saw B as latest must not move
-// the page back to B when it has meanwhile moved on to C.
-describe("latestAfterListRead", () => {
-  test("moves to what the list read saw only while the page is still on the list's SBOM", () => {
-    assert.equal(latestAfterListRead("A", "A", "B"), "B");
-    assert.equal(latestAfterListRead(null, null, "B"), "B");
-  });
-  test("never moves backwards or sideways once the page moved on", () => {
-    assert.equal(latestAfterListRead("C", "A", "B"), "C");
-    assert.equal(latestAfterListRead("C", null, "B"), "C");
-  });
-  test("no change when the list read saw the same SBOM", () => {
-    assert.equal(latestAfterListRead("A", "A", "A"), "A");
   });
 });

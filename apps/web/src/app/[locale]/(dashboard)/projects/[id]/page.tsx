@@ -29,15 +29,12 @@ import { useRetainedData } from "@/lib/query/use-retained-data";
 import { loadErrorState } from "@/lib/load-state";
 import {
   countQualifierKey,
-  latestAfterListRead,
   parseScanStatus,
   pollIntervalMs,
   scanView,
-  sameScanAnswer,
-  settleNeedsListRefetch,
   type ListState,
-  type ScanStatus,
 } from "@/lib/scan-status";
+import { readSnapshot, SnapshotError, type Snapshot } from "@/lib/scan-snapshot";
 
 // M13-1 #87 / F174: "apikeys" rejoined the Tab union so the project
 // detail page surfaces project-scoped API key CRUD again.
@@ -56,10 +53,6 @@ import {
 //   2. api-keys.spec.ts (M12-1 #82 carryover) was written for in-tab CRUD;
 //   3. the tenant-wide alternative remains at /settings/apikeys.
 type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "notifications" | "apikeys";
-
-// How many times a settled scan-status answer is re-validated (list → latest
-// SBOM → state) before a state that keeps moving is treated as not final.
-const SETTLE_ATTEMPTS = 3;
 
 // Loader helper: log a failed fetch under the same message the hand-written
 // loaders used, then rethrow so react-query keeps the previous data.
@@ -176,88 +169,90 @@ export default function ProjectDetailPage() {
     queryFn: () =>
       logged("Failed to load SBOM ID:", async (): Promise<string | null> =>
         (await api.projects.getLatestSbom(projectId))?.id ?? null),
-    // Re-read once a minute (visible tab only): an SBOM uploaded elsewhere
-    // (CI) while this page is open — also while the previous one is still
-    // being scanned (Codex R3) — moves the page to it (the scan-status key
-    // follows the id). The scan-status query also re-reads it after every
-    // settled answer.
-    refetchInterval: (query) => (query.state.status === "success" ? 60000 : false),
   });
   const sbomId = sbomIdQuery.data ?? null;
 
-  // #F28: the meta variant reads X-Total-Count instead of inferring the
-  // count from the (page-truncated) array length. vulnTotalCount carries
-  // that server-side total (M1 Codex review #F28): the tab counter and the
-  // truncation banner below trip when it exceeds the page we loaded.
-  // M38-B (F447 #159): the sort key is part of the query key, so a toggle
-  // to EPSS re-fetches with the exploitation-probability ordering, and a
-  // slow response for the previous sort can never be shown for the new one
-  // (this replaces the M38 Phase D F448 request-sequence guard). The
-  // previous order stays on screen until the new one arrives (or fails).
-  // A list read that the scan-status query did not start (a sort switch, a
-  // Retry, opening the tab) is checked against the scan state too: if the
-  // page shows a settled state and the state read now (after the list) is
-  // different — e.g. a new scan of the same SBOM is running — the page shows
-  // it as running before this list is committed, and the scan-status query
-  // (polling fast again) re-validates it (Codex R8). Skipped while the
-  // scan-status query is fetching: its own settle check covers that list.
-  async function checkSettledStateAfterList(forSbom: string, signal: AbortSignal) {
-    const statusKey = queryKeys.projects.scanStatus(projectId, forSbom);
-    if (queryClient.isFetching({ queryKey: statusKey }) > 0) return;
-    const shown = queryClient.getQueryData<ScanStatus>(statusKey);
-    if (!shown || shown.status === "running") return;
-    const now = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom, signal));
-    signal.throwIfAborted();
-    if (!sameScanAnswer(now, shown)) {
-      queryClient.setQueryData<ScanStatus>(statusKey, { ...now, status: "running" });
-    }
-  }
-
-  const vulnerabilitiesQuery = useQuery({
-    queryKey: queryKeys.projects.vulnerabilities(projectId, vulnSort, sbomId),
+  // The vulnerability list together with the latest SBOM and its scan state
+  // (integration Codex review 2026-11-13, High; rounds 1–9): ONE query reads
+  // them in a fixed order and returns only answers that agree
+  // (src/lib/scan-snapshot.ts readSnapshot), so the list, the count and the
+  // empty state can never be paired with another SBOM's or an earlier
+  // scan's state. #F28: the meta variant reads X-Total-Count (the
+  // server-side total, not the page length). M38-B (F447 #159): the sort is
+  // part of the key, so a toggle re-reads with that order and a slow answer
+  // for the previous sort is never shown for the new one.
+  //
+  // Polled while the scan runs (3s, then 10s after a minute; a poll that
+  // finds the same SBOM still running costs two requests), and once a minute
+  // once settled — so a rescan or a new upload (CI) is noticed. react-query
+  // does not poll a hidden tab (refetchIntervalInBackground stays off). A
+  // failed read stops polling until Retry. `signal` is consumed: leaving the
+  // page aborts a read between its requests (Codex R6).
+  const snapshotQuery = useQuery({
+    queryKey: queryKeys.projects.vulnerabilities(projectId, vulnSort),
     queryFn: ({ signal }) =>
-      logged("Failed to load vulnerabilities:", async (): Promise<{ data: Vulnerability[]; totalCount: number }> => {
-        const forSbom = sbomId;
-        const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId, {
-          sort: vulnSort,
-        });
-        // The endpoint answers for whichever SBOM is latest when it is
-        // served, not for `forSbom` (Codex R5). Re-read the latest SBOM
-        // after the list: SBOMs are only added, so if it is still
-        // `forSbom`, the list was `forSbom`'s. If another SBOM appeared
-        // (CI), move the page to it — the list and scan-status keys follow
-        // the id, so this answer (filed under the old SBOM) is never shown.
-        signal.throwIfAborted();
-        const latest = (await api.projects.getLatestSbom(projectId))?.id ?? null;
-        signal.throwIfAborted();
-        if (latest !== forSbom) {
-          // Only while the page still holds `forSbom` (Codex R7).
-          queryClient.setQueryData<string | null>(
-            queryKeys.projects.latestSbomId(projectId),
-            (current) => latestAfterListRead(current ?? null, forSbom, latest),
-          );
-        } else if (forSbom !== null) {
-          await checkSettledStateAfterList(forSbom, signal);
-        }
-        return { data: data || [], totalCount };
-      }),
-    // Wait for the latest SBOM lookup (success or failure) so the list is
-    // keyed by the SBOM it belongs to; a failed lookup still loads it.
-    enabled: !sbomIdQuery.isPending,
+      logged("Failed to load vulnerabilities:", (): Promise<Snapshot<Vulnerability>> =>
+        readSnapshot<Vulnerability>(
+          {
+            latestSbomId: async () => (await api.projects.getLatestSbom(projectId))?.id ?? null,
+            scanStatus: async (id) => parseScanStatus(await api.projects.getScanStatus(projectId, id, signal)),
+            list: async () => {
+              const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId, {
+                sort: vulnSort,
+              });
+              return { data: data || [], totalCount };
+            },
+          },
+          queryClient.getQueryData<Snapshot<Vulnerability>>(queryKeys.projects.vulnerabilities(projectId, vulnSort)),
+          signal,
+        )),
+    refetchInterval: (query) =>
+      query.state.status === "error" || query.state.data?.statusFailed
+        ? false
+        : query.state.data && query.state.data.sbomId === null
+          ? 60000
+          : pollIntervalMs(query.state.data?.status?.status, query.state.dataUpdateCount),
   });
-  // Rows are kept through a refetch or a sort change of the SAME SBOM only:
-  // another SBOM's rows never stand in for this one's (Codex R4).
-  const vulnerabilitiesPage = useRetainedData(vulnerabilitiesQuery.data, `${projectId}:${sbomId ?? ""}`);
-  const vulnerabilities: Vulnerability[] = vulnerabilitiesPage?.data ?? [];
-  const vulnTotalCount = vulnerabilitiesPage?.totalCount ?? 0;
-  const vulnLoadError = loadErrorState(vulnerabilitiesQuery.isError, vulnerabilities.length > 0);
-  // The list for the CURRENT sort is loaded and nothing is refreshing it:
-  // only then do its rows / count / emptiness stand for the scan state
-  // (rows retained from another sort or an earlier load do not; Codex R2).
+  // The previous sort's snapshot stays on screen while a new sort loads
+  // (marked "checking": vulnList.fresh is false until this key answers).
+  const snapshot = useRetainedData(snapshotQuery.data, projectId);
+  const vulnerabilities: Vulnerability[] = snapshot?.list.data ?? [];
+  const vulnTotalCount = snapshot?.list.totalCount ?? 0;
+  const vulnLoadError = loadErrorState(snapshotQuery.isError, vulnerabilities.length > 0);
+  const snapshotFailedAt =
+    snapshotQuery.error instanceof SnapshotError ? snapshotQuery.error.stage : snapshotQuery.isError ? "latest" : null;
+  // The list for the CURRENT sort is a validated answer (rows retained from
+  // the other sort are not; Codex R2), and its last read did not fail.
   const vulnList: ListState = {
-    failed: vulnerabilitiesQuery.isError,
-    fresh: vulnerabilitiesQuery.isSuccess && !vulnerabilitiesQuery.isFetching,
+    failed: snapshotQuery.isError,
+    fresh: snapshotQuery.isSuccess,
   };
+  const scan = scanView({
+    sbom: {
+      pending: snapshot === undefined && !snapshotQuery.isError,
+      // The latest SBOM could not be read (now), or nothing was ever read:
+      // nothing about the scan is known.
+      error: snapshotFailedAt === "latest" || (snapshot === undefined && snapshotQuery.isError),
+      id: snapshot?.sbomId ?? null,
+    },
+    status: {
+      pending: false,
+      error: snapshot?.statusFailed ?? false,
+      data: snapshot?.status ?? undefined,
+    },
+  });
+  // The total as text, qualified like the tab counter (the truncation banner).
+  const vulnTotalQualifier = countQualifierKey(scan, vulnList);
+  const vulnTotalLabel =
+    vulnTotalQualifier === null
+      ? String(vulnTotalCount)
+      : t(`ScanStatus.${vulnTotalQualifier}`, { count: String(vulnTotalCount) });
+
+  // Opening the vulnerabilities tab, the scan notice's Retry and the list's
+  // Retry all re-read the whole snapshot with a request that starts now.
+  async function refreshVulnerabilities() {
+    await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
+  }
 
   const vexQuery = useQuery({
     queryKey: queryKeys.projects.vex(projectId),
@@ -274,110 +269,6 @@ export default function ProjectDetailPage() {
         (await api.projects.getLicensePolicies(projectId)) || []),
   });
   const licensePolicies = licensePoliciesQuery.data ?? [];
-
-
-  // Background scan of the latest SBOM (integration Codex review 2026-11-13,
-  // High): the empty list and the count say what the scan state allows
-  // (src/lib/scan-status.ts). Polled while running (3s, then 10s after a
-  // minute; never in a hidden tab — react-query's refetchIntervalInBackground
-  // is off); a failed poll stops polling and shows the status as unavailable
-  // with a Retry; a settled state is re-read once a minute.
-  //
-  // A settled answer is committed only together with a list that matches it
-  // (Codex R1 / R2 High):
-  //   1. when it is new (state or the SBOM's finding total changed), the
-  //      list is fetched again with a request that starts after the answer
-  //      arrived — the API publishes a terminal state only after the
-  //      findings committed;
-  //   2. then the latest SBOM is re-read: the list endpoint answers for
-  //      whichever SBOM is latest, so if another one was uploaded meanwhile
-  //      (CI), the page moves to it (its id changes the scan-status key:
-  //      "checking", then that SBOM's own state) instead of pairing this
-  //      SBOM's state with the other SBOM's list;
-  //   3. and the state is read once more: if it moved (another scan of this
-  //      SBOM began, or finished and changed the finding total), steps 1–3
-  //      run again for the new answer (Codex R3) — a few times at most; a
-  //      state that keeps moving is still being written, so the page treats
-  //      it as running (not final) and keeps polling.
-  // Residual: a whole scan of the same SBOM that starts AND ends between
-  // two reads without changing the finding total is not detectable — the
-  // API exposes no scan generation.
-  const scanStatusQuery = useQuery({
-    queryKey: queryKeys.projects.scanStatus(projectId, sbomId),
-    // `signal` is consumed, so react-query aborts the whole chain when the
-    // page unmounts or the query is cancelled; each stage checks it, so an
-    // answer that arrives late starts no further requests (Codex R6).
-    queryFn: ({ signal }) =>
-      logged("Failed to load scan status:", async (): Promise<ScanStatus> => {
-        const forSbom = sbomId as string;
-        const key = queryKeys.projects.scanStatus(projectId, forSbom);
-        let prev = queryClient.getQueryData<ScanStatus>(key);
-        let status = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom, signal));
-        for (let attempt = 0; attempt < SETTLE_ATTEMPTS; attempt++) {
-          if (status.status === "running") return status;
-          const listChanged = settleNeedsListRefetch(prev, status);
-          signal.throwIfAborted();
-          if (listChanged) {
-            await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
-          }
-          signal.throwIfAborted();
-          await refetchFresh(queryKeys.projects.latestSbomId(projectId));
-          if (!listChanged) return status;
-          signal.throwIfAborted();
-          const again = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom, signal));
-          if (sameScanAnswer(again, status)) return status;
-          prev = status;
-          status = again;
-        }
-        // Still moving: not final. "running" keeps the page polling and
-        // every count qualified until two reads agree.
-        return { status: "running", reasons: [], skippedSources: [], total: status.total };
-      }),
-    enabled: !!sbomId,
-    refetchInterval: (query) =>
-      query.state.status === "error"
-        ? false
-        : pollIntervalMs(query.state.data?.status, query.state.dataUpdateCount),
-  });
-  const scan = scanView({
-    sbom: { pending: sbomIdQuery.isPending, error: sbomIdQuery.isError, id: sbomId },
-    status: {
-      pending: scanStatusQuery.isPending,
-      error: scanStatusQuery.isError,
-      data: scanStatusQuery.data,
-    },
-  });
-  // The total as text, qualified like the tab counter (the truncation banner).
-  const vulnTotalQualifier = countQualifierKey(scan, vulnList);
-  const vulnTotalLabel =
-    vulnTotalQualifier === null
-      ? String(vulnTotalCount)
-      : t(`ScanStatus.${vulnTotalQualifier}`, { count: String(vulnTotalCount) });
-
-  // Retry the chain in order (Codex R2): the latest SBOM, then its state,
-  // then the list (refreshVulnerabilities below). Both may have failed in the same
-  // outage; one click recovers both. A changed SBOM id re-keys the status
-  // query, which then fetches by itself.
-  // The list is re-read too: its own SBOM check (Codex R5) reads the latest
-  // SBOM, so it failed in the same outage.
-  async function retryScanStatus() {
-    await refreshVulnerabilities();
-  }
-
-  // Opening the vulnerabilities tab refreshes the list. The list endpoint
-  // answers for whichever SBOM is latest NOW (CI may have uploaded a new
-  // one since the page loaded), so the latest SBOM and its scan state are
-  // re-read first, then the list: a new SBOM re-keys the scan status
-  // (checking → its own state, which refetches the list when it settles),
-  // and the same SBOM gets its state re-read before the list is. The latest
-  // SBOM is read once more after the list: an upload between the two moves
-  // the page to the new SBOM rather than pairing the lists (Codex R2).
-  async function refreshVulnerabilities() {
-    await refetchFresh(queryKeys.projects.latestSbomId(projectId));
-    await refetchFresh(queryKeys.projects.scanStatusAll(projectId));
-    await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
-    await refetchFresh(queryKeys.projects.latestSbomId(projectId));
-  }
 
   const licenseViolationsQuery = useQuery({
     queryKey: queryKeys.projects.licenseViolations(projectId, sbomId),
@@ -577,22 +468,14 @@ export default function ProjectDetailPage() {
     setUploading(true);
     try {
       const content = await file.text();
-      const created = await api.projects.uploadSbom(projectId, content);
-      // The new SBOM is the latest one now: follow ITS scan (running right
-      // after the upload) and show its list, not the previous SBOM's. Its
-      // id is set directly (Codex R1 High): a latest-SBOM request still in
-      // flight from before the upload would otherwise be reused and answer
-      // the OLD id. The scan status re-keys to the new SBOM (checking, then
-      // running), and its settling refetches the list.
-      const latestKey = queryKeys.projects.latestSbomId(projectId);
-      await queryClient.cancelQueries({ queryKey: latestKey });
-      if (created && typeof created.id === "string" && created.id !== "") {
-        queryClient.setQueryData(latestKey, created.id);
-      }
-      // Then confirm it is still the latest (another upload may have landed
-      // in between, Codex R4); the list is keyed by the SBOM id, so a new id
-      // brings a new list by itself.
-      void refetchFresh(latestKey);
+      await api.projects.uploadSbom(projectId, content);
+      // The new SBOM is the latest one now: re-read the snapshot (it follows
+      // the new SBOM's scan, running right after the upload) and the
+      // license tab's SBOM id. refetchFresh cancels reads that started
+      // before the upload, so their answers (the OLD SBOM) are discarded
+      // (Codex R1 High).
+      void refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
+      void refetchFresh(queryKeys.projects.latestSbomId(projectId));
       alert(tp("uploadSuccess"));
       selectTab("components");
     } catch (error) {
@@ -706,8 +589,8 @@ export default function ProjectDetailPage() {
       <ScanFinishedAnnouncer view={scan} />
       <ScanStatusNotice
         view={scan}
-        onRetry={() => void retryScanStatus()}
-        retrying={sbomIdQuery.isFetching || scanStatusQuery.isFetching}
+        onRetry={() => void refreshVulnerabilities()}
+        retrying={snapshotQuery.isFetching}
       />
 
       <div className="flex flex-wrap gap-2 mb-6">
@@ -982,8 +865,8 @@ export default function ProjectDetailPage() {
                 compact={vulnLoadError === "banner"}
                 message={t("ScanStatus.listLoadFailed")}
                 retryLabel={tc("retry")}
-                onRetry={() => void vulnerabilitiesQuery.refetch()}
-                retrying={vulnerabilitiesQuery.isFetching}
+                onRetry={() => void refreshVulnerabilities()}
+                retrying={snapshotQuery.isFetching}
               />
             )}
             {vulnLoadError === "full" ? null : vulnerabilities.length === 0 ? (

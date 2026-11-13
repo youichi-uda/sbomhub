@@ -225,28 +225,6 @@ export function pollIntervalMs(state: ScanState | undefined, answers: number): n
   return answers < 20 ? 3000 : 10000;
 }
 
-/**
- * Whether a scan-status answer must be followed by a fresh vulnerability
- * list before the page shows it: the scan has settled (completed / failed /
- * unknown) into a state the page did not already have.
- *
- * The page then cancels any list request in flight and fetches the list
- * again, AFTER this answer arrived, before the answer is committed. The API
- * publishes a terminal state only after the scan's findings committed
- * (handler/sbom.go ScanStatus), so a list requested after the answer was
- * received includes them. Client request-start times cannot establish that
- * order (Codex R1 High), and react-query v5 hands back an in-flight request
- * that has no data yet instead of starting a new one, hence the cancel.
- */
-export function settleNeedsListRefetch(prev: ScanStatus | undefined, next: ScanStatus): boolean {
-  if (next.status === "running") return false;
-  if (prev === undefined) return true;
-  // Any difference the page would show — e.g. the same settled state with a
-  // different total or coverage: another scan of this SBOM ran between the
-  // two answers (Codex R2 / R4).
-  return !sameScanAnswer(prev, next);
-}
-
 function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
@@ -310,19 +288,4 @@ export function countQualifierKey(view: ScanView, list: ListState): CountQualifi
     case "unavailable":
       return "tabCountUnconfirmed";
   }
-}
-
-/**
- * The latest-SBOM id the page should hold after a vulnerability list read for
- * `listSbom` saw `observed` as the latest SBOM. It moves to `observed` only
- * while the page still holds `listSbom`: a slow read must not drag a page that
- * has meanwhile moved on (another upload, a newer read) back to an older SBOM
- * (Codex R7).
- */
-export function latestAfterListRead(
-  current: string | null,
-  listSbom: string | null,
-  observed: string | null,
-): string | null {
-  return current === listSbom ? observed : current;
 }

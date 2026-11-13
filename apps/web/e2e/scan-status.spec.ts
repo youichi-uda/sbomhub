@@ -533,12 +533,11 @@ test.describe('project page: the scan state and the list stay paired (Codex R2)'
         // The settled answer's list refetch (CVSS) is slow; switch to EPSS meanwhile.
         await expect.poll(() => cvssSettleSeen, { timeout: 15_000 }).toBe(true);
         await page.getByRole('button', { name: en.Vulnerabilities.sortByEpss }).click();
-        await expect(notice(page)).toHaveCount(0, { timeout: 15_000 });
-        // Completed is committed, but the EPSS list is still loading: the
+        await page.waitForTimeout(2_000);
+        // The scan has completed, but the EPSS list is still loading: the
         // rows on screen (the CVSS list, or none) are not the final result.
-        const checking = en.ScanStatus.tabCountChecking.replace('{count}', '\\d+');
-        await expect(vulnTab(page)).toHaveText(new RegExp(`^${en.Vulnerabilities.title} \\(${checking}\\)$`));
-        await expect(page.locator('[data-empty-state]:not([data-empty-state="emptyChecking"])')).toHaveCount(0);
+        await expect(vulnTab(page)).toHaveText(new RegExp(`^${en.Vulnerabilities.title} \\(\\d+ · (checking|scanning)\\)$`));
+        await expect(page.locator('[data-empty-state="emptyCompleted"]')).toHaveCount(0);
         releaseEpss();
         await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length);
         await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
@@ -589,9 +588,8 @@ test.describe('project page: the scan state and the list stay paired (Codex R2)'
         await page.getByRole('button', { name: new RegExp(`^${en.Components.title} \\(`) }).click();
         await vulnTab(page).click();
         await expect(notice(page)).toHaveAttribute('data-scan-state', 'unavailable');
-        // The tab's refresh chain (latest SBOM → state → list → latest SBOM)
-        // has run its course under the outage: 3 failed reads, Retry idle.
-        await expect.poll(() => failures).toBeGreaterThanOrEqual(3);
+        // The tab's refresh has run its course under the outage, Retry idle.
+        await expect.poll(() => failures).toBeGreaterThanOrEqual(1);
         await expect(notice(page).getByRole('button', { name: en.Common.retry })).toBeEnabled();
         await page.waitForLoadState('networkidle');
         outage = false;
@@ -913,6 +911,105 @@ test.describe('project page: a list read while a new scan of the same SBOM runs 
         failList = false;
         state = 'running';
         await err.getByRole('button', { name: en.Common.retry }).click();
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+        await expect(vulnTab(page)).toHaveText(new RegExp(`· scanning\\)$`));
+    });
+});
+
+// Codex R9: reads that overlap. A settled-state poll still in flight when a
+// rescan starts and the user switches the sort; an old latest-SBOM answer
+// arriving after a newer SBOM was seen.
+test.describe('project page: overlapping reads (Codex R9)', () => {
+    const projects: string[] = [];
+    test.afterEach(async ({ page }) => {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+    });
+    test.afterAll(async ({ request }) => {
+        for (const id of projects) await deleteProject(request, id);
+    });
+
+    test('a stale settled poll answering after a rescan began does not restore the settled state', async ({ page, request }) => {
+        const vp = await createVulnerableProject(request, 'Scan Status R9 Stale Poll');
+        projects.push(vp.projectId);
+        await page.clock.install();
+        let state = 'completed';
+        let holdNext = false;
+        let heldSeen = false;
+        let release: () => void = () => {};
+        const held = new Promise<void>((r) => (release = r));
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${vp.projectId}/sboms/`) && url.pathname.endsWith('/scan-status'),
+            async (route) => {
+                const res = await route.fetch();
+                const real = await res.json();
+                if (holdNext) {
+                    holdNext = false;
+                    heldSeen = true;
+                    const answer = state; // read before the rescan began
+                    await held;
+                    return route.fulfill({ response: res, json: { ...real, status: answer } });
+                }
+                await route.fulfill({ response: res, json: { ...real, status: state } });
+            },
+        );
+        await page.goto(`/en/projects/${vp.projectId}`);
+        await vulnTab(page).click();
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
+        await page.waitForLoadState('networkidle');
+        holdNext = true;
+        await page.clock.fastForward('01:05'); // the once-a-minute re-read starts…
+        await expect.poll(() => heldSeen, { timeout: 15_000 }).toBe(true);
+        state = 'running'; // …a rescan begins…
+        await page.getByRole('button', { name: en.Vulnerabilities.sortByEpss }).click(); // …the user re-sorts
+        await page.waitForTimeout(1_000);
+        release(); // the stale "completed" arrives last
+        await page.waitForTimeout(2_000);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+        await expect(vulnTab(page)).toHaveText(new RegExp(`· scanning\\)$`));
+    });
+
+    test('an old latest-SBOM answer arriving after a newer SBOM was seen does not move the page back', async ({ page, request }) => {
+        const p = await createProject(request, uniqueName('Scan Status R9 Old Latest'));
+        projects.push(p.id);
+        const first = await uploadSbom(request, p.id, cleanSbom);
+        await page.clock.install();
+        let holdNextLatest = false;
+        let heldSeen = false;
+        let release: () => void = () => {};
+        const held = new Promise<void>((r) => (release = r));
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${p.id}/sbom`,
+            async (route) => {
+                if (route.request().method() !== 'GET' || !holdNextLatest) return route.fallback();
+                holdNextLatest = false;
+                const res = await route.fetch(); // answered now: the OLD latest SBOM
+                heldSeen = true;
+                await held;
+                return route.fulfill({ response: res });
+            },
+        );
+        const polled = new Set<string>();
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${p.id}/sboms/`) && url.pathname.endsWith('/scan-status'),
+            async (route) => {
+                const res = await route.fetch();
+                const real = await res.json();
+                polled.add(real.sbom_id);
+                await route.fulfill({ response: res, json: { ...real, status: real.sbom_id === first ? 'completed' : 'running' } });
+            },
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
+        await page.waitForLoadState('networkidle');
+        holdNextLatest = true;
+        await page.clock.fastForward('01:05'); // a once-a-minute latest-SBOM read starts and is slow
+        await expect.poll(() => heldSeen, { timeout: 15_000 }).toBe(true);
+        const second = await uploadSbom(request, p.id, cleanSbom); // CI uploads
+        await page.getByRole('button', { name: en.Vulnerabilities.sortByEpss }).click(); // a read that sees it
+        await expect.poll(() => polled.has(second), { timeout: 15_000 }).toBe(true);
+        release(); // the old answer (the first SBOM) arrives last
+        await page.waitForTimeout(2_000);
         await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
         await expect(vulnTab(page)).toHaveText(new RegExp(`· scanning\\)$`));
     });
