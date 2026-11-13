@@ -133,11 +133,11 @@ function ProjectScoresList({ scores, noDataMessage, locale }: { scores: ProjectS
     <div className="space-y-4">
       {scores.map((score) => (
         <div key={score.project_id} className="space-y-2">
-          <div className="flex justify-between items-center">
-            <Link href={`/${locale}/projects/${score.project_id}`} className="font-medium hover:underline">
+          <div className="flex justify-between items-center gap-2">
+            <Link href={`/${locale}/projects/${score.project_id}`} className="min-w-0 font-medium hover:underline wrap-anywhere">
               {score.project_name}
             </Link>
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               <span className="text-sm text-muted-foreground">{score.risk_score}/100</span>
               <SeverityBadge severity={score.severity} />
             </div>

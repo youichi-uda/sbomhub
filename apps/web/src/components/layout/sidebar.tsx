@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -25,13 +25,30 @@ export function Sidebar() {
 
 export function MobileNav() {
   const t = useTranslations("Navigation");
-  // Open "on" the page it was opened from: any navigation (a link, Back)
-  // closes it without an effect. A link to the page already shown does not
-  // change the pathname, so the links also close it themselves (onNavigate).
+  const [open, setOpen] = useState(false);
+  // Any navigation (a link, Back / Forward) closes it: the state is reset
+  // while rendering the new pathname (React's "adjust state on prop change"
+  // pattern), so returning to the page later does not reopen it (Codex R1
+  // Medium-1). A link to the page already shown does not change the
+  // pathname, so the links also close it themselves (onNavigate).
   const pathname = usePathname();
-  const [openOn, setOpenOn] = useState<string | null>(null);
-  const open = openOn === pathname;
-  const setOpen = (next: boolean) => setOpenOn(next ? pathname : null);
+  const [shownOn, setShownOn] = useState(pathname);
+  if (shownOn !== pathname) {
+    setShownOn(pathname);
+    setOpen(false);
+  }
+  // Growing past md hides this wrapper (md:hidden) but would leave the
+  // modal's focus trap and Escape listener live: close it instead.
+  useEffect(() => {
+    if (!open) return;
+    const wide = window.matchMedia("(min-width: 768px)");
+    const close = () => {
+      if (wide.matches) setOpen(false);
+    };
+    close();
+    wide.addEventListener("change", close);
+    return () => wide.removeEventListener("change", close);
+  }, [open]);
 
   return (
     <div className="md:hidden">

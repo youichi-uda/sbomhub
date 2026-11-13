@@ -379,9 +379,9 @@ export default function METIAssessmentPage() {
           {t("backToProject")}
         </Link>
         <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
+          <div className="min-w-0 max-w-full">
             <h1 className="text-3xl font-bold">{t("title")}</h1>
-            <p className="text-muted-foreground">
+            <p className="text-muted-foreground wrap-anywhere">
               {project ? project.name : ""}
             </p>
             <p className="mt-1 text-sm text-muted-foreground">

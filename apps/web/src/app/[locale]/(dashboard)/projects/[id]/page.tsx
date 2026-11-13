@@ -441,8 +441,8 @@ export default function ProjectDetailPage() {
             scroll); they now wrap. */}
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
-            <h1 className="text-3xl font-bold wrap-break-word">{project.name}</h1>
-            <p className="text-muted-foreground wrap-break-word">{project.description}</p>
+            <h1 className="text-3xl font-bold wrap-anywhere">{project.name}</h1>
+            <p className="text-muted-foreground wrap-anywhere">{project.description}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Link href={`/projects/${projectId}/diff`}>

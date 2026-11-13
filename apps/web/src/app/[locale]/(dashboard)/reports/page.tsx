@@ -195,6 +195,10 @@ export default function ReportsPage() {
                         </button>
                     </div>
                 ) : (
+                    // The card clips to its rounded corners (overflow-hidden);
+                    // the seven columns scroll inside this box instead of
+                    // being cut off on a phone (Codex R1 Medium-2).
+                    <div className="overflow-x-auto">
                     <table className="w-full">
                         <thead className="bg-muted/50">
                             <tr>
@@ -252,6 +256,7 @@ export default function ReportsPage() {
                             ))}
                         </tbody>
                     </table>
+                    </div>
                 )}
             </div>
 

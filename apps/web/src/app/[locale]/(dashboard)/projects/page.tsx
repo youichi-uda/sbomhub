@@ -133,12 +133,12 @@ export default function ProjectsPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           {projects.map((project) => (
             <Card key={project.id} className="hover:shadow-md transition-shadow">
               <CardHeader className="pb-2">
                 <CardTitle className="text-lg">
-                  <Link href={`/projects/${project.id}`} className="hover:underline">
+                  <Link href={`/projects/${project.id}`} className="hover:underline wrap-anywhere">
                     {project.name}
                   </Link>
                 </CardTitle>
