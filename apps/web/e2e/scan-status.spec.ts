@@ -1243,3 +1243,31 @@ test('project page: no scan polling behind "Project not found" (Codex R12)', asy
     await page.waitForTimeout(1_500);
     expect(reads).toBe(before);
 });
+
+// Codex R13 Low: re-sorting a completed result must not re-announce the
+// scan as finished (the live region must not clear and refill).
+test('project page: re-sorting a completed result does not re-announce it (Codex R13)', async ({ page, request }) => {
+    const p = await createProject(request, uniqueName('Scan Status R13 Announce'));
+    try {
+        await uploadSbom(request, p.id, cleanSbom);
+        await page.goto(`/en/projects/${p.id}`);
+        await vulnTab(page).click();
+        const announcer = page.getByTestId('scan-finished-announcer');
+        await expect(announcer).toHaveText(en.ScanStatus.scanFinishedAnnouncement);
+        await page.evaluate(() => {
+            const el = document.querySelector('[data-testid="scan-finished-announcer"]')!;
+            (window as unknown as { __changes: string[] }).__changes = [];
+            new MutationObserver(() =>
+                (window as unknown as { __changes: string[] }).__changes.push(el.textContent ?? ''),
+            ).observe(el, { childList: true, characterData: true, subtree: true });
+        });
+        await page.getByRole('button', { name: en.Vulnerabilities.sortByEpss }).click();
+        await expect(page.getByRole('button', { name: en.Vulnerabilities.sortByEpss })).toHaveAttribute('aria-pressed', 'true');
+        await page.waitForLoadState('networkidle');
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
+        const changes = await page.evaluate(() => (window as unknown as { __changes: string[] }).__changes);
+        expect(changes).toEqual([]);
+    } finally {
+        await deleteProject(request, p.id);
+    }
+});

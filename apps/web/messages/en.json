@@ -1622,7 +1622,7 @@
     "emptyRunning": "No vulnerabilities recorded yet: the scan is still running.",
     "emptyUnknown": "No vulnerabilities are recorded, but the scan status is unknown, so this is not a confirmed clean result.",
     "emptyFailed": "No vulnerabilities are recorded, but the last scan failed, so this list may be incomplete.",
-    "emptyPartial": "No vulnerabilities found in the sources that were checked. {sources} was not checked (operator setting), so this result may be incomplete.",
+    "emptyPartial": "The last completed scan recorded no vulnerabilities for this SBOM among what it could look up, and {sources} was not checked (operator setting), so this result may be incomplete. An offline server or components without a usable name are not checked either.",
     "tabCountRunning": "{count} · scanning",
     "reasonDeadlineExceeded": "The scan hit its time limit (SBOMHUB_SCAN_DEADLINE) before every component was checked.",
     "reasonCancelled": "The scan was cancelled (for example, the API server shut down) before every component was checked.",

@@ -263,7 +263,9 @@ export default function ProjectDetailPage() {
       // until a snapshot read after it has answered.
       pending:
         !snapshotQuery.isError &&
-        (snapshot === undefined || (snapshotQuery.data?.gen ?? -1) < scanStaleGen),
+        // (the snapshot on screen — possibly the other sort's, retained while
+        // this sort loads — is what is judged; Codex R13)
+        (snapshot === undefined || snapshot.gen < scanStaleGen),
       // A refresh that failed — at any stage — leaves nothing current to say
       // about the latest SBOM's scan (it may be a new SBOM whose list could
       // not be read; Codex R10). The previous answer is not shown as current.
