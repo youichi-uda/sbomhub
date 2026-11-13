@@ -178,6 +178,14 @@ type ollamaChatResponse struct {
 	Done            bool          `json:"done"`
 	PromptEvalCount int           `json:"prompt_eval_count"`
 	EvalCount       int           `json:"eval_count"`
+	// DoneReason is why generation ended (api.ChatResponse.DoneReason,
+	// `json:"done_reason,omitempty"`): "stop" (end of sequence or a stop
+	// sequence), "length" (num_predict or the context window ran out),
+	// "load" / "unload" (empty-messages model (un)load calls). Kept raw so
+	// that "absent" (an Ollama too old to send it, or null) can be told
+	// apart from a present value, and a non-string value does not fail an
+	// otherwise successful generation — see ollamaFinishReason.
+	DoneReason json.RawMessage `json:"done_reason,omitempty"`
 	// Error is non-empty when Ollama returns a structured error envelope
 	// (e.g. {"error":"model 'foo' not found"} with HTTP 404). It is not
 	// used for non-2xx generic transport errors.
@@ -319,17 +327,7 @@ func (p *OllamaProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 		return nil, fmt.Errorf("ollama: model error: %s", parsed.Error)
 	}
 
-	// FinishReason: Ollama does not have OpenAI's stop / length /
-	// content_filter taxonomy. The chat API only signals "done" when
-	// generation terminates normally. We normalise to "stop" so audit
-	// downstream code can compare across providers.
-	// ※要確認: M4-3 bench may want to distinguish num_predict-hit from
-	// natural EOS; would require reading parsed.done_reason which
-	// Ollama only exposes in newer (0.5+) versions.
-	finish := ""
-	if parsed.Done {
-		finish = "stop"
-	}
+	finish := ollamaFinishReason(parsed.Done, parsed.DoneReason)
 
 	return &CompleteResponse{
 		Content:      parsed.Message.Content,
@@ -343,6 +341,36 @@ func (p *OllamaProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 		CostUSD:     0,
 		RawResponse: rawBody,
 	}, nil
+}
+
+// ollamaFinishReason derives CompleteResponse.FinishReason from the chat
+// envelope.
+//
+// When Ollama sends done_reason, its value is the finish reason, bounded by
+// NormalizeFinishReason like every other provider's (so "length" — a draft cut
+// off at num_predict — is recorded as such instead of as a complete "stop").
+// A present-but-empty string stays empty (stored as NULL): the server chose
+// not to give a reason, which is not the same claim as "stop". A non-string
+// value is FinishReasonUnrecognized rather than a parse failure, since the
+// generation itself succeeded.
+//
+// Only when the field is absent (or null) — an Ollama release older than
+// done_reason — does done=true fall back to "stop", the value this provider
+// recorded for every completed answer before the field was read; done=false
+// without a reason stays empty.
+func ollamaFinishReason(done bool, raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		if done {
+			return "stop"
+		}
+		return ""
+	}
+	var reason string
+	if err := json.Unmarshal(trimmed, &reason); err != nil {
+		return FinishReasonUnrecognized
+	}
+	return NormalizeFinishReason(reason)
 }
 
 // Embed implements Provider against Ollama's current POST /api/embed endpoint.
