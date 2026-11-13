@@ -1308,3 +1308,58 @@ test('project page: returning to a hidden tab re-reads the scan state (Codex R14
         await deleteProject(request, p.id);
     }
 });
+
+// Codex R15: returning to the tab must not join a read that started before
+// the tab was hidden (react-query's focus refetch does not cancel it).
+test('project page: returning to the tab starts a fresh read, not the one from before hiding (Codex R15)', async ({ page, request }) => {
+    const p = await createProject(request, uniqueName('Scan Status R15 Focus Join'));
+    try {
+        const first = await uploadSbom(request, p.id, cleanSbom);
+        await page.clock.install();
+        const polled = new Set<string>();
+        let holdArmed = false;
+        let readsSinceArmed = 0;
+        let heldSeen = false;
+        let release: () => void = () => {};
+        const held = new Promise<void>((r) => (release = r));
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${p.id}/sboms/`) && url.pathname.endsWith('/scan-status'),
+            async (route) => {
+                const res = await route.fetch();
+                const real = await res.json();
+                polled.add(real.sbom_id);
+                const json = { ...real, status: real.sbom_id === first ? 'completed' : 'running' };
+                if (holdArmed && real.sbom_id === first && ++readsSinceArmed === 2) {
+                    heldSeen = true; // the poll's final state read, delayed
+                    await held;
+                    return route.fulfill({ response: res, json }).catch(() => {});
+                }
+                await route.fulfill({ response: res, json });
+            },
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
+        await page.waitForLoadState('networkidle');
+        holdArmed = true;
+        await page.clock.fastForward('01:05'); // the minute poll starts and stalls on its last read
+        await expect.poll(() => heldSeen, { timeout: 15_000 }).toBe(true);
+        const setVisibility = (state: 'hidden' | 'visible') =>
+            page.evaluate((v) => {
+                Object.defineProperty(document, 'visibilityState', { value: v, configurable: true });
+                Object.defineProperty(document, 'hidden', { value: v === 'hidden', configurable: true });
+                document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
+            }, state);
+        await setVisibility('hidden');
+        const second = await uploadSbom(request, p.id, cleanSbom); // CI, while hidden
+        await setVisibility('visible');
+        await expect.poll(() => polled.has(second), { timeout: 10_000 }).toBe(true);
+        release(); // the stale read's answer (the first SBOM, completed) arrives last
+        await page.waitForTimeout(1_500);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+        await expect(vulnTab(page)).not.toHaveText(tabText(0, null));
+    } finally {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+        await deleteProject(request, p.id);
+    }
+});

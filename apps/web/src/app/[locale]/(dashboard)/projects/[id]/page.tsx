@@ -1,8 +1,8 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { focusManager, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -233,10 +233,6 @@ export default function ProjectDetailPage() {
         );
         return { ...snap, gen };
       }),
-    // Polls skip a hidden tab, so coming back to it re-reads the snapshot
-    // (Codex R14). Safe here, unlike the global default (src/lib/query/
-    // client.ts): this query feeds no form that a refetch could reset.
-    refetchOnWindowFocus: () => projectQuery.isSuccess,
     // No polling while the project itself is not loaded (error screen,
     // "Project not found"; Codex R12): the first read still runs in parallel.
     refetchInterval: (query) =>
@@ -288,6 +284,21 @@ export default function ProjectDetailPage() {
     vulnTotalQualifier === null
       ? String(vulnTotalCount)
       : t(`ScanStatus.${vulnTotalQualifier}`, { count: String(vulnTotalCount) });
+
+  // Polls skip a hidden tab, so coming back to it re-reads the snapshot
+  // (Codex R14) — as a foreground refresh, not react-query's focus refetch,
+  // which would join a read that started before the tab was hidden instead
+  // of cancelling it (Codex R15).
+  const onTabVisible = useEffectEvent(() => {
+    if (projectQuery.isSuccess) void refreshVulnerabilities();
+  });
+  useEffect(() => {
+    let wasFocused = focusManager.isFocused();
+    return focusManager.subscribe((focused) => {
+      if (focused && !wasFocused) onTabVisible();
+      wasFocused = focused;
+    });
+  }, []);
 
   // Opening the vulnerabilities tab, the scan notice's Retry, the list's
   // Retry and an upload re-read the whole snapshot with a request that
