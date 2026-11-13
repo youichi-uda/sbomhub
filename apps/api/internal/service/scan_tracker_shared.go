@@ -74,25 +74,31 @@ type liveRun struct {
 	acked bool
 	// rejoinPending: a rejoin of it is queued.
 	rejoinPending bool
-	// fin is the run's finish (outcome included) once it has finished. A
-	// late intent or rejoin cleanup (cleanupFinish) writes it again rather
-	// than a bare removal: if the key was evicted after the real finish, the
-	// cleanup recreates it, and a bare removal recreated it as "completed"
-	// with the run's failure and skip lost (Codex SBOMHUB_JVN R1 Medium-2).
-	// Writing the outcome twice is harmless (failures and skips are sets);
-	// landing in a later group, it is the conservative attribution M72
-	// already accepts for failures (Codex M72 R5 High-2).
-	fin *sharedEvent
+	// finSkipped is the run's skipped sources (SBOMHUB_JVN=off) once it has
+	// finished. A late intent or rejoin cleanup (cleanupFinish) writes them
+	// again: if the key was evicted after the run's real finish, the cleanup
+	// recreates it, and a bare removal recreated it as a "completed" that no
+	// longer said JVN was skipped (Codex SBOMHUB_JVN R1 Medium-2).
+	//
+	// The skip ONLY, never the run's failure (Codex SBOMHUB_JVN R2
+	// Medium-1): the cleanup can land after a later group began, and a
+	// replayed failure turned that group's successful scan into "failed" —
+	// with JVN on as well. A replayed skip in that window over-states what
+	// was skipped, the conservative direction; with JVN on there is never a
+	// skip, so the cleanup stays the bare removal it was before. (Losing the
+	// run's failure to an eviction is the pre-existing M72 limitation and is
+	// left as it was.)
+	finSkipped []string
 }
 
 // cleanupFinish is the finish a late intent / rejoin of lr writes to remove
-// it again: its own finish when it has one. t.qMu is held.
+// it again: a removal that carries the run's skip, if any. t.qMu is held.
 func cleanupFinish(gen uint64, lr *liveRun) *sharedEvent {
-	if lr != nil && lr.fin != nil {
-		return &sharedEvent{kind: evFinish, gen: gen, msg: lr.fin.msg,
-			reasons: append([]string(nil), lr.fin.reasons...), skipped: append([]string(nil), lr.fin.skipped...)}
+	ev := &sharedEvent{kind: evFinish, gen: gen}
+	if lr != nil && len(lr.finSkipped) > 0 {
+		ev.skipped = append([]string(nil), lr.finSkipped...)
 	}
-	return &sharedEvent{kind: evFinish, gen: gen}
+	return ev
 }
 
 type sbomQueue struct {
@@ -371,7 +377,7 @@ func (t *ScanTracker) queueFinishLocked(sbomID uuid.UUID, gen uint64, errMsg str
 	ev := &sharedEvent{kind: evFinish, gen: gen, msg: errMsg,
 		reasons: append([]string(nil), reasons...), skipped: append([]string(nil), skipped...)}
 	if lr := t.live[runKey{sbomID, gen}]; lr != nil {
-		lr.fin = &sharedEvent{msg: ev.msg, reasons: ev.reasons, skipped: ev.skipped}
+		lr.finSkipped = ev.skipped
 	}
 	delete(t.live, runKey{sbomID, gen})
 	t.enqueueLocked(sbomID, ev)

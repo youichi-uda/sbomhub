@@ -217,9 +217,45 @@ func TestJVNSwitch_LateIntentCleanupCarriesTheOutcome(t *testing.T) {
 	if len(calls) < 2 {
 		t.Fatalf("finishes for the run: %+v; want its own and the late-intent cleanup", calls)
 	}
-	for _, c := range calls {
-		if c.msg != "nvd: scan failed (fetch_failed)" || !slices.Equal(c.skipped, []string{"jvn"}) {
-			t.Errorf("a finish for the run carried %+v; every one must carry its outcome", c)
+	// The run's own finish carries its whole outcome. The cleanup carries its
+	// SKIP only (Codex SBOMHUB_JVN R2 Medium-1): a cleanup can land after a
+	// later group started, and replaying the run's FAILURE there turned a
+	// successful later scan into "failed" — with JVN on, too. A stale skip
+	// in that window over-states what was skipped; with JVN on there is no
+	// skip, so the cleanup is the bare removal it always was.
+	if c := calls[0]; c.msg != "nvd: scan failed (fetch_failed)" || !slices.Equal(c.skipped, []string{"jvn"}) {
+		t.Errorf("the run's own finish carried %+v", c)
+	}
+	for _, c := range calls[1:] {
+		if c.msg != "" {
+			t.Errorf("a cleanup finish replayed the run's failure %q into whatever group is current", c.msg)
+		}
+		if !slices.Equal(c.skipped, []string{"jvn"}) {
+			t.Errorf("a cleanup finish dropped the run's skip: %+v", c)
+		}
+	}
+}
+
+// With JVN on (no skip), the late cleanup is exactly the bare removal it was
+// before SBOMHUB_JVN: no outcome at all.
+func TestJVNSwitch_LateIntentCleanupIsBareWithoutASkip(t *testing.T) {
+	store := slowIntentFinishLog{finishLog: &finishLog{memStore: newMemStore(), mu: make(chan struct{}, 1)}, d: 60 * time.Millisecond}
+	a := trackerOn(store, time.Hour)
+	a.beginWait = time.Millisecond
+	id := uuid.New()
+	first := a.Begin(id)
+	gen := a.Begin(id)
+	a.Finish(id, gen, []string{ScanReasonFetchFailed}, "nvd: scan failed (fetch_failed)")
+	a.Finish(id, first, nil, "")
+	time.Sleep(400 * time.Millisecond)
+	settle(t, a, id)
+	calls := store.forGen(gen)
+	if len(calls) < 2 {
+		t.Fatalf("finishes for the run: %+v", calls)
+	}
+	for _, c := range calls[1:] {
+		if c.msg != "" || len(c.skipped) != 0 {
+			t.Errorf("with JVN on, a cleanup finish carried %+v; it must be the bare removal", c)
 		}
 	}
 }

@@ -74,6 +74,14 @@ func runSBOMScan(ctx context.Context, db *sql.DB, tenantID, sbomID uuid.UUID, de
 
 	started := time.Now()
 	var out scanOutcome
+	// Sources the operator switched off (SBOMHUB_JVN=off) are named before
+	// the slot is taken (Codex SBOMHUB_JVN R2 Low-2): a scan that never got a
+	// slot must still say it would not have consulted them.
+	for _, st := range steps {
+		if d, ok := st.scanner.(disableableScanner); ok && st.scanner != nil && d.ScanDisabled() {
+			out.skipped = service.MergeScanReasons(out.skipped, []string{st.source})
+		}
+	}
 	// M72: at most SBOMHUB_SCAN_TENANT_CONCURRENCY scans of one tenant run at
 	// once, so one tenant's burst of scans cannot crowd out the others. The
 	// wait counts against this scan's own deadline.
@@ -91,10 +99,10 @@ func runSBOMScan(ctx context.Context, db *sql.DB, tenantID, sbomID uuid.UUID, de
 		}
 		if d, ok := st.scanner.(disableableScanner); ok && d.ScanDisabled() {
 			// SBOMHUB_JVN=off: not run, not a failure, and never silent —
-			// it is reported as scan-status skipped_sources.
+			// it is reported as scan-status skipped_sources (already in
+			// out.skipped, above).
 			slog.Info("scan: source switched off by the operator; skipped",
 				"sbom_id", sbomID, "scanner", st.source)
-			out.skipped = service.MergeScanReasons(out.skipped, []string{st.source})
 			continue
 		}
 		var err error

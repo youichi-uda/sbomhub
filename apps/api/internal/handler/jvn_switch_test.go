@@ -166,3 +166,24 @@ func TestJVNSwitch_ManualJVNOnlyScanIsSkippedNotRefused(t *testing.T) {
 		t.Errorf("status = %+v, want completed with skipped [jvn]", st)
 	}
 }
+
+// Codex (SBOMHUB_JVN) R2 Low-2: a scan that never got a tenant scan slot
+// (queue full, or its context already ended) still names the source it would
+// have skipped, so its failed status does not read as though JVN had been
+// part of it.
+func TestJVNSwitch_SlotFailureStillReportsTheSkip(t *testing.T) {
+	withConcurrency(t, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	jvn := &switchScanner{disabled: true}
+	out := runSBOMScan(ctx, nil, uuid.New(), uuid.New(), time.Minute, []scanStep{
+		{source: "nvd", scanner: &stubScanner{}},
+		{source: "jvn", scanner: jvn},
+	})
+	if !out.failed() || !slices.Equal(out.reasons, []string{service.ScanReasonCancelled}) {
+		t.Fatalf("out = %+v, want failed (cancelled)", out)
+	}
+	if !slices.Equal(out.skipped, []string{"jvn"}) {
+		t.Errorf("skipped = %v, want [jvn] on the slot-failure path too", out.skipped)
+	}
+}
