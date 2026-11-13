@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -142,5 +143,120 @@ func TestJVNSwitch_MergeSetCarriesSkipped(t *testing.T) {
 	}
 	if got := m.json(); !strings.Contains(got, `"s":["jvn"]`) {
 		t.Errorf("merge JSON %s does not carry the skip", got)
+	}
+}
+
+// finishLog records every finish a store receives.
+type finishLog struct {
+	*memStore
+	mu    chan struct{}
+	calls []finishCall
+}
+
+type finishCall struct {
+	gen     uint64
+	msg     string
+	skipped []string
+}
+
+func (f *finishLog) record(gen uint64, msg string, skipped []string) {
+	f.mu <- struct{}{}
+	f.calls = append(f.calls, finishCall{gen, msg, append([]string(nil), skipped...)})
+	<-f.mu
+}
+
+func (f *finishLog) forGen(gen uint64) []finishCall {
+	f.mu <- struct{}{}
+	defer func() { <-f.mu }()
+	var out []finishCall
+	for _, c := range f.calls {
+		if c.gen == gen {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+type slowIntentFinishLog struct {
+	*finishLog
+	d time.Duration
+}
+
+func (s slowIntentFinishLog) begin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	time.Sleep(s.d)
+	return s.memStore.begin(ctx, id, gen)
+}
+
+func (s slowIntentFinishLog) intent(ctx context.Context, id uuid.UUID, gen uint64) error {
+	time.Sleep(3 * s.d)
+	return s.memStore.intent(ctx, id, gen)
+}
+
+func (s slowIntentFinishLog) finish(ctx context.Context, id uuid.UUID, gen uint64, msg string, r, skipped []string) (bool, error) {
+	s.record(gen, msg, skipped)
+	return s.memStore.finish(ctx, id, gen, msg, r, skipped)
+}
+
+// Codex (SBOMHUB_JVN) R1 Medium-2: the cleanup finish written after a late
+// intent (Codex M72 R19 Medium-3) carried no outcome. If the key was evicted
+// after the run's real finish, that cleanup recreated it as a bare
+// "completed" — losing the skip, and, before this change, the failure too.
+// Every finish written for a run now carries the run's outcome.
+func TestJVNSwitch_LateIntentCleanupCarriesTheOutcome(t *testing.T) {
+	store := slowIntentFinishLog{finishLog: &finishLog{memStore: newMemStore(), mu: make(chan struct{}, 1)}, d: 60 * time.Millisecond}
+	a := trackerOn(store, time.Hour)
+	a.beginWait = time.Millisecond
+	id := uuid.New()
+	first := a.Begin(id) // its write is in flight: the queue is busy
+	gen := a.Begin(id)   // queued behind: its intent (slow) is in flight
+	a.FinishSkipped(id, gen, []string{ScanReasonFetchFailed}, "nvd: scan failed (fetch_failed)", []string{"jvn"})
+	a.Finish(id, first, nil, "")
+	time.Sleep(400 * time.Millisecond) // the intent lands after the finish
+	settle(t, a, id)
+	calls := store.forGen(gen)
+	if len(calls) < 2 {
+		t.Fatalf("finishes for the run: %+v; want its own and the late-intent cleanup", calls)
+	}
+	for _, c := range calls {
+		if c.msg != "nvd: scan failed (fetch_failed)" || !slices.Equal(c.skipped, []string{"jvn"}) {
+			t.Errorf("a finish for the run carried %+v; every one must carry its outcome", c)
+		}
+	}
+}
+
+type lossyRejoinFinishLog struct {
+	*lossyRejoinStore
+	log *finishLog
+}
+
+func (s lossyRejoinFinishLog) finish(ctx context.Context, id uuid.UUID, gen uint64, msg string, r, skipped []string) (bool, error) {
+	s.log.record(gen, msg, skipped)
+	return s.lossyRejoinStore.finish(ctx, id, gen, msg, r, skipped)
+}
+
+// The rejoin cleanup (Codex M72 R21 Medium-1) carries the outcome too.
+func TestJVNSwitch_LateRejoinCleanupCarriesTheOutcome(t *testing.T) {
+	mem := newMemStore()
+	store := lossyRejoinFinishLog{
+		lossyRejoinStore: &lossyRejoinStore{memStore: mem, d: 100 * time.Millisecond},
+		log:              &finishLog{memStore: mem, mu: make(chan struct{}, 1)},
+	}
+	a := trackerOn(store, time.Hour)
+	id := uuid.New()
+	gen := a.Begin(id)
+	settle(t, a, id)
+	a.heartbeatPass() // inactive: a rejoin starts (slow, reply lost)
+	time.Sleep(20 * time.Millisecond)
+	a.FinishSkipped(id, gen, nil, "", []string{"jvn"}) // before the rejoin applies
+	time.Sleep(200 * time.Millisecond)
+	settle(t, a, id)
+	calls := store.log.forGen(gen)
+	if len(calls) < 2 {
+		t.Fatalf("finishes for the run: %+v; want its own and the rejoin cleanup", calls)
+	}
+	for _, c := range calls {
+		if !slices.Equal(c.skipped, []string{"jvn"}) {
+			t.Errorf("a finish for the run carried %+v; every one must carry its skip", c)
+		}
 	}
 }

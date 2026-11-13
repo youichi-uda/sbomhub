@@ -15,6 +15,11 @@ import (
 // JVN; such scans read completed and name JVN in scan-status
 // `skipped_sources`, so the narrower coverage is never silent.
 //
+// Rolling upgrades (Codex SBOMHUB_JVN R1 High-1): a replica older than this
+// setting cannot report skipped_sources, so a scan that skipped JVN, polled
+// through such a replica, reads a bare "completed". Set "off" only once every
+// replica sharing the Redis runs a version that knows SBOMHUB_JVN.
+//
 // Like the M72 settings, any other value refuses startup rather than being
 // read as a default the operator did not choose: "false", "0" or "disabled"
 // would otherwise have to be guessed at.

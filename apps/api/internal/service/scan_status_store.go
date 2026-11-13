@@ -90,13 +90,15 @@ func scanStatusKeys(sbomID uuid.UUID) []string {
 //
 //	state, error, reasons, updated   the published status
 //	outcomes      JSON: the group's distinct failures (marker + reasons),
-//	              bounded by the marker vocabulary (Codex M72 R2 High-3)
-//	skipped       JSON: the sources a run of the group skipped because the
-//	              operator switched them off (SBOMHUB_JVN=off), the union over
-//	              the group's finishes. Reset with outcomes when a new group
-//	              starts; not a failure, so publish ignores it; returned by get
-//	              whatever the state (the reader shows it on terminal states).
-//	              Bounded by the source vocabulary.
+//	              bounded by the marker vocabulary (Codex M72 R2 High-3), and
+//	              at most one entry with an EMPTY marker, {m:"", s:[source...]}:
+//	              the sources a run of the group skipped because the operator
+//	              switched them off (SBOMHUB_JVN=off), the union over the
+//	              group's finishes. Inside outcomes rather than in a field of
+//	              its own so that every script that resets a group — this
+//	              version's and older ones, during a rolling upgrade — resets
+//	              it too (Codex SBOMHUB_JVN R1 High-1). An empty marker is not
+//	              a failure to publish or to add_failure, in any version.
 //	r:<gen>       an active run, value = lease expiry (ms, Redis time)
 //	p:<gen>       an intent: a Begin still queued behind older writes; reads
 //	              as running, value = lease expiry
@@ -168,20 +170,31 @@ local function save_outcomes(o)
     redis.call('HSET', K, 'outcomes', cjson.encode(o))
   end
 end
+-- The group's skipped sources live in the outcomes entry with an empty
+-- marker (see the key layout above).
+local function skipped_list()
+  for _, e in ipairs(load_outcomes()) do
+    if e.m == '' and type(e.s) == 'table' then return e.s end
+  end
+  return {}
+end
 local function add_skipped(ss)
   if type(ss) ~= 'table' or #ss == 0 then return end
-  local cur = {}
-  local raw = redis.call('HGET', K, 'skipped')
-  if raw then
-    local ok, v = pcall(cjson.decode, raw)
-    if ok and type(v) == 'table' then cur = v end
+  local o = load_outcomes()
+  local entry = nil
+  for _, e in ipairs(o) do
+    if e.m == '' and type(e.s) == 'table' then entry = e; break end
+  end
+  if not entry then
+    entry = {m = '', s = {}}
+    table.insert(o, entry)
   end
   local have = {}
-  for _, x in ipairs(cur) do have[x] = true end
+  for _, x in ipairs(entry.s) do have[x] = true end
   for _, x in ipairs(ss) do
-    if type(x) == 'string' and not have[x] then table.insert(cur, x); have[x] = true end
+    if type(x) == 'string' and x ~= '' and not have[x] then table.insert(entry.s, x); have[x] = true end
   end
-  redis.call('HSET', K, 'skipped', cjson.encode(cur))
+  save_outcomes(o)
 end
 local function add_failure(msg, rs)
   if msg == '' then return end
@@ -379,7 +392,7 @@ if count(runs_b) == 0 and count(intents_b) == 0 then
   -- current group, Codex M72 R19 High-1). Tombstones are kept: a run swept as interrupted may still be
   -- alive (a suspended process), so the SBOM must not read completed while it
   -- could still be writing (Codex M72 R10 High-1).
-  redis.call('HDEL', K, 'state', 'error', 'reasons', 'updated', 'skipped')
+  redis.call('HDEL', K, 'state', 'error', 'reasons', 'updated')
   save_outcomes({})
 end
 activate(ARGV[1], now, ARGV[2])
@@ -538,7 +551,11 @@ if changed then
   publish(now)
   bump()
 end
-return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]', (redis.call('HGET', K, 'born') or '') .. ':' .. (redis.call('HGET', K, 'rev') or ''), redis.call('HGET', K, 'skipped') or '[]'}`
+return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]', (redis.call('HGET', K, 'born') or '') .. ':' .. (redis.call('HGET', K, 'rev') or ''), (function()
+  local sk = skipped_list()
+  if #sk == 0 then return '[]' end
+  return cjson.encode(sk)
+end)()}`
 
 // statusView is one read of the shared status. version changes with every
 // write of it (the entry's rev counter).

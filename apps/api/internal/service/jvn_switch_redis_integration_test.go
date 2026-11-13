@@ -121,3 +121,59 @@ func TestJVNSwitchRedis_UnknownRunStillRecordsSkip(t *testing.T) {
 		t.Fatalf("view = %+v err=%v, want skipped [jvn]", v, err)
 	}
 }
+
+// Codex (SBOMHUB_JVN) R1 High-1, the half code can fix: during a rolling
+// upgrade an OLDER replica may start the next group. Its begin script resets
+// a new group by clearing state/error/reasons/updated and writing
+// outcomes='[]' — it knows no other field — so a skip kept in a field of its
+// own survived into that group and every newer replica reported a stale
+// skipped_sources. Kept inside outcomes, the old reset clears it too.
+func TestJVNSwitchRedis_OldReplicaGroupResetClearsTheSkip(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	id := uuid.New()
+	store := a.shared.(*redisScanStatusStore)
+	ctx := context.Background()
+	if _, err := store.finish(ctx, id, 1, "", nil, []string{"jvn"}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); !slices.Equal(v.skipped, []string{"jvn"}) {
+		t.Fatalf("precondition: skipped = %v", v.skipped)
+	}
+	// Exactly the new-group reset of the parent commit's begin script.
+	if err := rdb.Eval(ctx, `redis.call('HDEL', KEYS[1], 'state', 'error', 'reasons', 'updated')
+redis.call('HSET', KEYS[1], 'outcomes', '[]')
+return 1`, scanStatusKeys(id)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id, 2, "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); len(v.skipped) != 0 {
+		t.Fatalf("a group started by an older replica reports the previous group's skip: %v", v.skipped)
+	}
+}
+
+// The skip entry inside outcomes must never read as a failure, and failures
+// next to it are unchanged.
+func TestJVNSwitchRedis_SkipEntryIsNotAFailure(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	id := uuid.New()
+	store := a.shared.(*redisScanStatusStore)
+	ctx := context.Background()
+	if _, err := store.finish(ctx, id, 1, "", nil, []string{"jvn"}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); v.state != ScanStateCompleted || v.errMsg != "" || len(v.reasons) != 0 {
+		t.Fatalf("a skip alone published %+v", v)
+	}
+	if _, err := store.finish(ctx, id, 2, "nvd: scan failed (fetch_failed)", []string{ScanReasonFetchFailed}, nil); err != nil {
+		t.Fatal(err)
+	}
+	v, _ := store.get(ctx, id)
+	if v.state != ScanStateFailed || v.errMsg != "nvd: scan failed (fetch_failed)" ||
+		!slices.Equal(v.reasons, []string{ScanReasonFetchFailed}) || !slices.Equal(v.skipped, []string{"jvn"}) {
+		t.Fatalf("failure next to a skip: %+v", v)
+	}
+}

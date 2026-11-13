@@ -74,6 +74,25 @@ type liveRun struct {
 	acked bool
 	// rejoinPending: a rejoin of it is queued.
 	rejoinPending bool
+	// fin is the run's finish (outcome included) once it has finished. A
+	// late intent or rejoin cleanup (cleanupFinish) writes it again rather
+	// than a bare removal: if the key was evicted after the real finish, the
+	// cleanup recreates it, and a bare removal recreated it as "completed"
+	// with the run's failure and skip lost (Codex SBOMHUB_JVN R1 Medium-2).
+	// Writing the outcome twice is harmless (failures and skips are sets);
+	// landing in a later group, it is the conservative attribution M72
+	// already accepts for failures (Codex M72 R5 High-2).
+	fin *sharedEvent
+}
+
+// cleanupFinish is the finish a late intent / rejoin of lr writes to remove
+// it again: its own finish when it has one. t.qMu is held.
+func cleanupFinish(gen uint64, lr *liveRun) *sharedEvent {
+	if lr != nil && lr.fin != nil {
+		return &sharedEvent{kind: evFinish, gen: gen, msg: lr.fin.msg,
+			reasons: append([]string(nil), lr.fin.reasons...), skipped: append([]string(nil), lr.fin.skipped...)}
+	}
+	return &sharedEvent{kind: evFinish, gen: gen}
 }
 
 type sbomQueue struct {
@@ -316,7 +335,7 @@ func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) <-chan stru
 			// this intent): remove the intent again, behind that finish
 			// (Codex M72 R19 Medium-3) — even if the call reported an error,
 			// which may have followed its execution (R21 Medium-1).
-			t.enqueueLocked(sbomID, &sharedEvent{kind: evFinish, gen: gen})
+			t.enqueueLocked(sbomID, cleanupFinish(gen, lr))
 			return
 		}
 		if err != nil {
@@ -349,9 +368,13 @@ func (t *ScanTracker) queueFinishLocked(sbomID uuid.UUID, gen uint64, errMsg str
 	}
 	t.qMu.Lock()
 	defer t.qMu.Unlock()
+	ev := &sharedEvent{kind: evFinish, gen: gen, msg: errMsg,
+		reasons: append([]string(nil), reasons...), skipped: append([]string(nil), skipped...)}
+	if lr := t.live[runKey{sbomID, gen}]; lr != nil {
+		lr.fin = &sharedEvent{msg: ev.msg, reasons: ev.reasons, skipped: ev.skipped}
+	}
 	delete(t.live, runKey{sbomID, gen})
-	t.enqueueLocked(sbomID, &sharedEvent{kind: evFinish, gen: gen, msg: errMsg,
-		reasons: append([]string(nil), reasons...), skipped: append([]string(nil), skipped...)})
+	t.enqueueLocked(sbomID, ev)
 }
 
 func (t *ScanTracker) queueMarkLocked(sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) {
@@ -500,7 +523,7 @@ func (t *ScanTracker) rejoinNow(k runKey, lr *liveRun) {
 	defer t.qMu.Unlock()
 	lr.rejoinPending = false
 	if t.live[k] != lr {
-		t.enqueueLocked(k.sbom, &sharedEvent{kind: evFinish, gen: k.gen})
+		t.enqueueLocked(k.sbom, cleanupFinish(k.gen, lr))
 		return
 	}
 	if err != nil {
