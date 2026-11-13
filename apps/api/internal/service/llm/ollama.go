@@ -356,15 +356,19 @@ func (p *OllamaProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 //
 // Only when the field is absent (or null) — an Ollama release older than
 // done_reason — does done=true fall back to "stop", the value this provider
-// recorded for every completed answer before the field was read; done=false
-// without a reason stays empty.
+// recorded for every completed answer before the field was read.
+//
+// done=false declares the answer incomplete, and Ollama sends done_reason
+// only on the final (done=true) message, so an incomplete answer has no
+// terminal reason: it stays empty even if a contradictory done_reason rides
+// along (Codex R1 Low).
 func ollamaFinishReason(done bool, raw json.RawMessage) string {
+	if !done {
+		return ""
+	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		if done {
-			return "stop"
-		}
-		return ""
+		return "stop"
 	}
 	var reason string
 	if err := json.Unmarshal(trimmed, &reason); err != nil {

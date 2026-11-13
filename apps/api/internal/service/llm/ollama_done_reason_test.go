@@ -33,7 +33,11 @@ func TestOllama_Complete_DoneReason(t *testing.T) {
 		{"present but empty", `{"model":"m","message":{"role":"assistant","content":"x"},"done":true,"done_reason":""}`, ""},
 		{"over-long", `{"model":"m","message":{"role":"assistant","content":"x"},"done":true,"done_reason":"` + long + `"}`, FinishReasonUnrecognized},
 		{"NUL", `{"model":"m","message":{"role":"assistant","content":"x"},"done":true,"done_reason":"stop\u0000"}`, FinishReasonUnrecognized},
-		{"reason with done=false", `{"model":"m","message":{"role":"assistant","content":"x"},"done":false,"done_reason":"length"}`, "length"},
+		// done=false declares the answer incomplete; a done_reason beside it
+		// is contradictory and is not recorded as a terminal reason
+		// (Codex R1 Low).
+		{"reason with done=false", `{"model":"m","message":{"role":"assistant","content":"x"},"done":false,"done_reason":"length"}`, ""},
+		{"wrong type with done=false", `{"model":"m","message":{"role":"assistant","content":"x"},"done":false,"done_reason":3}`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
