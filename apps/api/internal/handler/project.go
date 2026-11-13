@@ -140,7 +140,16 @@ func (h *ProjectHandler) Get(c echo.Context) error {
 
 	project, err := h.projectService.Get(c.Request().Context(), tenantID, id)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+		// Not found in this tenant — including a project RLS hides (another
+		// tenant's), which reaches here as the same sql.ErrNoRows — is 404.
+		// Every other error is the database failing, not the project being
+		// absent: answering 404 for it told clients a live project did not
+		// exist (M66 residual). The driver's text stays in the log.
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+		}
+		slog.Warn("project: get failed", "tenant_id", tenantID, "project_id", id, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to get project"})
 	}
 
 	return c.JSON(http.StatusOK, project)
