@@ -218,6 +218,64 @@ describe("shadcn/ui theme tokens", () => {
   });
 });
 
+// Dark mode (residual of the popover fix): Tailwind v4's default `dark:`
+// variant follows `prefers-color-scheme`, while the token overrides sit on
+// `.dark`, which nothing sets — in an OS dark scheme the `dark:` utilities
+// turned dark on a light page (grey-400 audit pills on white). Both halves
+// must switch on ONE condition, and every light token needs a value under it.
+describe("dark mode switches tokens and dark: utilities on one condition", () => {
+  const DARK_SELECTOR = ".dark";
+  const darkUtilities = [...classUses.keys()].filter((t) => /(^|:)dark:/.test(t));
+
+  /** Body of the first rule in `css` whose selector contains `marker`. */
+  function selectorOf(css, marker) {
+    const i = css.indexOf(marker);
+    assert.notEqual(i, -1, `${marker} not in the compiled CSS`);
+    const open = css.indexOf("{", i);
+    return css.slice(css.lastIndexOf("\n", i) + 1, open).trim();
+  }
+
+  test("the scan finds the dark: utilities in src/", () => {
+    assert.ok(darkUtilities.length >= 20, `only ${darkUtilities.length} dark: utilities found — the scan is broken`);
+  });
+
+  test("the dark: variant is the token condition (.dark), not the OS media query", async () => {
+    const css = await cssFor("dark:bg-red-500");
+    const sel = selectorOf(css, ".dark\\:bg-red-500");
+    assert.equal(sel, ".dark\\:bg-red-500:where(.dark, .dark *)", "dark: must match an element that is or sits inside the token selector");
+    assert.ok(!css.includes("prefers-color-scheme"), "dark: still compiles to a prefers-color-scheme media query");
+    // The token overrides live on that same selector.
+    assert.ok(varsDefinedIn(DARK_SELECTOR).has("background"));
+  });
+
+  test("no dark: utility used in src/, and no token, switches on prefers-color-scheme", async () => {
+    const css = (await newCompiler()).build(darkUtilities);
+    assert.ok(!/prefers-color-scheme/.test(css), "a dark rule follows the OS scheme while the tokens follow .dark");
+    assert.ok(!/prefers-color-scheme/.test(globalsCss.replace(/\/\*[\s\S]*?\*\//g, "")), "globals.css defines a second dark condition");
+    for (const t of darkUtilities) {
+      const out = await cssFor(t);
+      assert.match(out, /:where\(\.dark, \.dark \*\)/, `${t} does not compile under the .dark condition`);
+    }
+  });
+
+  test("every colour variable defined for light has a dark value, and vice versa", () => {
+    const light = new Set([...varsDefinedIn(":root")].filter((v) => v !== "radius"));
+    const dark = varsDefinedIn(DARK_SELECTOR);
+    assert.ok(light.size >= 19, `only ${light.size} light variables found — the block scan is broken`);
+    assert.deepEqual([...light].filter((v) => !dark.has(v)), [], "light variables with no .dark value");
+    assert.deepEqual([...dark].filter((v) => !light.has(v)), [], ".dark variables with no light value");
+  });
+
+  test("native controls follow the same scheme as the tokens", () => {
+    const block = (sel) => {
+      const start = globalsCss.search(new RegExp(`(^|\\n)\\s*${sel.replace(".", "\\.")}\\s*\\{`));
+      return globalsCss.slice(start, globalsCss.indexOf("}", start));
+    };
+    assert.match(block(":root"), /color-scheme:\s*light\s*;/);
+    assert.match(block(DARK_SELECTOR), /color-scheme:\s*dark\s*;/);
+  });
+});
+
 describe("every class-like token in src/ generates CSS", () => {
   test("the scan sees the class lists", () => {
     assert.ok(classUses.size > 200, `only ${classUses.size} class tokens found — the class scan is broken`);

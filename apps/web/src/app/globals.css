@@ -2,6 +2,28 @@
 @import './tailwind-v3-palette.css';
 
 /*
+  Dark mode: one switch for everything, and it is the `.dark` class.
+
+  Tailwind v4's default `dark:` variant is `@media (prefers-color-scheme:
+  dark)`, while the shadcn/ui colour tokens below switch on `.dark`, which
+  nothing ever sets. In an OS dark scheme the ~80 `dark:` utilities turned
+  dark while the page stayed light: grey-400 audit-action pills on a white
+  page, `bg-*-900/30` cells. Following the OS for the tokens too is not an
+  option yet — the layout paints most surfaces with fixed light utilities
+  (bg-white, bg-gray-50, text-gray-900, ...) that have no dark counterpart,
+  and a trial build doing exactly that produced light-on-light headings
+  (contrast 1.00) on every dashboard page.
+
+  So both halves now key on `.dark`: no element carries it, every page
+  renders the light theme whatever the OS prefers, and a future theme
+  toggle only has to set the class (after the fixed light utilities have
+  dark counterparts). `color-scheme` keeps native form controls and
+  scrollbars on the same scheme as the page.
+  src/app/theme-tokens.test.mjs pins this pairing.
+*/
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
   v3 parity: font-size line-heights.
   Tailwind v4 expresses them as unitless ratios (text-xs = 1.333…), v3 as
   absolute rem. The rendered line box is the same for the element that
@@ -147,9 +169,11 @@
     --input: 214.3 31.8% 91.4%;
     --ring: 222.2 84% 4.9%;
     --radius: 0.5rem;
+    color-scheme: light;
   }
 
   .dark {
+    color-scheme: dark;
     --background: 222.2 84% 4.9%;
     --foreground: 210 40% 98%;
     --card: 222.2 84% 4.9%;
