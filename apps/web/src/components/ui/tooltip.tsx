@@ -230,9 +230,13 @@ function useGenericRole(ref: React.RefObject<HTMLElement | null>, explicitRole: 
   });
 }
 
-function setRef<T>(ref: React.Ref<T> | undefined, value: T | null) {
-  if (typeof ref === "function") ref(value);
-  else if (ref && typeof ref === "object") (ref as React.RefObject<T | null>).current = value;
+/** Sets a ref; returns a React 19 callback ref's cleanup, if it gave one. */
+function setRef<T>(ref: React.Ref<T> | undefined, value: T | null): void | (() => void) {
+  if (typeof ref === "function") {
+    const cleanup = ref(value);
+    return typeof cleanup === "function" ? cleanup : undefined;
+  }
+  if (ref && typeof ref === "object") (ref as React.RefObject<T | null>).current = value;
 }
 
 function TooltipTrigger({
@@ -253,9 +257,17 @@ function TooltipTrigger({
 
   const theirRef = theirs.ref;
   const ref = React.useCallback(
-    (node: HTMLElement | null) => {
+    (node: HTMLElement) => {
       nodeRef.current = node;
-      setRef(theirRef, node);
+      const cleanup = setRef(theirRef, node);
+      // React 19: returning a cleanup means React calls it instead of the
+      // ref with null — so the trigger's own cleanup (or its null call)
+      // must happen here (Codex R1 Low-4).
+      return () => {
+        nodeRef.current = null;
+        if (cleanup) cleanup();
+        else setRef(theirRef, null);
+      };
     },
     [theirRef],
   );

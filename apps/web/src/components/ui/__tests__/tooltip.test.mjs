@@ -69,3 +69,11 @@ test("it opens on hover, focus and tap, and closes on Escape", () => {
 test("the open state is tracked per input, so leaving with the pointer keeps a focus-opened tooltip", () => {
   assert.match(src, /const open = \(hover \|\| focus \|\| tapped\) && !dismissed/);
 });
+
+test("the composed ref keeps a React 19 callback ref's cleanup (Codex R1 Low-4)", () => {
+  // React calls the composed ref's returned cleanup instead of ref(null), so
+  // it must run the trigger's own cleanup, or hand it null when it gave none.
+  assert.match(src, /const cleanup = setRef\(theirRef, node\);/);
+  assert.match(src, /return \(\) => \{\s*nodeRef\.current = null;\s*if \(cleanup\) cleanup\(\);\s*else setRef\(theirRef, null\);/);
+  assert.match(src, /return typeof cleanup === "function" \? cleanup : undefined;/);
+});

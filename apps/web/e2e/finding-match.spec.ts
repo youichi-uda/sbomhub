@@ -240,7 +240,9 @@ test.describe('M60 NVD / JVN confidence labels', () => {
     await openVulnerabilities(page, 'en', projectId!, 4);
     const kev = page.locator(`[data-vuln-cve-id="${NVD.high}"] span.bg-red-600[aria-describedby]`);
     await kev.hover();
-    const tip = page.locator(`[data-vuln-cve-id="${NVD.high}"]`).getByRole('tooltip');
+    // The panel the badge names: the entry also holds the match-badge hint,
+    // another role="tooltip" that a stray pointer move can open.
+    const tip = page.locator(`[id="${await kev.getAttribute('aria-describedby')}"]`);
     await expect(tip).toBeVisible();
     await expect(tip).toContainText(en.KEV.title);
     const bg = await tip.evaluate((el) => getComputedStyle(el).backgroundColor);
@@ -277,7 +279,7 @@ test.describe('shared Tooltip on a narrow viewport', () => {
         // because Chromium's tap emulation follows up with synthetic mouse
         // moves that can land outside the badge and close it again.
         await kev.dispatchEvent('touchend');
-        const tip = entry.getByRole('tooltip');
+        const tip = page.locator(`[id="${await kev.getAttribute('aria-describedby')}"]`);
         await expect(tip).toBeVisible();
         const box = (await tip.boundingBox())!;
         const vw = await page.evaluate(() => document.documentElement.clientWidth);
