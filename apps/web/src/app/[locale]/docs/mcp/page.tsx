@@ -151,10 +151,10 @@ pnpm build`}</CodeBlock>
               <div>
                 <h4 className="font-medium mb-2">Claude Desktop</h4>
                 <p className="text-sm text-muted-foreground mb-2">
-                  Windows: <code className="bg-muted px-1 rounded">%APPDATA%\Claude\claude_desktop_config.json</code>
+                  Windows: <code className="bg-muted px-1 rounded break-all">%APPDATA%\Claude\claude_desktop_config.json</code>
                 </p>
                 <p className="text-sm text-muted-foreground mb-2">
-                  macOS: <code className="bg-muted px-1 rounded">~/Library/Application Support/Claude/claude_desktop_config.json</code>
+                  macOS: <code className="bg-muted px-1 rounded break-all">~/Library/Application Support/Claude/claude_desktop_config.json</code>
                 </p>
                 <CodeBlock>{claudeConfig}</CodeBlock>
               </div>
@@ -162,7 +162,7 @@ pnpm build`}</CodeBlock>
               <div>
                 <h4 className="font-medium mb-2">Cursor</h4>
                 <p className="text-sm text-muted-foreground mb-2">
-                  {t("cursorConfigPath")}: <code className="bg-muted px-1 rounded">.cursor/mcp.json</code>
+                  {t("cursorConfigPath")}: <code className="bg-muted px-1 rounded break-all">.cursor/mcp.json</code>
                 </p>
                 <CodeBlock>{cursorConfig}</CodeBlock>
               </div>
@@ -189,11 +189,11 @@ pnpm build`}</CodeBlock>
         <CardContent>
           <div className="space-y-3">
             {tools.map((tool) => (
-              <div key={tool.name} className="flex items-start gap-3 p-3 bg-muted/50 rounded-lg">
+              <div key={tool.name} className="flex flex-wrap items-start gap-x-3 gap-y-1 p-3 bg-muted/50 rounded-lg">
                 <code className="text-sm font-mono bg-background px-2 py-1 rounded border whitespace-nowrap">
                   {tool.name}
                 </code>
-                <span className="text-muted-foreground text-sm">{tool.description}</span>
+                <span className="min-w-0 text-muted-foreground text-sm">{tool.description}</span>
               </div>
             ))}
           </div>

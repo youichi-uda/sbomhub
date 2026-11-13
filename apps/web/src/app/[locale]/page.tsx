@@ -195,8 +195,8 @@ export default async function LandingPage({ params }: Props) {
 
         {/* Header */}
         <header className="border-b bg-white sticky top-0 z-40">
-          <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-            <Link href={`/${locale}`} className="text-2xl font-bold text-primary">
+          <div className="container mx-auto px-4 py-4 flex items-center justify-between gap-2">
+            <Link href={`/${locale}`} className="text-xl sm:text-2xl font-bold text-primary">
               SBOMHub
             </Link>
             <nav className="hidden md:flex items-center gap-6">
@@ -216,11 +216,13 @@ export default async function LandingPage({ params }: Props) {
                 {t("nav.faq")}
               </Link>
             </nav>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1 sm:gap-2">
               <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
+                {/* Icon-only below sm (the label stays for screen readers):
+                    at 320px the three header buttons ran past the viewport. */}
                 <Button variant="ghost" size="sm" className="gap-1">
-                  <Github className="h-4 w-4" />
-                  {t("nav.github")}
+                  <Github className="h-4 w-4" aria-hidden="true" />
+                  <span className="sr-only sm:not-sr-only">{t("nav.github")}</span>
                 </Button>
               </a>
               <Link href={`/${locale}/sign-in`}>
@@ -392,7 +394,10 @@ export default async function LandingPage({ params }: Props) {
           {/* Self-host + CLI side by side */}
           <section id="self-host" className="py-20">
             <div className="container mx-auto px-4 max-w-6xl">
-              <div className="grid lg:grid-cols-2 gap-6">
+              {/* grid-cols-1 = minmax(0, 1fr): the implicit auto column grew to
+                  the <pre> command lines' width (661px at a 320px viewport)
+                  instead of letting them scroll in their overflow-x-auto box. */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <Card>
                   <CardHeader>
                     <CardTitle className="flex items-center gap-2">

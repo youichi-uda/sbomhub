@@ -798,7 +798,7 @@ export default function CompliancePage() {
             レポート出力
           </CardTitle>
         </CardHeader>
-        <CardContent className="flex gap-4">
+        <CardContent className="flex flex-wrap gap-4">
           <a
             href={api.projects.exportComplianceReport(projectId, "json")}
             download

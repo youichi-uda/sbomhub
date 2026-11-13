@@ -131,7 +131,10 @@ const TabsList = React.forwardRef<
       aria-orientation={ctx.orientation}
       onKeyDown={handleKeyDown}
       className={cn(
-        "inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground",
+        // max-w-full + overflow-x-auto: a tab row wider than a phone screen
+        // scrolls inside itself instead of widening the page;
+        // justify-center-safe keeps the first tab reachable when it does.
+        "inline-flex h-10 max-w-full items-center justify-center-safe overflow-x-auto rounded-md bg-muted p-1 text-muted-foreground",
         className
       )}
       {...props}

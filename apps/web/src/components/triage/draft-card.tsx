@@ -204,14 +204,19 @@ export function DraftCard({
     >
       <CardHeader>
         <div className="flex items-start justify-between gap-4">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <CardTitle className="font-mono text-base">{draft.CVEID}</CardTitle>
             <Badge variant={stateVariant(draft.State, belowThreshold)}>
               {belowThreshold ? tState("under_investigation") : tState(draft.State)}
             </Badge>
             {draft.Justification && (
-              <Badge variant="outline" className="font-normal">
-                {tJust(draft.Justification)}
+              // A justification outside the CycloneDX set this UI translates
+              // (e.g. an OpenVEX "vulnerable_code_not_in_execute_path" from an
+              // older row) used to print the raw message key
+              // "Triage.Justification.…", one unbreakable word that ran 80px
+              // past a 320px screen. Show the stored value instead, wrapping.
+              <Badge variant="outline" className="font-normal wrap-anywhere">
+                {tJust.has(draft.Justification) ? tJust(draft.Justification) : draft.Justification}
               </Badge>
             )}
             {alreadyDecided && (

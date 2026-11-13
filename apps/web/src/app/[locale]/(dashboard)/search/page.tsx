@@ -395,7 +395,7 @@ export default function SearchPage() {
             <CardContent>
               <form
                 onSubmit={handleComponentSearch}
-                className="flex gap-2"
+                className="flex flex-wrap gap-2 sm:flex-nowrap"
                 aria-busy={loading}
               >
                 <Input
@@ -407,7 +407,7 @@ export default function SearchPage() {
                   placeholder={t("versionPlaceholder")}
                   value={versionQuery}
                   onChange={(e) => setVersionQuery(e.target.value)}
-                  className="w-48"
+                  className="w-full sm:w-48"
                 />
                 <Button type="submit" disabled={loading}>
                   {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : t("searchButton")}

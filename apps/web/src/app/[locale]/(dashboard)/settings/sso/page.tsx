@@ -223,7 +223,7 @@ export default function SSOSettingsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             {SSO_PROVIDERS.map((provider) => (
               <div
                 key={provider.id}

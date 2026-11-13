@@ -1,12 +1,67 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { cn } from "@/lib/utils";
-import { FolderOpen, LayoutDashboard, Search, ClipboardList, TrendingUp, FileText, CreditCard, Key, Settings, Plug, Sparkles } from "lucide-react";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { FolderOpen, LayoutDashboard, Search, ClipboardList, TrendingUp, FileText, CreditCard, Key, Settings, Plug, Sparkles, Menu } from "lucide-react";
 
+// The fixed 256px sidebar left 64px for the page at a 320px viewport, so
+// every dashboard page scrolled sideways on a phone. Below `md` the sidebar
+// is hidden and the same links open from the header's menu button
+// (MobileNav) in a modal panel; from `md` up nothing changes.
 export function Sidebar() {
+  return (
+    <aside className="hidden md:block w-64 shrink-0 bg-gray-900 text-white min-h-screen p-4">
+      <div className="mb-8">
+        <h1 className="text-2xl font-bold">SBOMHub</h1>
+      </div>
+      <SidebarNav />
+    </aside>
+  );
+}
+
+export function MobileNav() {
+  const t = useTranslations("Navigation");
+  // Open "on" the page it was opened from: any navigation (a link, Back)
+  // closes it without an effect. A link to the page already shown does not
+  // change the pathname, so the links also close it themselves (onNavigate).
+  const pathname = usePathname();
+  const [openOn, setOpenOn] = useState<string | null>(null);
+  const open = openOn === pathname;
+  const setOpen = (next: boolean) => setOpenOn(next ? pathname : null);
+
+  return (
+    <div className="md:hidden">
+      <button
+        type="button"
+        className="-ml-2 inline-flex h-9 w-9 items-center justify-center rounded-md text-gray-700 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-label={t("openMenu")}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        data-testid="mobile-nav-toggle"
+        onClick={() => setOpen(true)}
+      >
+        <Menu className="h-5 w-5" aria-hidden="true" />
+      </button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent
+          aria-label={t("mainMenu")}
+          onClose={() => setOpen(false)}
+          closeLabel={t("closeMenu")}
+          className="w-[min(18rem,calc(100vw-2rem))] max-h-[calc(100dvh-2rem)] overflow-y-auto bg-gray-900 p-4 text-white"
+        >
+          <p className="mb-6 text-2xl font-bold">SBOMHub</p>
+          <SidebarNav onNavigate={() => setOpen(false)} />
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const t = useTranslations("Navigation");
   const tSettings = useTranslations("Settings.APIKeys");
   const tLLM = useTranslations("Settings.LLM");
@@ -29,10 +84,7 @@ export function Sidebar() {
   ];
 
   return (
-    <aside className="w-64 bg-gray-900 text-white min-h-screen p-4">
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold">SBOMHub</h1>
-      </div>
+    <>
       <nav className="space-y-2">
         {links.map((link) => {
           const Icon = link.icon;
@@ -41,6 +93,7 @@ export function Sidebar() {
             <Link
               key={link.href}
               href={link.href}
+              onClick={onNavigate}
               className={cn(
                 "flex items-center gap-3 px-3 py-2 rounded-md transition-colors",
                 isActive ? "bg-gray-700 text-white" : "text-gray-300 hover:bg-gray-800"
@@ -67,6 +120,7 @@ export function Sidebar() {
               <Link
                 key={link.href}
                 href={link.href}
+                onClick={onNavigate}
                 className={cn(
                   "flex items-center gap-3 px-3 py-2 rounded-md transition-colors",
                   isActive ? "bg-gray-700 text-white" : "text-gray-300 hover:bg-gray-800"
@@ -79,6 +133,6 @@ export function Sidebar() {
           })}
         </nav>
       </div>
-    </aside>
+    </>
   );
 }

@@ -432,12 +432,15 @@ export default function ProjectDetailPage() {
           <ArrowLeft className="h-4 w-4 mr-1" />
           {tp("backToProjects")}
         </Link>
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-3xl font-bold">{project.name}</h1>
-            <p className="text-muted-foreground">{project.description}</p>
+        {/* flex-wrap / min-w-0 / break-words: at 320px the action row and the
+            tab row below ran 600px past the viewport (horizontal page
+            scroll); they now wrap. */}
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="text-3xl font-bold wrap-break-word">{project.name}</h1>
+            <p className="text-muted-foreground wrap-break-word">{project.description}</p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Link href={`/projects/${projectId}/diff`}>
               <Button variant="outline">{tp("sbomDiff")}</Button>
             </Link>
@@ -480,7 +483,7 @@ export default function ProjectDetailPage() {
         </div>
       </div>
 
-      <div className="flex gap-2 mb-6">
+      <div className="flex flex-wrap gap-2 mb-6">
         <Button
           variant={activeTab === "upload" ? "default" : "outline"}
           onClick={() => selectTab("upload")}

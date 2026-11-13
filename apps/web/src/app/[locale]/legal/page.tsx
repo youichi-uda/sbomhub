@@ -60,7 +60,7 @@ export default async function LegalPage({ params }: Props) {
 
         <div className="max-w-none">
           {isJapanese ? (
-            <table className="w-full border-collapse">
+            <table className="w-full border-collapse wrap-anywhere">
               <tbody>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50 w-1/3">販売事業者</th>
@@ -129,7 +129,7 @@ export default async function LegalPage({ params }: Props) {
               </tbody>
             </table>
           ) : (
-            <table className="w-full border-collapse">
+            <table className="w-full border-collapse wrap-anywhere">
               <tbody>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50 w-1/3">Business Operator</th>

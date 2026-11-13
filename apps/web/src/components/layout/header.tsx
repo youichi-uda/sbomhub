@@ -5,6 +5,7 @@ import { OrganizationSwitcher } from "@clerk/nextjs";
 import { Button } from "@/components/ui/button";
 import { Globe, LogOut } from "lucide-react";
 import { isAuthEnabled, useAuth } from "@/lib/auth";
+import { MobileNav } from "@/components/layout/sidebar";
 
 export function Header() {
   const pathname = usePathname();
@@ -25,9 +26,10 @@ export function Header() {
   };
 
   return (
-    <header className="h-14 border-b bg-white flex items-center justify-between px-6">
-      <div className="flex items-center gap-4">
-        <span className="text-sm text-muted-foreground">
+    <header className="h-14 border-b bg-white flex items-center justify-between gap-2 px-4 md:px-6">
+      <div className="flex min-w-0 items-center gap-4">
+        <MobileNav />
+        <span className="hidden sm:inline text-sm text-muted-foreground">
           SBOM Management Dashboard
         </span>
         {authEnabled && isSignedIn && (

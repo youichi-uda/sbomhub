@@ -313,7 +313,7 @@ export default function AnalyticsPage() {
                             </div>
                         </div>
                     </div>
-                    <div className="mt-4 flex items-center gap-6 text-sm">
+                    <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
                         <div className="flex items-center gap-2">
                             <div className="w-3 h-3 rounded bg-red-500" />
                             <span>Critical</span>

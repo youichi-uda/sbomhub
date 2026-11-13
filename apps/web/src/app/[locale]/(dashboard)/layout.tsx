@@ -21,9 +21,12 @@ export default async function DashboardLayout({ children, params }: DashboardLay
       <SubscriptionGuard locale={locale}>
         <div className="flex min-h-screen">
           <Sidebar />
-          <div className="flex-1 flex flex-col">
+          {/* min-w-0: a flex item defaults to min-width:auto, so a wide table
+              stretched the column (and the page) instead of scrolling in
+              its own overflow-x-auto box. */}
+          <div className="flex-1 min-w-0 flex flex-col">
             <Header />
-            <main className="flex-1 bg-gray-50 p-6">{children}</main>
+            <main className="flex-1 min-w-0 bg-gray-50 p-4 md:p-6">{children}</main>
           </div>
         </div>
       </SubscriptionGuard>

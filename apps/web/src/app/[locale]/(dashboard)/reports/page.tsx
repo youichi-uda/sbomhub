@@ -139,14 +139,14 @@ export default function ReportsPage() {
 
     return (
         <div className="py-8 px-4">
-            <div className="flex items-center justify-between mb-6">
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
                 <div>
                     <h1 className="text-2xl font-bold">{t("title")}</h1>
                     <p className="text-sm text-muted-foreground mt-1">
                         {t("description")}
                     </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                     <Link
                         href={`/${locale}/settings/reports`}
                         className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg hover:bg-muted transition-colors"

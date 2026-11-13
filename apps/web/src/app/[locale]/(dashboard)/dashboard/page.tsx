@@ -382,9 +382,9 @@ export default function DashboardPage() {
 
   return (
     <div className="container mx-auto py-8 space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-wrap justify-between items-center gap-x-4 gap-y-2">
         <h1 className="text-3xl font-bold">{t("title")}</h1>
-        <div className="flex gap-4 text-sm text-muted-foreground">
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
           <div className="flex items-center gap-1">
             <FolderOpen className="h-4 w-4" />
             <span>{summary.total_projects} {t("projects")}</span>

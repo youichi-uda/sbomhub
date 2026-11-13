@@ -217,7 +217,10 @@
     "audit": "Audit Logs",
     "billing": "Plans & Billing",
     "settings": "Settings",
-    "integrations": "Integrations"
+    "integrations": "Integrations",
+    "openMenu": "Open menu",
+    "closeMenu": "Close menu",
+    "mainMenu": "Main menu"
   },
   "Projects": {
     "title": "Projects",
