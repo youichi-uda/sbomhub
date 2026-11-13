@@ -32,6 +32,16 @@ type scanStep struct {
 type scanOutcome struct {
 	markers []string
 	reasons []string
+	// skipped names the sources not consulted because the operator switched
+	// them off (SBOMHUB_JVN=off). Not a failure; reported as scan-status
+	// skipped_sources.
+	skipped []string
+}
+
+// disableableScanner is a scanner the operator can switch off
+// (service.JVNService with SBOMHUB_JVN=off).
+type disableableScanner interface {
+	ScanDisabled() bool
 }
 
 func (o scanOutcome) failed() bool { return len(o.markers) > 0 }
@@ -77,6 +87,14 @@ func runSBOMScan(ctx context.Context, db *sql.DB, tenantID, sbomID uuid.UUID, de
 	defer release()
 	for _, st := range steps {
 		if st.scanner == nil {
+			continue
+		}
+		if d, ok := st.scanner.(disableableScanner); ok && d.ScanDisabled() {
+			// SBOMHUB_JVN=off: not run, not a failure, and never silent —
+			// it is reported as scan-status skipped_sources.
+			slog.Info("scan: source switched off by the operator; skipped",
+				"sbom_id", sbomID, "scanner", st.source)
+			out.skipped = service.MergeScanReasons(out.skipped, []string{st.source})
 			continue
 		}
 		var err error
@@ -135,7 +153,7 @@ func recordScanOutcome(tracker *service.ScanTracker, sbomID uuid.UUID, gen uint6
 	if tracker == nil {
 		return
 	}
-	if !tracker.Finish(sbomID, gen, o.reasons, o.message()) {
+	if !tracker.FinishSkipped(sbomID, gen, o.reasons, o.message(), o.skipped) {
 		slog.Info("scan: outcome not recorded; the tracker no longer counts this run as active",
 			"sbom_id", sbomID, "failed", o.failed())
 	}

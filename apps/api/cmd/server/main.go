@@ -545,6 +545,19 @@ func main() {
 		slog.Error("Refusing to start", "error", err)
 		os.Exit(1)
 	}
+	// SBOMHUB_JVN (on | off): the operator opt-out from JVN lookups while
+	// MyJVN is suspended (JPCERT/CC, 2026-10-22, no resumption date).
+	// Refused here, before migrations, like the settings above.
+	jvnEnabled, err := cfg.JVNEnabled()
+	if err != nil {
+		slog.Error("Refusing to start", "error", err)
+		os.Exit(1)
+	}
+	if !jvnEnabled {
+		slog.Warn("JVN lookups are switched off (SBOMHUB_JVN=off): SBOM scans do not query MyJVN and "+
+			"report skipped_sources [\"jvn\"]; unset SBOMHUB_JVN or set it to \"on\" to restore them",
+			"notice", "https://jvn.jp/nav/info2026102281.html")
+	}
 
 	// SECURITY (P0 #2 / Trust Rescue 9.1.1): Migrations and runtime use
 	// distinct DB roles. We open a short-lived migrator connection here, run
@@ -726,7 +739,7 @@ func main() {
 	}
 
 	nvdService := service.NewNVDServiceWithCache(vulnRepo, componentRepo, cfg.NVDAPIKey, nvdCache, cfg.NVDURL, cfg.Offline)
-	jvnService := service.NewJVNService(vulnRepo, componentRepo, cfg.JVNURL, cfg.Offline)
+	jvnService := service.NewJVNService(vulnRepo, componentRepo, cfg.JVNURL, cfg.Offline).WithDisabled(!jvnEnabled)
 	// M70: the distro step of every scan relabels a distro package's links
 	// from the distro's own fixed-version data (OSV, SBOMHUB_OSV_URL), cached
 	// in Redis like the NVD answers. Offline mode makes it a no-op.

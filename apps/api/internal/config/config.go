@@ -64,6 +64,10 @@ type Config struct {
 	RedisBreakerCooldownRaw  string
 	ScanTenantConcurrencyRaw string
 
+	// JVNRaw is SBOMHUB_JVN as the operator spelled it (on | off). Read it
+	// through JVNEnabled (config/jvn_switch.go).
+	JVNRaw string
+
 	// Clerk authentication (SaaS mode)
 	ClerkSecretKey     string
 	ClerkWebhookSecret string
@@ -260,6 +264,7 @@ func Load() *Config {
 		RedisBreakerThresholdRaw: getEnv("SBOMHUB_REDIS_BREAKER_THRESHOLD", ""),
 		RedisBreakerCooldownRaw:  getEnv("SBOMHUB_REDIS_BREAKER_COOLDOWN", ""),
 		ScanTenantConcurrencyRaw: getEnv("SBOMHUB_SCAN_TENANT_CONCURRENCY", ""),
+		JVNRaw:                   getEnv("SBOMHUB_JVN", ""),
 
 		// Clerk
 		ClerkSecretKey:     getEnv("CLERK_SECRET_KEY", ""),

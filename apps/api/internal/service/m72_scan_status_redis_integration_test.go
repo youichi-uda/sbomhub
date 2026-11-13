@@ -337,7 +337,7 @@ func TestM72R8_RetriedBeginOfALostRunRejoins(t *testing.T) {
 	if err := p.shared.begin(context.Background(), id, ga); err != nil { // A's begin, retried
 		t.Fatal(err)
 	}
-	if _, err := p.shared.finish(context.Background(), id, ga, "", nil); err != nil {
+	if _, err := p.shared.finish(context.Background(), id, ga, "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, msg, _ := reader.GetDetail(id)
@@ -472,7 +472,7 @@ func TestM72R14_SharedVersionIsUniquePerWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 		v1, _ := store.get(ctx, id)
-		if _, err := store.finish(ctx, id, g, "", nil); err != nil {
+		if _, err := store.finish(ctx, id, g, "", nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		v2, _ := store.get(ctx, id)
@@ -536,7 +536,7 @@ func TestM72R18_IntentReadsRunningUntilItsBeginLands(t *testing.T) {
 	if err := store.intent(ctx, id, 2); err != nil { // the new Begin, ahead of the queue
 		t.Fatal(err)
 	}
-	if _, err := store.finish(ctx, id, 1, "", nil); err != nil { // the older write lands
+	if _, err := store.finish(ctx, id, 1, "", nil, nil); err != nil { // the older write lands
 		t.Fatal(err)
 	}
 	if v, _ := store.get(ctx, id); v.state != ScanStateRunning {
@@ -545,7 +545,7 @@ func TestM72R18_IntentReadsRunningUntilItsBeginLands(t *testing.T) {
 	if err := store.begin(ctx, id, 2); err != nil { // the queued Begin lands
 		t.Fatal(err)
 	}
-	if _, err := store.finish(ctx, id, 2, "", nil); err != nil {
+	if _, err := store.finish(ctx, id, 2, "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := store.get(ctx, id); v.state != ScanStateCompleted {
@@ -578,10 +578,10 @@ func TestM72R19_BeginReplacingItsIntentKeepsTheGroup(t *testing.T) {
 	}
 	must(store.begin(ctx, id, 1))  // A runs
 	must(store.intent(ctx, id, 2)) // B's Begin is queued; its intent lands
-	_, err := store.finish(ctx, id, 1, "nvd: scan failed (fetch_failed)", []string{ScanReasonFetchFailed})
+	_, err := store.finish(ctx, id, 1, "nvd: scan failed (fetch_failed)", []string{ScanReasonFetchFailed}, nil)
 	must(err)
 	must(store.begin(ctx, id, 2)) // B's queued Begin lands
-	_, err = store.finish(ctx, id, 2, "", nil)
+	_, err = store.finish(ctx, id, 2, "", nil, nil)
 	must(err)
 	if v, _ := store.get(ctx, id); v.state != ScanStateFailed {
 		t.Fatalf("group outcome %s, want failed (A's failure)", v.state)
@@ -607,7 +607,7 @@ func TestM72R19_EvictionYoungKeyAndVersions(t *testing.T) {
 	if err := store.begin(ctx, id, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.finish(ctx, id, 2, "", nil); err != nil {
+	if _, err := store.finish(ctx, id, 2, "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	v, _ := store.get(ctx, id)
@@ -639,7 +639,7 @@ func TestM72NoEvictionRedisSkipsYoungHold(t *testing.T) {
 	if err := store.begin(ctx, id, 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.finish(ctx, id, 1, "", nil); err != nil {
+	if _, err := store.finish(ctx, id, 1, "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := store.get(ctx, id); v.state != ScanStateCompleted {
@@ -651,7 +651,7 @@ func TestM72NoEvictionRedisSkipsYoungHold(t *testing.T) {
 	if err := store.begin(ctx, id2, 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.finish(ctx, id2, 1, "", nil); err != nil {
+	if _, err := store.finish(ctx, id2, 1, "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := store.get(ctx, id2); v.state != ScanStateRunning {
@@ -689,7 +689,7 @@ func TestM72YoungHoldFollowsModeSwitches(t *testing.T) {
 		if err := store.begin(ctx, id, 1); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.finish(ctx, id, 1, "", nil); err != nil {
+		if _, err := store.finish(ctx, id, 1, "", nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -732,7 +732,7 @@ func TestM72YoungHoldFollowsModeSwitches(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.noEvict.Store(true)
-	if _, err := store.finish(ctx, b2, 1, "", nil); err != nil {
+	if _, err := store.finish(ctx, b2, 1, "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if s := state(b2); s != ScanStateCompleted {
@@ -777,7 +777,7 @@ func TestM72ImmediateIgnoresClockStepBack(t *testing.T) {
 	if err := rdb.HSet(ctx, scanStatusKeys(id)[0], "born", fmt.Sprintf("%d%06d", sec, usec)).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.finish(ctx, id, 1, "", nil); err != nil {
+	if _, err := store.finish(ctx, id, 1, "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := store.get(ctx, id); v.state != ScanStateCompleted {

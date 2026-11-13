@@ -91,6 +91,12 @@ func scanStatusKeys(sbomID uuid.UUID) []string {
 //	state, error, reasons, updated   the published status
 //	outcomes      JSON: the group's distinct failures (marker + reasons),
 //	              bounded by the marker vocabulary (Codex M72 R2 High-3)
+//	skipped       JSON: the sources a run of the group skipped because the
+//	              operator switched them off (SBOMHUB_JVN=off), the union over
+//	              the group's finishes. Reset with outcomes when a new group
+//	              starts; not a failure, so publish ignores it; returned by get
+//	              whatever the state (the reader shows it on terminal states).
+//	              Bounded by the source vocabulary.
 //	r:<gen>       an active run, value = lease expiry (ms, Redis time)
 //	p:<gen>       an intent: a Begin still queued behind older writes; reads
 //	              as running, value = lease expiry
@@ -161,6 +167,21 @@ local function save_outcomes(o)
   else
     redis.call('HSET', K, 'outcomes', cjson.encode(o))
   end
+end
+local function add_skipped(ss)
+  if type(ss) ~= 'table' or #ss == 0 then return end
+  local cur = {}
+  local raw = redis.call('HGET', K, 'skipped')
+  if raw then
+    local ok, v = pcall(cjson.decode, raw)
+    if ok and type(v) == 'table' then cur = v end
+  end
+  local have = {}
+  for _, x in ipairs(cur) do have[x] = true end
+  for _, x in ipairs(ss) do
+    if type(x) == 'string' and not have[x] then table.insert(cur, x); have[x] = true end
+  end
+  redis.call('HSET', K, 'skipped', cjson.encode(cur))
 end
 local function add_failure(msg, rs)
   if msg == '' then return end
@@ -358,7 +379,7 @@ if count(runs_b) == 0 and count(intents_b) == 0 then
   -- current group, Codex M72 R19 High-1). Tombstones are kept: a run swept as interrupted may still be
   -- alive (a suspended process), so the SBOM must not read completed while it
   -- could still be writing (Codex M72 R10 High-1).
-  redis.call('HDEL', K, 'state', 'error', 'reasons', 'updated')
+  redis.call('HDEL', K, 'state', 'error', 'reasons', 'updated', 'skipped')
   save_outcomes({})
 end
 activate(ARGV[1], now, ARGV[2])
@@ -382,7 +403,8 @@ publish(now)
 expire(ARGV[3])
 return 1`
 
-// ARGV: gen, ttl ms, error marker (empty = completed), reasons JSON.
+// ARGV: gen, ttl ms, error marker (empty = completed), reasons JSON, skipped
+// sources JSON (recorded either way too, like the failure).
 // Returns 1 if the run was active or swept as interrupted, 2 if Redis did not
 // know it (its begin never landed, or it lapsed and its tombstone expired). A
 // failure is recorded EITHER WAY (Codex M72 R5 High-2): a failure is never
@@ -398,12 +420,15 @@ local wasLost = redis.call('HDEL', K, 'l:' .. ARGV[1]) == 1
 local ok, rs = pcall(cjson.decode, ARGV[4])
 if not ok or type(rs) ~= 'table' then rs = {} end
 add_failure(ARGV[3], rs)
+local okS, ss = pcall(cjson.decode, ARGV[5] or '[]')
+if okS then add_skipped(ss) end
 publish(now)
 expire(ARGV[2])
 if active or wasLost then return 1 end
 return 2`
 
-// ARGV: JSON {"b": [gen...], "f": [gen...], "x": [[marker, [reason...]]...]},
+// ARGV: JSON {"b": [gen...], "f": [gen...], "x": [[marker, [reason...]]...],
+// "s": [skipped source...]},
 // lease ms, ttl ms. The coalesced writes of a queue that overflowed: runs
 // that began (joined to the current group, never a new one), runs that
 // finished, and the failures among them (Codex M72 R5 High-3).
@@ -430,6 +455,7 @@ if type(m.x) == 'table' then
     end
   end
 end
+add_skipped(m.s)
 publish(now)
 expire(ARGV[3])
 return 1`
@@ -485,7 +511,7 @@ expire(ARGV[4])
 return 1`
 
 // Returns false (nil) when there is no entry, else {state, error, reasons,
-// rev}.
+// rev, skipped}.
 const scanStatusGetLua = `
 if redis.call('EXISTS', K) == 0 then return false end
 local now = nowms()
@@ -512,7 +538,7 @@ if changed then
   publish(now)
   bump()
 end
-return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]', (redis.call('HGET', K, 'born') or '') .. ':' .. (redis.call('HGET', K, 'rev') or '')}`
+return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or '', redis.call('HGET', K, 'reasons') or '[]', (redis.call('HGET', K, 'born') or '') .. ':' .. (redis.call('HGET', K, 'rev') or ''), redis.call('HGET', K, 'skipped') or '[]'}`
 
 // statusView is one read of the shared status. version changes with every
 // write of it (the entry's rev counter).
@@ -520,6 +546,9 @@ type statusView struct {
 	state   ScanState
 	errMsg  string
 	reasons []string
+	// skipped: the group's skipped sources (SBOMHUB_JVN=off), on terminal
+	// states only.
+	skipped []string
 	version string
 	found   bool
 }
@@ -529,7 +558,8 @@ type scanStatusStore interface {
 	begin(ctx context.Context, sbomID uuid.UUID, gen uint64) error
 	// finish records run gen's outcome; known is false when the store did
 	// not know the run (its failure is recorded anyway).
-	finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) (known bool, err error)
+	// skipped is the run's skipped sources (SBOMHUB_JVN=off).
+	finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons, skipped []string) (known bool, err error)
 	// heartbeatMany renews the leases of runs in one round trip; active[i]
 	// is false for a run that was superseded.
 	heartbeatMany(ctx context.Context, runs []runKey) (active []bool, err error)
@@ -685,11 +715,11 @@ func (s *redisScanStatusStore) begin(ctx context.Context, sbomID uuid.UUID, gen 
 		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
-func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) (bool, error) {
+func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons, skipped []string) (bool, error) {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
 	n, err := s.sc().finish.Run(ctx, s.client, scanStatusKeys(sbomID),
-		genString(gen), s.ttl.Milliseconds(), errMsg, reasonsJSON(reasons)).Int()
+		genString(gen), s.ttl.Milliseconds(), errMsg, reasonsJSON(reasons), reasonsJSON(skipped)).Int()
 	return n == 1, err
 }
 
@@ -708,6 +738,14 @@ type mergeSet struct {
 	fresh         map[uint64]bool
 	freshFinishes int
 	failures      []mergeFailure
+	// skipped: the folded finishes' skipped sources (SBOMHUB_JVN=off),
+	// bounded by the source vocabulary.
+	skipped []string
+}
+
+// addSkipped folds a finish's skipped sources.
+func (m *mergeSet) addSkipped(skipped []string) {
+	m.skipped = MergeScanReasons(m.skipped, skipped)
 }
 
 type mergeFailure struct {
@@ -780,7 +818,11 @@ func (m *mergeSet) json() string {
 		}
 		x = append(x, []any{f.msg, r})
 	}
-	b, err := json.Marshal(map[string]any{"b": gens(m.begins), "f": gens(m.finishes), "x": x})
+	sk := m.skipped
+	if sk == nil {
+		sk = []string{}
+	}
+	b, err := json.Marshal(map[string]any{"b": gens(m.begins), "f": gens(m.finishes), "x": x, "s": sk})
 	if err != nil {
 		return "{}"
 	}
@@ -869,7 +911,7 @@ func (s *redisScanStatusStore) get(ctx context.Context, sbomID uuid.UUID) (statu
 	if err != nil {
 		return statusView{}, err
 	}
-	if len(v) != 4 {
+	if len(v) != 5 {
 		return statusView{}, fmt.Errorf("scan status: unexpected reply of %d values", len(v))
 	}
 	state := ScanState(v[0])
@@ -879,6 +921,12 @@ func (s *redisScanStatusStore) get(ctx context.Context, sbomID uuid.UUID) (statu
 		return statusView{}, fmt.Errorf("scan status: unexpected state %q", v[0])
 	}
 	view := statusView{state: state, version: "s" + v[3], found: true}
+	if state == ScanStateRunning {
+		return view, nil
+	}
+	if err := json.Unmarshal([]byte(v[4]), &view.skipped); err != nil {
+		view.skipped = nil
+	}
 	if state != ScanStateFailed {
 		return view, nil
 	}

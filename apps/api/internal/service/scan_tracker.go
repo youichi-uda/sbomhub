@@ -99,6 +99,13 @@ type scanEntry struct {
 	// last one finishes.
 	groupMsgs    []string
 	groupReasons []string
+	// skipped is the terminal state's skipped sources (SBOMHUB_JVN=off):
+	// sources a run of the group did not consult because the operator
+	// switched them off. groupSkipped accumulates them like groupReasons,
+	// over every run of the group, and is published with the terminal
+	// state — completed or failed alike, since a skip is not a failure.
+	skipped      []string
+	groupSkipped []string
 	// rev is the tracker-wide sequence number of the entry's last
 	// transition (M72): GetDetail detects a transition that raced its Redis
 	// read (Codex M72 R4 High-1).
@@ -235,7 +242,7 @@ func (t *ScanTracker) Begin(sbomID uuid.UUID) uint64 {
 		e = scanEntry{active: map[uint64]bool{}}
 	}
 	e.state = ScanStateRunning
-	e.errMsg, e.reasons = "", nil
+	e.errMsg, e.reasons, e.skipped = "", nil, nil
 	e.updatedAt = time.Now()
 	e.active[gen] = true
 	t.put(sbomID, e)
@@ -262,10 +269,19 @@ var testHookAfterLocalBegin func(gen uint64)
 // non-empty, completed otherwise. It reports whether gen was an active run.
 // The SBOM's state becomes terminal only when no other run is active.
 func (t *ScanTracker) Finish(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string) bool {
-	return t.finishLocal(sbomID, gen, reasons, errMsg)
+	return t.finishLocal(sbomID, gen, reasons, errMsg, nil)
 }
 
-func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string) bool {
+// FinishSkipped is Finish for a run that skipped sources the operator
+// switched off (SBOMHUB_JVN=off). The skip is not a failure: a run that
+// skipped JVN and whose other sources succeeded completes. The SBOM's
+// terminal state carries the union of the skips of every run of its group,
+// in the shared store too, so every replica reports it.
+func (t *ScanTracker) FinishSkipped(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string, skipped []string) bool {
+	return t.finishLocal(sbomID, gen, reasons, errMsg, skipped)
+}
+
+func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string, skipped []string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	e, ok := t.entries[sbomID]
@@ -281,7 +297,8 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 	if sharedMsg == "" && len(reasons) > 0 {
 		sharedMsg = "scan failed"
 	}
-	t.queueFinishLocked(sbomID, gen, sharedMsg, reasons)
+	t.queueFinishLocked(sbomID, gen, sharedMsg, reasons, skipped)
+	e.groupSkipped = MergeScanReasons(e.groupSkipped, skipped)
 	if errMsg != "" || len(reasons) > 0 {
 		if errMsg == "" {
 			errMsg = "scan failed"
@@ -307,7 +324,8 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 		e.state = ScanStateCompleted
 		e.errMsg, e.reasons = "", nil
 	}
-	e.groupMsgs, e.groupReasons = nil, nil
+	e.skipped = e.groupSkipped
+	e.groupMsgs, e.groupReasons, e.groupSkipped = nil, nil, nil
 	t.put(sbomID, e)
 	return true
 }
@@ -361,12 +379,34 @@ func (t *ScanTracker) GetDetail(sbomID uuid.UUID) (ScanState, string, []string) 
 	return state, msg, reasons
 }
 
+// ScanStatusDetail is one read of an SBOM's scan status.
+type ScanStatusDetail struct {
+	State ScanState
+	// Error and Reasons are set only when State is failed.
+	Error   string
+	Reasons []string
+	// Skipped (SBOMHUB_JVN=off) names the sources the scan did not consult
+	// because the operator switched them off. Set only when State is
+	// completed or failed.
+	Skipped []string
+	// Version changes with every transition of the status (see
+	// GetDetailVersion).
+	Version string
+}
+
 // GetDetailVersion is GetDetail plus a version that changes with every
 // transition of the SBOM's status (Codex M72 R13 High-1): a caller that reads
 // the status, then something else (the counts), then the status again can
 // tell whether anything happened in between, even when both reads say
 // "completed".
 func (t *ScanTracker) GetDetailVersion(sbomID uuid.UUID) (ScanState, string, []string, string) {
+	d := t.GetStatus(sbomID)
+	return d.State, d.Error, d.Reasons, d.Version
+}
+
+// GetStatus is GetDetailVersion with the skipped sources, all from the same
+// read (GetDetail documents which source answers).
+func (t *ScanTracker) GetStatus(sbomID uuid.UUID) ScanStatusDetail {
 	if t.shared == nil {
 		return t.localVersioned(sbomID, false)
 	}
@@ -399,11 +439,12 @@ func (t *ScanTracker) GetDetailVersion(sbomID uuid.UUID) (ScanState, string, []s
 			// that entry — so it reads unknown (Codex M72 R11 High-1).
 			return t.localVersioned(sbomID, true)
 		case view.state == ScanStateRunning:
-			return view.state, "", nil, view.version
+			return ScanStatusDetail{State: view.state, Version: view.version}
 		case t.pendingShared(sbomID):
 			return t.localPending(sbomID)
 		}
-		return view.state, view.errMsg, view.reasons, view.version
+		return ScanStatusDetail{State: view.state, Error: view.errMsg, Reasons: view.reasons,
+			Skipped: view.skipped, Version: view.version}
 	}
 	// Transitions kept racing the read: the safe local answer.
 	return t.localVersioned(sbomID, true)
@@ -412,42 +453,48 @@ func (t *ScanTracker) GetDetailVersion(sbomID uuid.UUID) (ScanState, string, []s
 // localPending is the local answer while this process's writes of sbomID are
 // pending: a local "completed" reads running until the writes land and Redis
 // answers for every replica (Codex M72 R20 High-2). failed is safe.
-func (t *ScanTracker) localPending(sbomID uuid.UUID) (ScanState, string, []string, string) {
-	state, msg, reasons, version := t.localVersioned(sbomID, false)
-	if state == ScanStateCompleted {
-		return ScanStateRunning, "", nil, version
+func (t *ScanTracker) localPending(sbomID uuid.UUID) ScanStatusDetail {
+	d := t.localVersioned(sbomID, false)
+	if d.State == ScanStateCompleted {
+		return ScanStatusDetail{State: ScanStateRunning, Version: d.Version}
 	}
-	return state, msg, reasons, version
+	return d
 }
 
 // localVersioned is this process's answer with its entry revision as the
 // version, both read under one lock (Codex M72 R14 Medium-3). withoutShared:
 // Redis could not be consulted, so a local "completed" is not trusted (see
 // GetDetailVersion) and reads unknown.
-func (t *ScanTracker) localVersioned(sbomID uuid.UUID, withoutShared bool) (ScanState, string, []string, string) {
+func (t *ScanTracker) localVersioned(sbomID uuid.UUID, withoutShared bool) ScanStatusDetail {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	state, msg, reasons := t.getDetailLocked(sbomID)
-	if withoutShared && state == ScanStateCompleted {
-		state, msg, reasons = ScanStateUnknown, "", nil
+	d := t.getDetailLocked(sbomID)
+	if withoutShared && d.State == ScanStateCompleted {
+		d = ScanStatusDetail{State: ScanStateUnknown}
 	}
-	return state, msg, reasons, "l" + strconv.FormatUint(t.entries[sbomID].rev, 10)
+	d.Version = "l" + strconv.FormatUint(t.entries[sbomID].rev, 10)
+	return d
 }
 
-// getDetailLocked is the in-memory status of sbomID. t.mu is held.
-func (t *ScanTracker) getDetailLocked(sbomID uuid.UUID) (ScanState, string, []string) {
+// getDetailLocked is the in-memory status of sbomID (no version). t.mu is
+// held.
+func (t *ScanTracker) getDetailLocked(sbomID uuid.UUID) ScanStatusDetail {
 	entry, ok := t.entries[sbomID]
 	if !ok {
-		return ScanStateUnknown, "", nil
+		return ScanStatusDetail{State: ScanStateUnknown}
 	}
 	if time.Since(entry.updatedAt) > t.retention {
 		delete(t.entries, sbomID)
-		return ScanStateUnknown, "", nil
+		return ScanStatusDetail{State: ScanStateUnknown}
 	}
-	if entry.state != ScanStateFailed {
-		return entry.state, entry.errMsg, nil
+	d := ScanStatusDetail{State: entry.state, Error: entry.errMsg}
+	if entry.state == ScanStateCompleted || entry.state == ScanStateFailed {
+		d.Skipped = append([]string(nil), entry.skipped...)
 	}
-	return entry.state, entry.errMsg, append([]string(nil), entry.reasons...)
+	if entry.state == ScanStateFailed {
+		d.Reasons = append([]string(nil), entry.reasons...)
+	}
+	return d
 }
 
 // Get returns the current state of the scan and, when failed, the error

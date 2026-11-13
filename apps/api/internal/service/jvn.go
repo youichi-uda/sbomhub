@@ -116,7 +116,23 @@ type JVNService struct {
 	// fixtures to observe the pool being shared, which is why the sharing
 	// went unpinned (Codex M55 R7, Low). Nothing but tests writes it.
 	extraPageBudget int
+	// disabled is SBOMHUB_JVN=off: the operator switched JVN off (see
+	// config.JVNEnabled). The scan routes skip a disabled scanner
+	// (ScanDisabled) and report it in skipped_sources; the service itself
+	// refuses to sweep, so nothing can reach MyJVN by another path.
+	disabled bool
 }
+
+// WithDisabled switches the JVN lookup off (SBOMHUB_JVN=off). Call it before
+// the service is used.
+func (s *JVNService) WithDisabled(disabled bool) *JVNService {
+	s.disabled = disabled
+	return s
+}
+
+// ScanDisabled reports whether the operator switched JVN off. runSBOMScan
+// skips a scanner that says so and reports its source as skipped.
+func (s *JVNService) ScanDisabled() bool { return s.disabled }
 
 // NewJVNService creates a new JVN service.
 //
@@ -491,6 +507,10 @@ func (s *JVNService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 // carry a ScanScope and no transaction.
 func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID) (JVNScanReport, error) {
 	var rep JVNScanReport
+
+	if s.disabled {
+		return rep, fmt.Errorf("jvn: SBOMHUB_JVN=off; the scan must skip JVN, not run it: %w", ErrScanSourceDisabled)
+	}
 
 	scope, err := scanScopeFrom(ctx)
 	if err != nil {

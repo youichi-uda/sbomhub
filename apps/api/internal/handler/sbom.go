@@ -781,6 +781,12 @@ type ScanStatusResponse struct {
 	// distro_data_failed, queue_full, scan_error. Present only when
 	// status=failed and known.
 	Reasons []string `json:"reasons,omitempty"`
+	// SkippedSources (additive) names the sources the scan did not consult
+	// because the operator switched them off (SBOMHUB_JVN=off: ["jvn"]).
+	// Present only when status is completed or failed and something was
+	// skipped; a completed scan with it present checked less than a default
+	// one does.
+	SkippedSources []string `json:"skipped_sources,omitempty"`
 }
 
 // VulnerabilitySummaryCount aggregates vulnerability counts by severity
@@ -873,9 +879,10 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	// with the pre-commit counts.
 	state := service.ScanStateUnknown
 	var errMsg, version string
-	var reasons []string
+	var reasons, skipped []string
 	if h.scanTracker != nil {
-		state, errMsg, reasons, version = h.scanTracker.GetDetailVersion(sbomID)
+		d := h.scanTracker.GetStatus(sbomID)
+		state, errMsg, reasons, skipped, version = d.State, d.Error, d.Reasons, d.Skipped, d.Version
 	}
 
 	vulns, err := h.sbomService.GetVulnerabilitiesBySbom(c.Request().Context(), projectID, sbomID)
@@ -898,7 +905,7 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	// gets a consistent pair.
 	if h.scanTracker != nil && (state == service.ScanStateCompleted || state == service.ScanStateFailed) {
 		if s2, _, _, v2 := h.scanTracker.GetDetailVersion(sbomID); s2 != state || v2 != version {
-			state, errMsg, reasons = service.ScanStateRunning, "", nil
+			state, errMsg, reasons, skipped = service.ScanStateRunning, "", nil, nil
 		}
 	}
 
@@ -911,6 +918,9 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	if state == service.ScanStateFailed {
 		resp.Error = errMsg
 		resp.Reasons = reasons
+	}
+	if state == service.ScanStateCompleted || state == service.ScanStateFailed {
+		resp.SkippedSources = skipped
 	}
 
 	return c.JSON(http.StatusOK, resp)

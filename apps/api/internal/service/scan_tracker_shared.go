@@ -58,6 +58,8 @@ type sharedEvent struct {
 	state   ScanState
 	msg     string
 	reasons []string
+	// skipped: an evFinish's skipped sources (SBOMHUB_JVN=off).
+	skipped []string
 	at      time.Time
 	done    chan struct{} // closed once applied
 	merged  *mergeSet     // evMerge
@@ -143,6 +145,7 @@ func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedE
 		if ev.msg != "" {
 			m.addFailure(ev.msg, ev.reasons)
 		}
+		m.addSkipped(ev.skipped)
 	case evMark:
 		if ev.state == ScanStateFailed && ev.msg != "" {
 			m.addFailure(ev.msg, ev.reasons)
@@ -267,7 +270,7 @@ func (t *ScanTracker) apply(sbomID uuid.UUID, ev *sharedEvent) error {
 	case evRejoin:
 		return t.shared.rejoin(ctx, sbomID, ev.gen)
 	case evFinish:
-		known, err := t.shared.finish(ctx, sbomID, ev.gen, ev.msg, ev.reasons)
+		known, err := t.shared.finish(ctx, sbomID, ev.gen, ev.msg, ev.reasons, ev.skipped)
 		if err == nil && !known {
 			slog.Info("scan status: the shared store did not know this run; its outcome was merged into the current group",
 				"sbom_id", sbomID, "failed", ev.msg != "")
@@ -340,14 +343,15 @@ func (t *ScanTracker) waitBegin(done <-chan struct{}) {
 	}
 }
 
-func (t *ScanTracker) queueFinishLocked(sbomID uuid.UUID, gen uint64, errMsg string, reasons []string) {
+func (t *ScanTracker) queueFinishLocked(sbomID uuid.UUID, gen uint64, errMsg string, reasons, skipped []string) {
 	if t.shared == nil {
 		return
 	}
 	t.qMu.Lock()
 	defer t.qMu.Unlock()
 	delete(t.live, runKey{sbomID, gen})
-	t.enqueueLocked(sbomID, &sharedEvent{kind: evFinish, gen: gen, msg: errMsg, reasons: append([]string(nil), reasons...)})
+	t.enqueueLocked(sbomID, &sharedEvent{kind: evFinish, gen: gen, msg: errMsg,
+		reasons: append([]string(nil), reasons...), skipped: append([]string(nil), skipped...)})
 }
 
 func (t *ScanTracker) queueMarkLocked(sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) {

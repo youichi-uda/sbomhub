@@ -45,6 +45,13 @@ var (
 	// is unchanged, only the reason is more specific. Raised by the JVN
 	// sweep, which met it when MyJVN was suspended on 2026-10-22.
 	ErrScanSourceUnavailable = errors.New("data source unavailable")
+	// ErrScanSourceDisabled: the scanner was asked to run although the
+	// operator switched its source off (SBOMHUB_JVN=off). The scan routes
+	// never get here — runSBOMScan skips a disabled scanner and reports it
+	// in skipped_sources — so it is a guard: a caller that bypasses the skip
+	// gets a failure (scan_error), never a sweep that checked nothing
+	// reading as clean.
+	ErrScanSourceDisabled = errors.New("data source disabled by the operator")
 )
 
 // Reason codes as reported in scan status (GET .../scan-status `reasons`,
