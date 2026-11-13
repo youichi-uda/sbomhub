@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXStatus, VEXJustification, LicensePolicy, LicensePolicyType, LicenseViolation, NotificationSettings, NotificationLog, APIKey, APIKeyWithSecret } from "@/lib/api";
+import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXStatus, VEXJustification, LicensePolicy, LicensePolicyType, LicenseViolation, NotificationSettings, NotificationLog, APIKey, APIKeyWithSecret, APIError } from "@/lib/api";
 import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Bell, Key, Plus, Copy, Check } from "lucide-react";
 import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
 import { KEVBadge } from "@/components/vulnerability/kev-badge";
@@ -408,7 +408,21 @@ export default function ProjectDetailPage() {
   }
 
   if (!project) {
-    return <div className="flex items-center justify-center h-64">{tc("projectNotFound")}</div>;
+    // Only a 404 means the project is gone (or belongs to another tenant).
+    // A 500 / network failure must not read as "deleted": the API answers
+    // 500 {"error":"failed to get project"} when the database is down.
+    if (projectQuery.error instanceof APIError && projectQuery.error.status === 404) {
+      return <div className="flex items-center justify-center h-64">{tc("projectNotFound")}</div>;
+    }
+    return (
+      <LoadError
+        testId="project-load-error"
+        message={tc("projectLoadFailed")}
+        retryLabel={tc("retry")}
+        onRetry={() => void projectQuery.refetch()}
+        retrying={projectQuery.isFetching}
+      />
+    );
   }
 
   return (

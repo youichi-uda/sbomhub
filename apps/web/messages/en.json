@@ -827,6 +827,7 @@
     "no": "No",
     "notFound": "Not found",
     "projectNotFound": "Project not found",
+    "projectLoadFailed": "Failed to load the project. Check that the API is reachable, then retry.",
     "retry": "Retry"
   },
   "Header": {

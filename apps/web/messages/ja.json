@@ -827,6 +827,7 @@
     "no": "いいえ",
     "notFound": "見つかりませんでした",
     "projectNotFound": "プロジェクトが見つかりません",
+    "projectLoadFailed": "プロジェクトの読み込みに失敗しました。API に接続できるか確認して、再試行してください。",
     "retry": "再試行"
   },
   "Header": {
