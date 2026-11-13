@@ -74,8 +74,12 @@ func TestCLIGetProject_StatusByError(t *testing.T) {
 			if rec.Code != tc.wantCode {
 				t.Fatalf("status %d, want %d (body %s)", rec.Code, tc.wantCode, rec.Body)
 			}
-			if tc.wantBody != "" && !strings.Contains(rec.Body.String(), tc.wantBody) {
-				t.Fatalf("body %s, want %q", rec.Body, tc.wantBody)
+			// Exact body: a missing project and another tenant's must be
+			// indistinguishable.
+			if tc.wantBody != "" {
+				if got, want := strings.TrimSpace(rec.Body.String()), `{"error":"`+tc.wantBody+`"}`; got != want {
+					t.Fatalf("body %s, want %s", got, want)
+				}
 			}
 			if strings.Contains(rec.Body.String(), "pq:") {
 				t.Fatalf("driver error leaked: %s", rec.Body)
