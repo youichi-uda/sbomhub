@@ -95,11 +95,12 @@ export const SCAN_STATE_FINAL = "completed";
 //
 //                 This deliberately does NOT distinguish "the project has no
 //                 SBOM" (Codex R1 Low): GET /api/v1/projects/:id/sbom answers
-//                 404 for a project that has no SBOM, for a project that does
-//                 not exist, and for any repository error on the way — the
-//                 handler maps every failure to that one status. A state named
-//                 for one of those three would be a claim the response cannot
-//                 support.
+//                 404 both for a project that has no SBOM and for a project
+//                 that does not exist (or is not visible to the caller), so a
+//                 404 alone cannot support a "no SBOM" state. A repository
+//                 error answers 500 (since e2ac41d); this client deliberately
+//                 collapses every request failure, 404 or 500, into this one
+//                 state.
 //
 //   changed     — the scan, or the SBOM it belongs to, moved between the two
 //                 probes taken around the page walk. The rows that were read
