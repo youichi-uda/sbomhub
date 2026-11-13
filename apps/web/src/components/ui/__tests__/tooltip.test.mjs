@@ -52,7 +52,7 @@ test("a non-focusable as-child trigger becomes a focus stop", () => {
 });
 
 test("it opens on hover, focus and tap, and closes on Escape", () => {
-  for (const h of ["onMouseEnter", "onMouseLeave", "onFocus", "onBlur", "onTouchEnd", "onClick", "onKeyDown"]) {
+  for (const h of ["onPointerEnter", "onPointerLeave", "onFocus", "onBlur", "onTouchEnd", "onClick", "onKeyDown"]) {
     // Merged with the child's own handler, never replacing it.
     assert.match(
       src,
@@ -61,6 +61,10 @@ test("it opens on hover, focus and tap, and closes on Escape", () => {
     );
   }
   assert.match(src, /e\.key === "Escape"/);
+  // Hover ignores touch pointers: a tap's compatibility mouse events must not
+  // reopen what the tap closed.
+  assert.equal((src.match(/if \(e\.pointerType === "touch"\) return;/g) ?? []).length, 2);
+  assert.ok(!/onMouseEnter|onMouseLeave/.test(src), "hover must use pointer events, not compatibility mouse events");
   assert.match(src, /e\.key === "Enter" \|\| e\.key === " "/);
   // A tap elsewhere closes it (mobile browsers that do not focus a tapped span).
   assert.match(src, /addEventListener\("pointerdown", onPointerDown, true\)/);

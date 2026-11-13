@@ -118,18 +118,23 @@ test.describe('shared Tooltip from the keyboard', () => {
       const kev = entry.getByRole('button', { name: en.KEV.badge, exact: true });
       const tip = await panelOf(page, kev);
       await kev.scrollIntoViewIfNeeded();
-      // touchend opens it; the click that follows a real tap must not undo it.
-      await kev.dispatchEvent('touchend');
-      await kev.dispatchEvent('click');
+      // Trusted taps (Codex R2 Low-2): Chromium's real sequence — pointer,
+      // touch, focus and the compatibility mouse events and click — not
+      // hand-dispatched events.
+      await kev.tap();
       await expect(tip).toBeVisible();
-      await kev.dispatchEvent('touchend');
-      await kev.dispatchEvent('click');
+      await kev.tap();
+      await expect(tip).toBeHidden();
+      await kev.tap();
+      await expect(tip).toBeVisible();
+      // A tap elsewhere closes it.
+      await page.getByRole('heading', { level: 1 }).tap();
       await expect(tip).toBeHidden();
 
+      // The touchend + click pair a browser sends for one tap toggles once.
       await kev.dispatchEvent('touchend');
+      await kev.dispatchEvent('click');
       await expect(tip).toBeVisible();
-      await page.getByRole('heading', { level: 1 }).dispatchEvent('pointerdown');
-      await expect(tip).toBeHidden();
     } finally {
       await context.close();
     }

@@ -135,8 +135,8 @@ type TriggerChildProps = {
   "aria-label"?: string;
   "aria-labelledby"?: string;
   "aria-describedby"?: string;
-  onMouseEnter?: Handler<React.MouseEvent<HTMLElement>>;
-  onMouseLeave?: Handler<React.MouseEvent<HTMLElement>>;
+  onPointerEnter?: Handler<React.PointerEvent<HTMLElement>>;
+  onPointerLeave?: Handler<React.PointerEvent<HTMLElement>>;
   onFocus?: Handler<React.FocusEvent<HTMLElement>>;
   onBlur?: Handler<React.FocusEvent<HTMLElement>>;
   onTouchEnd?: Handler<React.TouchEvent<HTMLElement>>;
@@ -170,11 +170,17 @@ function useTriggerProps(theirs: TriggerChildProps, nativelyFocusable: boolean) 
     "aria-labelledby": hasName ? theirs["aria-labelledby"] : joinIds(theirs["aria-labelledby"], tooltipId),
     "aria-describedby": hasName ? joinIds(theirs["aria-describedby"], tooltipId) : theirs["aria-describedby"],
     "data-tooltip-trigger": "",
-    onMouseEnter: chain(theirs.onMouseEnter, () => {
+    // Hover is a mouse / pen thing. A tap is followed by compatibility
+    // mouseenter / mouseleave events, which reopened a tooltip the tap had
+    // just closed (Codex R2 Low-2, seen with real taps); pointer events say
+    // which device they came from.
+    onPointerEnter: chain(theirs.onPointerEnter, (e: React.PointerEvent<HTMLElement>) => {
+      if (e.pointerType === "touch") return;
       setHover(true);
       setDismissed(false);
     }),
-    onMouseLeave: chain(theirs.onMouseLeave, () => {
+    onPointerLeave: chain(theirs.onPointerLeave, (e: React.PointerEvent<HTMLElement>) => {
+      if (e.pointerType === "touch") return;
       setHover(false);
       setTapped(false);
     }),
