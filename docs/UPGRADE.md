@@ -2553,3 +2553,13 @@ field `skipped_sources`, MCP payload field `skipped_sources`.
 - Every finding that is not a distro label (§22) now shows how it was matched (§13.2) and its confidence. Only `nvd_cpe` (CPE match, version verified) appears without a review flag. `nvd_cpe_distro` (medium), `nvd_cpe_unverified`, `nvd_keyword`, `jvn_keyword`, `cve_sync_keyword` (low), links made before §13 ("match method not recorded", confidence unknown) and match methods the page does not recognise lead with "Needs review" / 「要確認」. If `match_method` and `match_confidence` disagree, or `match_confidence` is missing, the lower or unknown value is shown. Nothing is hidden or removed from counts; the explanation (keyboard, touch, screen reader, ja/en) says the finding stays listed until a person reviews it.
 - Tooltips (KEV, EOL, SSVC badges) and Select dropdowns were transparent: `bg-popover` / `bg-card` were never defined in the theme. They now render on an opaque background, and tooltips stay inside the viewport on narrow screens. `bg-card` panels (analytics, audit, reports, settings) now have the card colour (white in light mode).
 - The tooltip's entry animation never existed (tailwindcss-animate was not installed) and its classes were removed; legal/privacy/terms lost the inert `prose` classes. Neither changes what is rendered.
+
+## 29. Web: consistent light theme, keyboard tooltips, 320px reflow, project load errors
+
+**Who must act:** nobody.
+
+- **Dark mode:** the `dark:` variant is now tied to the `.dark` class (`@custom-variant dark`), the same condition as the theme tokens. Nothing sets `.dark`, so the UI renders light regardless of the OS colour scheme. Before, OS dark mode produced a mixed page, for example grey-on-white audit action labels. `color-scheme: light` keeps native controls light. A future theme toggle only has to set `.dark` on `<html>`.
+- **Tooltips:** the KEV, EOL, SSVC and ticket badges and the truncated METI titles are now keyboard focus stops. They open on focus, Enter/Space, hover or tap and close with Escape. Screen readers announce the explanation as the badge's description.
+- **Narrow screens:** below 768px the dashboard sidebar becomes a menu button in the header. No main page scrolls sideways at 320px; wide tables and tab rows scroll inside their own box.
+- **Project page errors:** "Project not found" now appears only when the API answers 404 (or 400 for a malformed id). A server error (500, §27) or a network failure shows "Failed to load the project…" with a Retry button, instead of implying the project was deleted.
+- New UI strings: `Navigation.openMenu` / `closeMenu` / `mainMenu`, `Common.projectLoadFailed`.
