@@ -1363,3 +1363,51 @@ test('project page: returning to the tab starts a fresh read, not the one from b
         await deleteProject(request, p.id);
     }
 });
+
+// Codex R16: a tab return while the project itself is still loading is not lost.
+test('project page: returning to the tab while the project is still loading still re-reads (Codex R16)', async ({ page, request }) => {
+    const p = await createProject(request, uniqueName('Scan Status R16 Focus Pending'));
+    try {
+        const first = await uploadSbom(request, p.id, cleanSbom);
+        const polled = new Set<string>();
+        let snapshotDone = false;
+        let release: () => void = () => {};
+        const held = new Promise<void>((r) => (release = r));
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${p.id}`,
+            async (route) => {
+                if (route.request().method() !== 'GET') return route.fallback();
+                await held; // the project itself is slow
+                return route.fallback().catch(() => {});
+            },
+        );
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${p.id}/sboms/`) && url.pathname.endsWith('/scan-status'),
+            async (route) => {
+                const res = await route.fetch();
+                const real = await res.json();
+                polled.add(real.sbom_id);
+                if (real.sbom_id === first) snapshotDone = true;
+                await route.fulfill({ response: res, json: { ...real, status: real.sbom_id === first ? 'completed' : 'running' } });
+            },
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        await expect.poll(() => snapshotDone, { timeout: 15_000 }).toBe(true);
+        await page.waitForTimeout(1_000);
+        const setVisibility = (state: 'hidden' | 'visible') =>
+            page.evaluate((v) => {
+                Object.defineProperty(document, 'visibilityState', { value: v, configurable: true });
+                Object.defineProperty(document, 'hidden', { value: v === 'hidden', configurable: true });
+                document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
+            }, state);
+        await setVisibility('hidden');
+        const second = await uploadSbom(request, p.id, cleanSbom);
+        await setVisibility('visible');
+        release();
+        await expect.poll(() => polled.has(second), { timeout: 10_000 }).toBe(true);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+    } finally {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+        await deleteProject(request, p.id);
+    }
+});

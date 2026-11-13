@@ -289,8 +289,10 @@ export default function ProjectDetailPage() {
   // (Codex R14) — as a foreground refresh, not react-query's focus refetch,
   // which would join a read that started before the tab was hidden instead
   // of cancelling it (Codex R15).
+  // Also while the project itself is still loading (Codex R16): one read,
+  // not a poll, so it costs nothing behind "Project not found" either.
   const onTabVisible = useEffectEvent(() => {
-    if (projectQuery.isSuccess) void refreshVulnerabilities();
+    void refreshVulnerabilities();
   });
   useEffect(() => {
     let wasFocused = focusManager.isFocused();
