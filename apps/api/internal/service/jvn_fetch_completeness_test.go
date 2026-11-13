@@ -77,6 +77,14 @@ type cannedMyJVN struct {
 	// fail, when set and returning a non-zero status, short-circuits the
 	// request with that HTTP status.
 	fail func(q url.Values) int
+	// stall, when set and returning true, makes the handler answer NOTHING
+	// and return only once the client has abandoned the request (its
+	// connection closed). It is how a test puts a request genuinely "in
+	// flight" when the context is cancelled: a handler that cancels and
+	// then answers races the transport, which sometimes delivers the
+	// complete answer before it observes the cancellation — and a sweep
+	// that did obtain every answer is, correctly, not a cancelled one.
+	stall func(q url.Values) bool
 }
 
 type cannedJVNStatus struct {
@@ -182,6 +190,10 @@ func (c *cannedMyJVN) start(t *testing.T) *httptest.Server {
 				w.WriteHeader(code)
 				return
 			}
+		}
+		if c.stall != nil && c.stall(q) {
+			<-r.Context().Done()
+			return
 		}
 
 		// MyJVN defaults all three date ranges to "w" == the past 7 days

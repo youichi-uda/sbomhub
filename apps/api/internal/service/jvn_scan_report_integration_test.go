@@ -233,11 +233,20 @@ func TestM55JVNScanReport_CancellationIsNotSuccess(t *testing.T) {
 	srv := &cannedMyJVN{
 		now:       now,
 		corpusFor: func(string) []cannedJVNAdvisory { return cannedCorpus(now, 2, 0) },
-		fail: func(q url.Values) int {
-			if q.Get("keyword") == "zzz-last" {
-				cancel() // killed while the last component is in flight
+		// The last request is held until the client gives up on it, so the
+		// cancellation is guaranteed to land while it is in flight. The
+		// first cut cancelled here and then ANSWERED, which raced the HTTP
+		// transport: about 1 run in 150 (measured 2026-11-13, -race,
+		// -count=1000: 7 failures) the transport handed back the complete
+		// answer before it saw the cancellation, the sweep had genuinely
+		// checked both components, and it rightly reported success — the
+		// test, not the scanner, was wrong.
+		stall: func(q url.Values) bool {
+			if q.Get("keyword") != "zzz-last" {
+				return false
 			}
-			return 0
+			cancel() // killed while the last component is in flight
+			return true
 		},
 	}
 	ts := srv.start(t)
