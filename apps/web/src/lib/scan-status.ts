@@ -40,6 +40,13 @@ export interface ScanStatus {
   error?: string;
   reasons: string[];
   skippedSources: string[];
+  /**
+   * vulnerabilities.total of the response: this SBOM's committed findings.
+   * Used only to notice that findings changed between two settled answers
+   * (a rescan of the same SBOM); it is not comparable to the list's
+   * X-Total-Count, which counts differently.
+   */
+  total: number | null;
 }
 
 const STATES: readonly ScanState[] = ["running", "completed", "failed", "unknown"];
@@ -55,7 +62,11 @@ function stringList(v: unknown): string[] {
 export function parseScanStatus(raw: unknown): ScanStatus {
   const o = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const status = STATES.includes(o.status as ScanState) ? (o.status as ScanState) : "unknown";
-  const out: ScanStatus = { status, reasons: [], skippedSources: [] };
+  const v = o.vulnerabilities !== null && typeof o.vulnerabilities === "object"
+    ? (o.vulnerabilities as Record<string, unknown>)
+    : {};
+  const total = typeof v.total === "number" && Number.isInteger(v.total) && v.total >= 0 ? v.total : null;
+  const out: ScanStatus = { status, reasons: [], skippedSources: [], total };
   if (status === "failed") {
     out.reasons = stringList(o.reasons);
     if (typeof o.error === "string" && o.error !== "") out.error = o.error;
@@ -170,8 +181,13 @@ export type EmptyStateKey =
   | "emptyPartial"
   | "emptyCompleted";
 
-/** The "ScanStatus" message for an empty vulnerability list. */
-export function emptyStateKey(view: ScanView): EmptyStateKey {
+/**
+ * The "ScanStatus" message for an empty vulnerability list. `listFresh` is
+ * false while the list for the current sort is still loading or being
+ * refreshed: an empty list then is not the scan's result yet (Codex R2).
+ */
+export function emptyStateKey(view: ScanView, listFresh: boolean): EmptyStateKey {
+  if (!listFresh && view.kind !== "no-sbom") return "emptyChecking";
   switch (view.kind) {
     case "checking":
       return "emptyChecking";
@@ -191,14 +207,17 @@ export function emptyStateKey(view: ScanView): EmptyStateKey {
 }
 
 /**
- * react-query refetchInterval for the scan-status query: poll only while the
- * scan runs — every 3s for the first 20 answers (about a minute), then every
- * 10s (a cold scan can take many minutes). react-query does not poll a
+ * react-query refetchInterval for the scan-status query: while the scan runs
+ * every 3s for the first 20 answers (about a minute), then every 10s (a cold
+ * scan can take many minutes); once settled, once a minute, so a later scan
+ * of the same SBOM (manual, scheduled) or a newly uploaded SBOM does not stay
+ * hidden behind a settled state (Codex R2). react-query does not poll a
  * hidden tab (refetchIntervalInBackground stays false), so background tabs
  * add no load.
  */
 export function pollIntervalMs(state: ScanState | undefined, answers: number): number | false {
-  if (state !== "running") return false;
+  if (state === undefined) return false;
+  if (state !== "running") return 60000;
   return answers < 20 ? 3000 : 10000;
 }
 
@@ -215,9 +234,12 @@ export function pollIntervalMs(state: ScanState | undefined, answers: number): n
  * order (Codex R1 High), and react-query v5 hands back an in-flight request
  * that has no data yet instead of starting a new one, hence the cancel.
  */
-export function settleNeedsListRefetch(prev: ScanState | undefined, next: ScanState): boolean {
-  if (next === "running") return false;
-  return prev !== next;
+export function settleNeedsListRefetch(prev: ScanStatus | undefined, next: ScanStatus): boolean {
+  if (next.status === "running") return false;
+  if (prev === undefined) return true;
+  // The same settled state with a different total: another scan of this
+  // SBOM ran between the two answers and changed its findings (Codex R2).
+  return prev.status !== next.status || prev.total !== next.total || next.total === null;
 }
 
 /** "ScanStatus" message keys that qualify the vulnerability count. */
@@ -229,17 +251,26 @@ export type CountQualifierKey =
   | "tabCountPartial"
   | "tabCountLoadFailed";
 
+export interface ListState {
+  /** The last load of the list failed (rows of an earlier load may still be shown). */
+  failed: boolean;
+  /** The list for the current sort is loaded and no refresh is in flight. */
+  fresh: boolean;
+}
+
 /**
  * How the vulnerability count is qualified (tab counter, card header). null =
- * a bare number: only a completed scan with nothing skipped, or no SBOM at
- * all (zero is then simply the size of an empty list, and the empty state
- * says nothing was scanned). A failed list load wins: its count is not known.
+ * a bare number: only a completed scan with nothing skipped and a fresh list,
+ * or no SBOM at all (zero is then simply the size of an empty list, and the
+ * empty state says nothing was scanned). A failed list load wins — its count
+ * is not current, even when earlier rows are still on screen — then a list
+ * still loading (Codex R2).
  */
-export function countQualifierKey(view: ScanView, listLoadFailed: boolean): CountQualifierKey | null {
-  if (listLoadFailed) return "tabCountLoadFailed";
+export function countQualifierKey(view: ScanView, list: ListState): CountQualifierKey | null {
+  if (list.failed) return "tabCountLoadFailed";
+  if (view.kind === "no-sbom") return null;
+  if (!list.fresh) return "tabCountChecking";
   switch (view.kind) {
-    case "no-sbom":
-      return null;
     case "completed":
       return view.skippedSources.length > 0 ? "tabCountPartial" : null;
     case "running":

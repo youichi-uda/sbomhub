@@ -32,6 +32,7 @@ import {
   pollIntervalMs,
   scanView,
   settleNeedsListRefetch,
+  type ListState,
   type ScanStatus,
 } from "@/lib/scan-status";
 
@@ -181,6 +182,13 @@ export default function ProjectDetailPage() {
   const vulnerabilities: Vulnerability[] = vulnerabilitiesPage?.data ?? [];
   const vulnTotalCount = vulnerabilitiesPage?.totalCount ?? 0;
   const vulnLoadError = loadErrorState(vulnerabilitiesQuery.isError, vulnerabilities.length > 0);
+  // The list for the CURRENT sort is loaded and nothing is refreshing it:
+  // only then do its rows / count / emptiness stand for the scan state
+  // (rows retained from another sort or an earlier load do not; Codex R2).
+  const vulnList: ListState = {
+    failed: vulnerabilitiesQuery.isError,
+    fresh: vulnerabilitiesQuery.isSuccess && !vulnerabilitiesQuery.isFetching,
+  };
 
   const vexQuery = useQuery({
     queryKey: queryKeys.projects.vex(projectId),
@@ -208,6 +216,10 @@ export default function ProjectDetailPage() {
     queryFn: () =>
       logged("Failed to load SBOM ID:", async (): Promise<string | null> =>
         (await api.projects.getLatestSbom(projectId))?.id ?? null),
+    // With an SBOM, the scan-status query re-reads the latest SBOM after
+    // every settled answer. Without one there is no scan status to poll, so
+    // look for a first upload (e.g. from CI) once a minute, visible tab only.
+    refetchInterval: (query) => (query.state.status === "success" && query.state.data === null ? 60000 : false),
   });
   const sbomId = sbomIdQuery.data ?? null;
 
@@ -216,20 +228,41 @@ export default function ProjectDetailPage() {
   // (src/lib/scan-status.ts). Polled while running (3s, then 10s after a
   // minute; never in a hidden tab — react-query's refetchIntervalInBackground
   // is off); a failed poll stops polling and shows the status as unavailable
-  // with a Retry. When an answer settles into a new state (completed / failed
-  // / unknown), the vulnerability list is fetched again with a request that
-  // starts after the answer arrived, and the answer is committed only once
-  // that list is in — so the page never pairs a settled state with a list
-  // read before the scan's findings committed.
+  // with a Retry; a settled state is re-read once a minute.
+  //
+  // A settled answer is committed only together with a list that matches it
+  // (Codex R1 / R2 High):
+  //   1. when it is new (state or the SBOM's finding total changed), the
+  //      list is fetched again with a request that starts after the answer
+  //      arrived — the API publishes a terminal state only after the
+  //      findings committed;
+  //   2. then the latest SBOM is re-read: the list endpoint answers for
+  //      whichever SBOM is latest, so if another one was uploaded meanwhile
+  //      (CI), the page moves to it (its id changes the scan-status key:
+  //      "checking", then that SBOM's own state) instead of pairing this
+  //      SBOM's state with the other SBOM's list;
+  //   3. and the state is read once more: if a new scan of this SBOM began
+  //      meanwhile, that newer state is what the page shows.
+  // Residual: a whole scan of the same SBOM that starts AND ends between
+  // steps 1 and 3 without changing the finding total is not detectable —
+  // the API exposes no scan generation.
   const scanStatusQuery = useQuery({
     queryKey: queryKeys.projects.scanStatus(projectId, sbomId),
     queryFn: () =>
       logged("Failed to load scan status:", async (): Promise<ScanStatus> => {
-        const key = queryKeys.projects.scanStatus(projectId, sbomId);
-        const prev = queryClient.getQueryData<ScanStatus>(key)?.status;
-        const status = parseScanStatus(await api.projects.getScanStatus(projectId, sbomId as string));
-        if (settleNeedsListRefetch(prev, status.status)) {
+        const forSbom = sbomId as string;
+        const key = queryKeys.projects.scanStatus(projectId, forSbom);
+        const prev = queryClient.getQueryData<ScanStatus>(key);
+        const status = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom));
+        if (status.status === "running") return status;
+        const listChanged = settleNeedsListRefetch(prev, status);
+        if (listChanged) {
           await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
+        }
+        await refetchFresh(queryKeys.projects.latestSbomId(projectId));
+        if (listChanged) {
+          const again = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom));
+          if (again.status !== status.status || again.total !== status.total) return again;
         }
         return status;
       }),
@@ -247,21 +280,28 @@ export default function ProjectDetailPage() {
       data: scanStatusQuery.data,
     },
   });
-  const retryScanStatus = () => {
-    if (sbomIdQuery.isError) void sbomIdQuery.refetch();
-    else void scanStatusQuery.refetch();
-  };
+  // Retry the chain in order (Codex R2): the latest SBOM, then its state
+  // (whose settling refetches the list). Both may have failed in the same
+  // outage; one click recovers both. A changed SBOM id re-keys the status
+  // query, which then fetches by itself.
+  async function retryScanStatus() {
+    await refetchFresh(queryKeys.projects.latestSbomId(projectId));
+    await refetchFresh(queryKeys.projects.scanStatusAll(projectId));
+  }
 
   // Opening the vulnerabilities tab refreshes the list. The list endpoint
   // answers for whichever SBOM is latest NOW (CI may have uploaded a new
   // one since the page loaded), so the latest SBOM and its scan state are
   // re-read first, then the list: a new SBOM re-keys the scan status
   // (checking → its own state, which refetches the list when it settles),
-  // and the same SBOM gets its state re-read before the list is.
+  // and the same SBOM gets its state re-read before the list is. The latest
+  // SBOM is read once more after the list: an upload between the two moves
+  // the page to the new SBOM rather than pairing the lists (Codex R2).
   async function refreshVulnerabilities() {
     await refetchFresh(queryKeys.projects.latestSbomId(projectId));
     await refetchFresh(queryKeys.projects.scanStatusAll(projectId));
     await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
+    await refetchFresh(queryKeys.projects.latestSbomId(projectId));
   }
 
   const licenseViolationsQuery = useQuery({
@@ -590,7 +630,7 @@ export default function ProjectDetailPage() {
       <ScanFinishedAnnouncer view={scan} />
       <ScanStatusNotice
         view={scan}
-        onRetry={retryScanStatus}
+        onRetry={() => void retryScanStatus()}
         retrying={sbomIdQuery.isFetching || scanStatusQuery.isFetching}
       />
 
@@ -619,7 +659,7 @@ export default function ProjectDetailPage() {
               the default page size (100) for any project with more
               matched vulnerabilities. */}
           {t("Vulnerabilities.title")} (
-          <VulnCount view={scan} count={vulnTotalCount} listLoadFailed={vulnLoadError === "full"} />)
+          <VulnCount view={scan} count={vulnTotalCount} list={vulnList} />)
         </Button>
         <Button
           variant={activeTab === "vex" ? "default" : "outline"}
@@ -802,7 +842,7 @@ export default function ProjectDetailPage() {
                 {t("Vulnerabilities.title")}{" "}
                 <span className="text-sm font-normal text-muted-foreground">
                   ({vulnerabilities.length} /{" "}
-                  <VulnCount view={scan} count={vulnTotalCount} listLoadFailed={vulnLoadError === "full"} />)
+                  <VulnCount view={scan} count={vulnTotalCount} list={vulnList} />)
                 </span>
               </CardTitle>
               {/* M38-B (F447 #159): CVSS ⇄ EPSS priority sort toggle.
@@ -867,7 +907,7 @@ export default function ProjectDetailPage() {
               />
             )}
             {vulnLoadError === "full" ? null : vulnerabilities.length === 0 ? (
-              <ScanEmptyState view={scan} />
+              <ScanEmptyState view={scan} listFresh={vulnList.fresh} />
             ) : (
               <div className="space-y-4">
                 {vulnerabilities.map((vuln) => (

@@ -33,6 +33,7 @@ import {
   skippedSourceLabel,
 } from "../scan-status.ts";
 
+const FRESH = { failed: false, fresh: true };
 const sbom = (id = "s1") => ({ pending: false, error: false, id });
 const status = (data) => ({ pending: false, error: false, data: parseScanStatus(data) });
 
@@ -51,6 +52,12 @@ describe("parseScanStatus", () => {
     assert.deepEqual(s.reasons, ["fetch_failed", "source_unavailable"]);
     assert.deepEqual(s.skippedSources, []);
     assert.equal(s.error, "jvn: scan failed (fetch_failed, source_unavailable)");
+    assert.equal(s.total, 3);
+  });
+  test("a missing or malformed total is null", () => {
+    assert.equal(parseScanStatus({ status: "completed" }).total, null);
+    assert.equal(parseScanStatus({ status: "completed", vulnerabilities: { total: "3" } }).total, null);
+    assert.equal(parseScanStatus({ status: "completed", vulnerabilities: { total: -1 } }).total, null);
   });
   test("an unrecognised or missing status is unknown, never completed", () => {
     assert.equal(parseScanStatus({ status: "done" }).status, "unknown");
@@ -125,8 +132,17 @@ describe("emptyStateKey", () => {
       [{ kind: "completed", skippedSources: ["jvn"] }, "emptyPartial"],
       [{ kind: "completed", skippedSources: [] }, "emptyCompleted"],
     ];
-    for (const [view, key] of all) assert.equal(emptyStateKey(view), key, view.kind);
+    for (const [view, key] of all) assert.equal(emptyStateKey(view, true), key, view.kind);
     assert.equal(all.filter(([, k]) => k === "emptyCompleted").length, 1);
+  });
+  // Codex R2 High: a list still loading (a new sort, a refresh) must not be
+  // read as the empty result of the scan.
+  test("a list that is not fresh is 'checking' whatever the scan state", () => {
+    for (const view of [{ kind: "completed", skippedSources: [] }, { kind: "failed", reasons: [], skippedSources: [] }, { kind: "running" }]) {
+      assert.equal(emptyStateKey(view, false), "emptyChecking", view.kind);
+    }
+    // no SBOM: there is nothing to wait for
+    assert.equal(emptyStateKey({ kind: "no-sbom" }, false), "emptyNoSbom");
   });
 });
 
@@ -166,7 +182,12 @@ describe("pollIntervalMs", () => {
     assert.equal(pollIntervalMs("running", 0), 3000);
     assert.equal(pollIntervalMs("running", 19), 3000);
     assert.equal(pollIntervalMs("running", 20), 10000);
-    for (const s of ["completed", "failed", "unknown", undefined]) assert.equal(pollIntervalMs(s, 0), false);
+    assert.equal(pollIntervalMs(undefined, 0), false);
+  });
+  // Codex R2 High: a later scan of the same SBOM (manual, scheduled) or a
+  // new upload must not stay hidden behind a settled state forever.
+  test("a settled state is re-read once a minute (visible tabs only, react-query)", () => {
+    for (const s of ["completed", "failed", "unknown"]) assert.equal(pollIntervalMs(s, 0), 60000);
   });
 });
 
@@ -175,18 +196,25 @@ describe("pollIntervalMs", () => {
 // is refetched (fresh, after the status answer arrived) whenever the status
 // settles into a state it was not in before.
 describe("settleNeedsListRefetch", () => {
+  const st = (status, total = 0) => ({ status, total, reasons: [], skippedSources: [] });
   test("a settled state the page did not have before refetches the list", () => {
-    for (const prev of [undefined, "running", "completed", "unknown"]) {
-      assert.equal(settleNeedsListRefetch(prev, "failed"), true, String(prev));
+    for (const prev of [undefined, st("running"), st("completed"), st("unknown")]) {
+      assert.equal(settleNeedsListRefetch(prev, st("failed")), true, String(prev?.status));
     }
-    assert.equal(settleNeedsListRefetch(undefined, "completed"), true);
-    assert.equal(settleNeedsListRefetch("running", "completed"), true);
-    assert.equal(settleNeedsListRefetch("running", "unknown"), true);
+    assert.equal(settleNeedsListRefetch(undefined, st("completed")), true);
+    assert.equal(settleNeedsListRefetch(st("running"), st("completed")), true);
+    assert.equal(settleNeedsListRefetch(st("running"), st("unknown")), true);
   });
-  test("not while running, and not when the state is unchanged", () => {
-    assert.equal(settleNeedsListRefetch(undefined, "running"), false);
-    assert.equal(settleNeedsListRefetch("completed", "running"), false);
-    assert.equal(settleNeedsListRefetch("completed", "completed"), false);
+  // Codex R2 High: a rescan of the same SBOM that finished between two
+  // reads reads completed → completed; its findings changed the SBOM's total.
+  test("the same settled state with a different total refetches the list", () => {
+    assert.equal(settleNeedsListRefetch(st("completed", 2), st("completed", 3)), true);
+    assert.equal(settleNeedsListRefetch(st("completed", 2), st("completed", null)), true);
+  });
+  test("not while running, and not when state and total are unchanged", () => {
+    assert.equal(settleNeedsListRefetch(undefined, st("running")), false);
+    assert.equal(settleNeedsListRefetch(st("completed"), st("running")), false);
+    assert.equal(settleNeedsListRefetch(st("completed", 2), st("completed", 2)), false);
   });
 });
 
@@ -195,20 +223,29 @@ describe("settleNeedsListRefetch", () => {
 // default tab) read as a final count.
 describe("countQualifierKey", () => {
   test("a bare count only for a completed scan with nothing skipped, or no SBOM", () => {
-    assert.equal(countQualifierKey({ kind: "completed", skippedSources: [] }, false), null);
-    assert.equal(countQualifierKey({ kind: "no-sbom" }, false), null);
+    assert.equal(countQualifierKey({ kind: "completed", skippedSources: [] }, FRESH), null);
+    assert.equal(countQualifierKey({ kind: "no-sbom" }, FRESH), null);
   });
   test("every other state qualifies the count", () => {
-    assert.equal(countQualifierKey({ kind: "running" }, false), "tabCountRunning");
-    assert.equal(countQualifierKey({ kind: "checking" }, false), "tabCountChecking");
-    assert.equal(countQualifierKey({ kind: "failed", reasons: [], skippedSources: [] }, false), "tabCountIncomplete");
-    assert.equal(countQualifierKey({ kind: "unknown" }, false), "tabCountUnconfirmed");
-    assert.equal(countQualifierKey({ kind: "unavailable" }, false), "tabCountUnconfirmed");
-    assert.equal(countQualifierKey({ kind: "completed", skippedSources: ["jvn"] }, false), "tabCountPartial");
+    assert.equal(countQualifierKey({ kind: "running" }, FRESH), "tabCountRunning");
+    assert.equal(countQualifierKey({ kind: "checking" }, FRESH), "tabCountChecking");
+    assert.equal(countQualifierKey({ kind: "failed", reasons: [], skippedSources: [] }, FRESH), "tabCountIncomplete");
+    assert.equal(countQualifierKey({ kind: "unknown" }, FRESH), "tabCountUnconfirmed");
+    assert.equal(countQualifierKey({ kind: "unavailable" }, FRESH), "tabCountUnconfirmed");
+    assert.equal(countQualifierKey({ kind: "completed", skippedSources: ["jvn"] }, FRESH), "tabCountPartial");
   });
-  test("a failed list load wins over every scan state", () => {
+  // Codex R2 High: a failed refresh keeps the old rows on screen (banner);
+  // their count is not current either.
+  test("a failed list load (with or without rows kept) wins over every scan state", () => {
     for (const view of [{ kind: "completed", skippedSources: [] }, { kind: "running" }, { kind: "no-sbom" }]) {
-      assert.equal(countQualifierKey(view, true), "tabCountLoadFailed", view.kind);
+      assert.equal(countQualifierKey(view, { failed: true, fresh: false }), "tabCountLoadFailed", view.kind);
+      assert.equal(countQualifierKey(view, { failed: true, fresh: true }), "tabCountLoadFailed", view.kind);
     }
+  });
+  // Codex R2 High: the list for the current sort still loading shows the
+  // previous rows; their count is not the settled one.
+  test("a list that is not fresh is 'checking', even for a completed scan", () => {
+    assert.equal(countQualifierKey({ kind: "completed", skippedSources: [] }, { failed: false, fresh: false }), "tabCountChecking");
+    assert.equal(countQualifierKey({ kind: "no-sbom" }, { failed: false, fresh: false }), null);
   });
 });

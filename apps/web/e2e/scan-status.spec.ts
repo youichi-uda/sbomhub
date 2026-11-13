@@ -29,6 +29,7 @@ type ScanBody = {
     error?: string;
     reasons?: string[];
     skipped_sources?: string[];
+    vulnerabilities?: { total: number };
 };
 
 /** Answers every scan-status poll of the project with `body()` (read per request). */
@@ -146,9 +147,11 @@ test.describe('project page: scan status of the latest SBOM', () => {
         await vulnTab(page).click();
         await expect(empty(page)).toHaveText(en.ScanStatus.emptyFailed);
         await expect(page.getByText(en.ProjectDetail.noVulnerabilities, { exact: true })).toHaveCount(0);
-        // A failed scan is settled: no polling.
+        // A failed scan is settled: no fast polling (re-read once a minute).
+        await page.waitForTimeout(1_000);
+        const settled = polls.length;
         await page.waitForTimeout(4_000);
-        expect(polls.length).toBeLessThanOrEqual(2);
+        expect(polls.length).toBe(settled);
     });
 
     test('failed, in Japanese', async ({ page }) => {
@@ -157,7 +160,9 @@ test.describe('project page: scan status of the latest SBOM', () => {
             reasons: ['fetch_failed', 'source_unavailable', 'some_future_reason'],
         }));
         await page.goto(`/ja/projects/${clean!.id}`);
-        await expect(notice(page)).toContainText(ja.ScanStatus.failedTitle);
+        // A settled answer is shown once its list re-read is in (several
+        // requests): allow for a busy dev server.
+        await expect(notice(page)).toContainText(ja.ScanStatus.failedTitle, { timeout: 15_000 });
         await expect(notice(page).locator('[data-reason="source_unavailable"]')).toHaveText(ja.ScanStatus.reasonSourceUnavailable);
         // An unrecognised reason is shown, not dropped.
         await expect(notice(page).locator('[data-reason="some_future_reason"]')).toHaveText(
@@ -171,6 +176,8 @@ test.describe('project page: scan status of the latest SBOM', () => {
         await expect(notice(page)).toHaveAttribute('data-scan-state', 'unknown');
         await expect(notice(page)).toContainText(en.ScanStatus.unknownTitle);
         await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountUnconfirmed));
+        // unknown may mean another replica is still scanning (Codex R2 Low).
+        await expect(page.getByTestId('scan-finished-announcer')).toHaveText('');
         await vulnTab(page).click();
         await expect(empty(page)).toHaveText(en.ScanStatus.emptyUnknown);
         await expect(page.getByText(en.ProjectDetail.noVulnerabilities, { exact: true })).toHaveCount(0);
@@ -404,5 +411,183 @@ test.describe('project page: uploading an SBOM follows its scan', () => {
         phase = 'completed';
         await expect(notice(page)).toHaveCount(0, { timeout: 15_000 });
         await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
+    });
+});
+
+// Codex R2: pairing the scan state with a list that belongs to it.
+test.describe('project page: the scan state and the list stay paired (Codex R2)', () => {
+    const projects: string[] = [];
+    test.afterEach(async ({ page }) => {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+    });
+    test.afterAll(async ({ request }) => {
+        for (const id of projects) await deleteProject(request, id);
+    });
+
+    test('CI uploads another SBOM while this one settles: the page moves to the new SBOM', async ({ page, request }) => {
+        const p = await createProject(request, uniqueName('Scan Status External Upload'));
+        projects.push(p.id);
+        const first = await uploadSbom(request, p.id, cleanSbom);
+        let phase: 'running' | 'held' = 'running';
+        let release: () => void = () => {};
+        const held = new Promise<void>((r) => (release = r));
+        let heldSeen = false;
+        const polled = new Set<string>();
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${p.id}/sboms/`) && url.pathname.endsWith('/scan-status'),
+            async (route) => {
+                const res = await route.fetch();
+                const real = await res.json();
+                polled.add(real.sbom_id);
+                if (real.sbom_id !== first) {
+                    // the new SBOM: its scan is running
+                    return route.fulfill({ response: res, json: { ...real, status: 'running' } });
+                }
+                if (phase === 'held') {
+                    heldSeen = true;
+                    await held;
+                    return route.fulfill({ response: res, json: { ...real, status: 'completed' } });
+                }
+                await route.fulfill({ response: res, json: { ...real, status: 'running' } });
+            },
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+        phase = 'held';
+        await expect.poll(() => heldSeen, { timeout: 15_000 }).toBe(true);
+        // While the first SBOM's settled answer is on its way, CI uploads another.
+        const second = await uploadSbom(request, p.id, vulnerableSbom());
+        release();
+        await expect.poll(() => polled.has(second), { timeout: 15_000 }).toBe(true);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+        await expect(vulnTab(page)).toHaveText(/·/);
+        await expect(page.getByTestId('scan-finished-announcer')).toHaveText('');
+    });
+
+    test('a later scan of the same SBOM is noticed (settled states are re-read)', async ({ page, request }) => {
+        const vp = await createVulnerableProject(request, 'Scan Status Rescan');
+        projects.push(vp.projectId);
+        await page.clock.install();
+        // First the SBOM's scan settled with nothing committed yet…
+        let total = 0;
+        await mockScanStatus(page, vp.projectId, () => ({ status: 'completed', vulnerabilities: { total } }) as ScanBody);
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${vp.projectId}/vulnerabilities`,
+            async (route) => {
+                if (total > 0) return route.fallback();
+                const res = await route.fetch();
+                await route.fulfill({ response: res, json: [], headers: { ...res.headers(), 'x-total-count': '0' } });
+            },
+        );
+        await page.goto(`/en/projects/${vp.projectId}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
+        // Let the tab's own refresh (latest SBOM → state → list) finish first,
+        // so only the re-read below can bring the new findings in.
+        await page.waitForTimeout(2_000);
+        // …then a manual rescan of the same SBOM committed findings.
+        total = FIXTURE_CVES.length;
+        await page.clock.fastForward('01:05');
+        await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length, { timeout: 15_000 });
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
+    });
+
+    test('a sort switched while the settled list is refetched is "checking", not the final result', async ({ page }) => {
+        // Uses its own project so the counts are its own.
+        test.slow();
+        const request = page.request;
+        const vp = await createVulnerableProject(request, 'Scan Status Sort Race');
+        projects.push(vp.projectId);
+        let phase: 'running' | 'completed' = 'running';
+        await mockScanStatus(page, vp.projectId, () => ({ status: phase }));
+        let releaseEpss: () => void = () => {};
+        const epssHeld = new Promise<void>((r) => (releaseEpss = r));
+        let cvssSettleSeen = false;
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${vp.projectId}/vulnerabilities`,
+            async (route) => {
+                const sort = new URL(route.request().url()).searchParams.get('sort');
+                if (phase === 'running') {
+                    const res = await route.fetch();
+                    return route.fulfill({ response: res, json: [], headers: { ...res.headers(), 'x-total-count': '0' } });
+                }
+                if (sort === 'epss') await epssHeld;
+                else {
+                    cvssSettleSeen = true;
+                    await new Promise((r) => setTimeout(r, 1_500));
+                }
+                return route.fallback();
+            },
+        );
+        await page.goto(`/en/projects/${vp.projectId}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveAttribute('data-empty-state', 'emptyRunning');
+        phase = 'completed';
+        // The settled answer's list refetch (CVSS) is slow; switch to EPSS meanwhile.
+        await expect.poll(() => cvssSettleSeen, { timeout: 15_000 }).toBe(true);
+        await page.getByRole('button', { name: en.Vulnerabilities.sortByEpss }).click();
+        await expect(notice(page)).toHaveCount(0, { timeout: 15_000 });
+        // Completed is committed, but the EPSS list is still loading: not final.
+        await expect(empty(page)).toHaveAttribute('data-empty-state', 'emptyChecking');
+        await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountChecking));
+        releaseEpss();
+        await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length);
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
+    });
+
+    test('a failed refresh that keeps the earlier rows does not show their count as final', async ({ page, request }) => {
+        const vp = await createVulnerableProject(request, 'Scan Status Stale Rows');
+        projects.push(vp.projectId);
+        await page.goto(`/en/projects/${vp.projectId}`);
+        await vulnTab(page).click();
+        await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length);
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${vp.projectId}/vulnerabilities`,
+            (route) => route.fulfill({ status: 500, json: { error: 'internal' } }),
+        );
+        // Leave and re-open the tab: the refresh fails, the rows stay.
+        await page.getByRole('button', { name: new RegExp(`^${en.Components.title} \\(`) }).click();
+        await vulnTab(page).click();
+        await expect(page.getByTestId('vulnerabilities-load-error')).toBeVisible();
+        await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length);
+        await expect(vulnTab(page)).toHaveText(tabText(null, en.ScanStatus.tabCountLoadFailed));
+    });
+
+    test('one Retry recovers when the latest-SBOM and scan-status reads both failed', async ({ page, request }) => {
+        const p = await createProject(request, uniqueName('Scan Status Chain Retry'));
+        projects.push(p.id);
+        await uploadSbom(request, p.id, cleanSbom);
+        await page.goto(`/en/projects/${p.id}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
+        // Nothing from page load may still be in flight when the outage starts
+        // (a late successful read would end the outage's effect by itself).
+        await page.waitForLoadState('networkidle');
+        let outage = true;
+        let failures = 0;
+        await page.route(
+            (url) =>
+                url.pathname === `/api/v1/projects/${p.id}/sbom` ||
+                (url.pathname.startsWith(`/api/v1/projects/${p.id}/sboms/`) && url.pathname.endsWith('/scan-status')),
+            (route) => {
+                if (!outage || route.request().method() !== 'GET') return route.fallback();
+                failures++;
+                return route.fulfill({ status: 500, json: { error: 'internal' } });
+            },
+        );
+        // Re-open the tab during the outage: both reads fail.
+        await page.getByRole('button', { name: new RegExp(`^${en.Components.title} \\(`) }).click();
+        await vulnTab(page).click();
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'unavailable');
+        // The tab's refresh chain (latest SBOM → state → list → latest SBOM)
+        // has run its course under the outage: 3 failed reads, Retry idle.
+        await expect.poll(() => failures).toBeGreaterThanOrEqual(3);
+        await expect(notice(page).getByRole('button', { name: en.Common.retry })).toBeEnabled();
+        await page.waitForLoadState('networkidle');
+        outage = false;
+        await notice(page).getByRole('button', { name: en.Common.retry }).click();
+        await expect(notice(page)).toHaveCount(0);
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
     });
 });
