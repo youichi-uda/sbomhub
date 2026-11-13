@@ -186,3 +186,19 @@ describe("readSnapshot: no SBOM, failures, abort", () => {
     assert.deepEqual(f.log, ["latest", "status(A)"]);
   });
 });
+
+// Codex R11 Low: the 3s → 10s back-off counts consecutive running answers of
+// the same SBOM, not the query's lifetime updates.
+describe("readSnapshot: runningPolls", () => {
+  test("counts consecutive running answers of the same SBOM, restarts otherwise", async () => {
+    const a = fake({ latest: ["A", "A"], status: [st("running")], list: [page(0)] });
+    const s1 = await readSnapshot(a.deps, { sbomId: "A", status: st("completed"), statusFailed: false, list: page(0), runningPolls: 7 });
+    assert.equal(s1.runningPolls, 0, "a new run starts at 0");
+    const b = fake({ latest: ["A"], status: [st("running")] });
+    const s2 = await readSnapshot(b.deps, s1);
+    assert.equal(s2.runningPolls, 1);
+    const c = fake({ latest: ["A", "A"], status: [st("completed"), st("completed")], list: [page(0)] });
+    const s3 = await readSnapshot(c.deps, s2);
+    assert.equal(s3.runningPolls, 0);
+  });
+});

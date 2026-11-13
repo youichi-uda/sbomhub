@@ -50,6 +50,12 @@ export interface Snapshot<T> {
   /** The scan state could not be read (the list is shown unconfirmed). */
   statusFailed: boolean;
   list: ListPage<T>;
+  /**
+   * Consecutive running answers for this SBOM before this one (0 = the first
+   * running answer, or not running) — the poll back-off counts these, not the
+   * query's lifetime updates (Codex R11).
+   */
+  runningPolls: number;
 }
 
 export interface SnapshotDeps<T> {
@@ -95,7 +101,21 @@ export async function readSnapshot<T>(
   prev: Snapshot<T> | undefined,
   signal?: AbortSignal,
 ): Promise<Snapshot<T>> {
-  let last: Snapshot<T> | undefined;
+  const s = await readOnce(deps, prev, signal);
+  const continuing =
+    s.status?.status === "running" &&
+    prev !== undefined &&
+    prev.sbomId === s.sbomId &&
+    prev.status?.status === "running";
+  return { ...s, runningPolls: continuing ? (prev.runningPolls ?? 0) + 1 : 0 };
+}
+
+async function readOnce<T>(
+  deps: SnapshotDeps<T>,
+  prev: Snapshot<T> | undefined,
+  signal?: AbortSignal,
+): Promise<Omit<Snapshot<T>, "runningPolls">> {
+  let last: Omit<Snapshot<T>, "runningPolls"> | undefined;
   for (let attempt = 0; attempt < SNAPSHOT_ATTEMPTS; attempt++) {
     checkAbort(signal);
     const sbomId = await at("latest", () => deps.latestSbomId());
@@ -130,7 +150,7 @@ export async function readSnapshot<T>(
       !prev.statusFailed &&
       prev.status?.status === "running"
     ) {
-      return { ...prev, status: s1 };
+      return { sbomId: prev.sbomId, status: s1, statusFailed: false, list: prev.list };
     }
 
     const list = await at("list", () => deps.list());

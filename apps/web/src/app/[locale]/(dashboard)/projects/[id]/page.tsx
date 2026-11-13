@@ -120,10 +120,14 @@ export default function ProjectDetailPage() {
   // artefact and matches the CLI default (`sbomhub evidence-pack --format
   // zip`). "markdown" keeps the original single-file bundle one click away.
   const [evidencePackFormat, setEvidencePackFormat] = useState<"zip" | "markdown">("zip");
-  // Snapshot refreshes the operator started that are still running, and
-  // whether one of them follows an upload (see refreshVulnerabilities).
-  const [refreshing, setRefreshing] = useState(0);
-  const [awaitingNewSbom, setAwaitingNewSbom] = useState(false);
+  // Times (Date.now(), taken right after the reads in flight were
+  // cancelled) of the last refresh the operator started, and of the last
+  // one after which the previous scan state no longer applies (an upload, a
+  // project-wide Retry). A snapshot committed before them is not shown as
+  // current (Codex R10 / R11). Times, not flags or counters, so a refresh
+  // that is cancelled by the next one cannot clear the guard early.
+  const [listStaleBefore, setListStaleBefore] = useState(0);
+  const [scanStaleBefore, setScanStaleBefore] = useState(0);
 
   // ---- data loading (react-query) ----------------------------------
   //
@@ -143,8 +147,9 @@ export default function ProjectDetailPage() {
   // invalidate / refetch can resolve with an answer requested before the
   // event that made the refetch necessary (Codex R1 High / Medium). Cancel
   // first; a cancelled request's answer is discarded.
-  async function refetchFresh(queryKey: readonly unknown[]) {
+  async function refetchFresh(queryKey: readonly unknown[], onCancelled?: (at: number) => void) {
     await queryClient.cancelQueries({ queryKey });
+    onCancelled?.(Date.now());
     await queryClient.refetchQueries({ queryKey, type: "active" });
   }
 
@@ -216,7 +221,7 @@ export default function ProjectDetailPage() {
         ? false
         : query.state.data && query.state.data.sbomId === null
           ? 60000
-          : pollIntervalMs(query.state.data?.status?.status, query.state.dataUpdateCount),
+          : pollIntervalMs(query.state.data?.status?.status, query.state.data?.runningPolls ?? 0),
   });
   // The previous sort's snapshot stays on screen while a new sort loads
   // (marked "checking": vulnList.fresh is false until this key answers).
@@ -231,12 +236,15 @@ export default function ProjectDetailPage() {
   // because the answer on screen may be out of date (Codex R10).
   const vulnList: ListState = {
     failed: snapshotQuery.isError,
-    fresh: snapshotQuery.isSuccess && refreshing === 0,
+    fresh: snapshotQuery.isSuccess && snapshotQuery.dataUpdatedAt >= listStaleBefore,
   };
   const scan = scanView({
     sbom: {
-      // After an upload the previous SBOM's state does not apply any more.
-      pending: (snapshot === undefined && !snapshotQuery.isError) || awaitingNewSbom,
+      // After an upload / project Retry the previous state does not apply
+      // until a snapshot read after it has answered.
+      pending:
+        !snapshotQuery.isError &&
+        (snapshot === undefined || snapshotQuery.dataUpdatedAt < scanStaleBefore),
       // A refresh that failed — at any stage — leaves nothing current to say
       // about the latest SBOM's scan (it may be a new SBOM whose list could
       // not be read; Codex R10). The previous answer is not shown as current.
@@ -261,14 +269,10 @@ export default function ProjectDetailPage() {
   // starts now; until it answers the counts are "checking", and after an
   // upload the scan state too.
   async function refreshVulnerabilities(opts?: { newSbom?: boolean }) {
-    setRefreshing((n) => n + 1);
-    if (opts?.newSbom) setAwaitingNewSbom(true);
-    try {
-      await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
-    } finally {
-      setRefreshing((n) => n - 1);
-      if (opts?.newSbom) setAwaitingNewSbom(false);
-    }
+    await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId), (at) => {
+      setListStaleBefore(at);
+      if (opts?.newSbom) setScanStaleBefore(at);
+    });
   }
 
   const vexQuery = useQuery({
@@ -539,7 +543,14 @@ export default function ProjectDetailPage() {
         // after the API recovers (integration Codex review, Medium).
         // Cancel first: a sibling request still in flight from the outage
         // would otherwise be reused and fail again (Codex R1 Medium).
-        onRetry={() => void refetchFresh(queryKeys.projects.byId(projectId))}
+        // The snapshot cached behind the error screen may be out of date
+        // (Codex R11): it is not shown as current until it is read again.
+        onRetry={() =>
+          void refetchFresh(queryKeys.projects.byId(projectId), (at) => {
+            setListStaleBefore(at);
+            setScanStaleBefore(at);
+          })
+        }
         retrying={projectQuery.isFetching}
       />
     );

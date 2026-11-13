@@ -1093,3 +1093,89 @@ test.describe('project page: refreshes of the snapshot (Codex R10)', () => {
         await expect(notice(page)).toHaveAttribute('data-scan-state', 'unavailable');
     });
 });
+
+// Codex R11: refreshes that overlap other refreshes, and the project-wide Retry.
+test.describe('project page: overlapping foreground refreshes (Codex R11)', () => {
+    const projects: string[] = [];
+    test.afterEach(async ({ page }) => {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+    });
+    test.afterAll(async ({ request }) => {
+        for (const id of projects) await deleteProject(request, id);
+    });
+
+    test('project Retry does not show the snapshot cached behind the error screen as current', async ({ page, request }) => {
+        const p = await createProject(request, uniqueName('Scan Status R11 Project Retry'));
+        projects.push(p.id);
+        await uploadSbom(request, p.id, cleanSbom);
+        let projectFails = true;
+        let holdLatest = false;
+        let release: () => void = () => {};
+        const held = new Promise<void>((r) => (release = r));
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${p.id}`,
+            (route) =>
+                route.request().method() === 'GET' && projectFails
+                    ? route.fulfill({ status: 500, json: { error: 'failed to get project' } })
+                    : route.fallback(),
+        );
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${p.id}/sbom`,
+            async (route) => {
+                if (route.request().method() !== 'GET' || !holdLatest) return route.fallback();
+                await held;
+                return route.fallback();
+            },
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        const alert = page.getByTestId('project-load-error');
+        await expect(alert).toBeVisible();
+        await page.waitForLoadState('networkidle'); // the snapshot (completed, 0) is cached
+        await uploadSbom(request, p.id, vulnerableSbom()); // CI uploads meanwhile
+        projectFails = false;
+        holdLatest = true; // the snapshot re-read is slow
+        await alert.getByRole('button', { name: en.Common.retry }).click();
+        await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+        await expect(vulnTab(page)).not.toHaveText(tabText(0, null));
+        await expect(page.getByTestId('scan-finished-announcer')).toHaveText('');
+        holdLatest = false;
+        release();
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null), { timeout: 15_000 });
+    });
+
+    test('upload, then open the tab at once: the previous state stays hidden until the new snapshot', async ({ page, request }) => {
+        const p = await createProject(request, uniqueName('Scan Status R11 Upload Tab'));
+        projects.push(p.id);
+        await uploadSbom(request, p.id, cleanSbom);
+        page.on('dialog', (d) => void d.accept());
+        let holdLatest = false;
+        let release: () => void = () => {};
+        const held = new Promise<void>((r) => (release = r));
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${p.id}/sbom`,
+            async (route) => {
+                if (route.request().method() !== 'GET' || !holdLatest) return route.fallback();
+                await held;
+                return route.fallback();
+            },
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        await expect(page.getByTestId('scan-finished-announcer')).toHaveText(en.ScanStatus.scanFinishedAnnouncement);
+        await page.waitForLoadState('networkidle');
+        holdLatest = true;
+        await page.locator('input[type="file"]').setInputFiles({
+            name: 'next.json',
+            mimeType: 'application/json',
+            buffer: Buffer.from(JSON.stringify(vulnerableSbom())),
+        });
+        // Upload done (its refresh is held); the tab refresh replaces it.
+        await page.waitForTimeout(1_000);
+        await vulnTab(page).click();
+        await page.waitForTimeout(1_000);
+        await expect(page.getByTestId('scan-finished-announcer')).toHaveText('');
+        await expect(page.locator('[data-empty-state="emptyCompleted"]')).toHaveCount(0);
+        holdLatest = false;
+        release();
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null), { timeout: 15_000 });
+    });
+});
