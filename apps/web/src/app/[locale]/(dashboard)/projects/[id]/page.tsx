@@ -233,6 +233,10 @@ export default function ProjectDetailPage() {
         );
         return { ...snap, gen };
       }),
+    // Polls skip a hidden tab, so coming back to it re-reads the snapshot
+    // (Codex R14). Safe here, unlike the global default (src/lib/query/
+    // client.ts): this query feeds no form that a refetch could reset.
+    refetchOnWindowFocus: () => projectQuery.isSuccess,
     // No polling while the project itself is not loaded (error screen,
     // "Project not found"; Codex R12): the first read still runs in parallel.
     refetchInterval: (query) =>

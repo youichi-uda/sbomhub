@@ -1271,3 +1271,40 @@ test('project page: re-sorting a completed result does not re-announce it (Codex
         await deleteProject(request, p.id);
     }
 });
+
+// Codex R14 Medium: polls skip hidden tabs, so coming back to the tab must
+// re-read the snapshot instead of showing the old one for up to a minute.
+test('project page: returning to a hidden tab re-reads the scan state (Codex R14)', async ({ page, request }) => {
+    const p = await createProject(request, uniqueName('Scan Status R14 Focus'));
+    try {
+        const first = await uploadSbom(request, p.id, cleanSbom);
+        const polled = new Set<string>();
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${p.id}/sboms/`) && url.pathname.endsWith('/scan-status'),
+            async (route) => {
+                const res = await route.fetch();
+                const real = await res.json();
+                polled.add(real.sbom_id);
+                await route.fulfill({ response: res, json: { ...real, status: real.sbom_id === first ? 'completed' : 'running' } });
+            },
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
+        await page.waitForLoadState('networkidle');
+        const setVisibility = (state: 'hidden' | 'visible') =>
+            page.evaluate((v) => {
+                Object.defineProperty(document, 'visibilityState', { value: v, configurable: true });
+                Object.defineProperty(document, 'hidden', { value: v === 'hidden', configurable: true });
+                document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
+            }, state);
+        await setVisibility('hidden');
+        const second = await uploadSbom(request, p.id, cleanSbom); // CI, while the tab is hidden
+        await setVisibility('visible');
+        await expect.poll(() => polled.has(second), { timeout: 10_000 }).toBe(true);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+    } finally {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+        await deleteProject(request, p.id);
+    }
+});
