@@ -758,3 +758,43 @@ test.describe('project page: list bound to its SBOM, coverage changes between re
         await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountPartial));
     });
 });
+
+// Codex R5: the list endpoint answers for whichever SBOM is latest; a list
+// fetched for SBOM A after CI uploaded B must not be shown as A's.
+test.describe('project page: a list read after another upload (Codex R5)', () => {
+    let projectId: string | undefined;
+    test.afterEach(async ({ page }) => {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+    });
+    test.afterAll(async ({ request }) => {
+        await deleteProject(request, projectId);
+    });
+
+    test('a sort switch after CI uploaded another SBOM moves the page to that SBOM', async ({ page, request }) => {
+        const p = await createProject(request, uniqueName('Scan Status Sort After Upload'));
+        projectId = p.id;
+        const first = await uploadSbom(request, p.id, cleanSbom);
+        const polled = new Set<string>();
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${p.id}/sboms/`) && url.pathname.endsWith('/scan-status'),
+            async (route) => {
+                const res = await route.fetch();
+                const real = await res.json();
+                polled.add(real.sbom_id);
+                // the first SBOM's scan is done; any later one is still running
+                await route.fulfill({ response: res, json: { ...real, status: real.sbom_id === first ? 'completed' : 'running' } });
+            },
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
+        await page.waitForLoadState('networkidle');
+        // CI uploads another SBOM (with findings); before the page's next
+        // latest-SBOM read, the user switches the sort.
+        const second = await uploadSbom(request, p.id, vulnerableSbom());
+        await page.getByRole('button', { name: en.Vulnerabilities.sortByEpss }).click();
+        await expect.poll(() => polled.has(second), { timeout: 15_000 }).toBe(true);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+        await expect(vulnTab(page)).toHaveText(new RegExp(`· scanning\\)$`));
+    });
+});

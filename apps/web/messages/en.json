@@ -1636,7 +1636,7 @@
     "reasonInterrupted": "The API server running the scan stopped (crash or restart) before the scan finished.",
     "reasonOther": "Other reason: {code}",
     "listLoadFailed": "Failed to load the vulnerability list. This is not a clean result: check that the API is reachable, then retry.",
-    "emptyCompleted": "The last completed scan recorded no vulnerabilities for this SBOM. That covers only what the scan could look up: an offline server, a scan limited to some sources (for example the scheduled scan, which does not query JVN), or components without a usable name or version are not checked.",
+    "emptyCompleted": "The last completed scan recorded no vulnerabilities for this SBOM. That covers only what the scan could look up: an offline server, a scan limited to some sources (for example the scheduled scan, which does not query JVN), or components without a usable name are not checked.",
     "tabCountChecking": "{count} · checking",
     "tabCountIncomplete": "{count} · incomplete",
     "tabCountUnconfirmed": "{count} · unconfirmed",

@@ -197,9 +197,20 @@ export default function ProjectDetailPage() {
     queryKey: queryKeys.projects.vulnerabilities(projectId, vulnSort, sbomId),
     queryFn: () =>
       logged("Failed to load vulnerabilities:", async (): Promise<{ data: Vulnerability[]; totalCount: number }> => {
+        const forSbom = sbomId;
         const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId, {
           sort: vulnSort,
         });
+        // The endpoint answers for whichever SBOM is latest when it is
+        // served, not for `forSbom` (Codex R5). Re-read the latest SBOM
+        // after the list: SBOMs are only added, so if it is still
+        // `forSbom`, the list was `forSbom`'s. If another SBOM appeared
+        // (CI), move the page to it — the list and scan-status keys follow
+        // the id, so this answer (filed under the old SBOM) is never shown.
+        const latest = (await api.projects.getLatestSbom(projectId))?.id ?? null;
+        if (latest !== forSbom) {
+          queryClient.setQueryData(queryKeys.projects.latestSbomId(projectId), latest);
+        }
         return { data: data || [], totalCount };
       }),
     // Wait for the latest SBOM lookup (success or failure) so the list is
@@ -309,13 +320,14 @@ export default function ProjectDetailPage() {
       ? String(vulnTotalCount)
       : t(`ScanStatus.${vulnTotalQualifier}`, { count: String(vulnTotalCount) });
 
-  // Retry the chain in order (Codex R2): the latest SBOM, then its state
-  // (whose settling refetches the list). Both may have failed in the same
+  // Retry the chain in order (Codex R2): the latest SBOM, then its state,
+  // then the list (refreshVulnerabilities below). Both may have failed in the same
   // outage; one click recovers both. A changed SBOM id re-keys the status
   // query, which then fetches by itself.
+  // The list is re-read too: its own SBOM check (Codex R5) reads the latest
+  // SBOM, so it failed in the same outage.
   async function retryScanStatus() {
-    await refetchFresh(queryKeys.projects.latestSbomId(projectId));
-    await refetchFresh(queryKeys.projects.scanStatusAll(projectId));
+    await refreshVulnerabilities();
   }
 
   // Opening the vulnerabilities tab refreshes the list. The list endpoint
