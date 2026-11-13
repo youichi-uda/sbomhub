@@ -911,7 +911,13 @@ func (s *JVNService) fetchPage(ctx context.Context, keyword string, startItem in
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		// A 200 whose body never finished arriving is no answer either
+		// (Codex R1, Medium): the client timeout can fire here, after Do
+		// has succeeded. Classified exactly like a Do error.
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		return nil, &jvnUnavailableError{err: err}
 	}
 
 	return s.parseJVNPage(body, jvnPageRequest{

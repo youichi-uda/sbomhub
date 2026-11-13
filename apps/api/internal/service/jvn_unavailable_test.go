@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestJVNOutage_FetchPage_ClassifiesUnavailability(t *testing.T) {
@@ -142,5 +143,39 @@ func TestJVNOutage_ScanReasons_SourceUnavailableOrder(t *testing.T) {
 	want := []string{ScanReasonDeadlineExceeded, ScanReasonFetchFailed, ScanReasonSourceUnavailable}
 	if got := ScanReasons(err); !slices.Equal(got, want) {
 		t.Errorf("reasons = %v, want %v", got, want)
+	}
+}
+
+// A 200 whose body never finishes arriving is no answer either (Codex R1,
+// Medium): the client timeout fires in io.ReadAll, after Do has succeeded,
+// and must be classified exactly like a timeout inside Do. A scan-context
+// cut in the same place stays a cancellation.
+func TestJVNOutage_FetchPage_BodyStallIsUnavailable(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<?xml version=\"1.0\"?>"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	svc := NewJVNService(nil, nil, srv.URL, false)
+	svc.httpClient.Timeout = 150 * time.Millisecond
+	_, err := svc.fetchPage(context.Background(), "openssl", 1)
+	if err == nil || !isJVNUnavailable(err) {
+		t.Errorf("client timeout while reading the body: err = %v, want an unavailability error", err)
+	}
+
+	svc.httpClient.Timeout = 30 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, err = svc.fetchPage(ctx, "openssl", 1)
+	if err == nil || isJVNUnavailable(err) {
+		t.Errorf("scan context expiring while reading the body: err = %v, want a plain cancellation", err)
 	}
 }
