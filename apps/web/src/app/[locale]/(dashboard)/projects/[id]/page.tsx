@@ -1,7 +1,7 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -52,6 +52,9 @@ import { readSnapshot, type Snapshot } from "@/lib/scan-snapshot";
 //      project-limited credential exists for;
 //   2. api-keys.spec.ts (M12-1 #82 carryover) was written for in-tab CRUD;
 //   3. the tenant-wide alternative remains at /settings/apikeys.
+// The snapshot plus the refresh generation its read started in.
+type PageSnapshot = Snapshot<Vulnerability> & { gen: number };
+
 type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "notifications" | "apikeys";
 
 // Loader helper: log a failed fetch under the same message the hand-written
@@ -120,14 +123,17 @@ export default function ProjectDetailPage() {
   // artefact and matches the CLI default (`sbomhub evidence-pack --format
   // zip`). "markdown" keeps the original single-file bundle one click away.
   const [evidencePackFormat, setEvidencePackFormat] = useState<"zip" | "markdown">("zip");
-  // Times (Date.now(), taken right after the reads in flight were
-  // cancelled) of the last refresh the operator started, and of the last
-  // one after which the previous scan state no longer applies (an upload, a
-  // project-wide Retry). A snapshot committed before them is not shown as
-  // current (Codex R10 / R11). Times, not flags or counters, so a refresh
-  // that is cancelled by the next one cannot clear the guard early.
-  const [listStaleBefore, setListStaleBefore] = useState(0);
-  const [scanStaleBefore, setScanStaleBefore] = useState(0);
+  // Refresh generations. Every snapshot read records the generation that
+  // was current when it STARTED (snapshotGen). A refresh the operator starts
+  // (tab, Retry, upload, project Retry) cancels the reads in flight and then
+  // bumps the generation; a snapshot from an older generation is not shown
+  // as current: counts "checking", and — after an upload or a project-wide
+  // Retry — no scan state (Codex R10 / R11). A monotonic counter, not a
+  // flag (a cancelled refresh cannot clear it early) and not a clock (no
+  // same-millisecond ties or clock steps; Codex R12).
+  const snapshotGen = useRef(0);
+  const [listStaleGen, setListStaleGen] = useState(0);
+  const [scanStaleGen, setScanStaleGen] = useState(0);
 
   // ---- data loading (react-query) ----------------------------------
   //
@@ -147,10 +153,18 @@ export default function ProjectDetailPage() {
   // invalidate / refetch can resolve with an answer requested before the
   // event that made the refetch necessary (Codex R1 High / Medium). Cancel
   // first; a cancelled request's answer is discarded.
-  async function refetchFresh(queryKey: readonly unknown[], onCancelled?: (at: number) => void) {
+  async function refetchFresh(queryKey: readonly unknown[], onCancelled?: () => void) {
     await queryClient.cancelQueries({ queryKey });
-    onCancelled?.(Date.now());
+    onCancelled?.();
     await queryClient.refetchQueries({ queryKey, type: "active" });
+  }
+  // Called between the cancel and the refetch: reads that start from now on
+  // carry the new generation.
+  function bumpSnapshotGen(opts: { scanStale: boolean }) {
+    snapshotGen.current += 1;
+    const gen = snapshotGen.current;
+    setListStaleGen(gen);
+    if (opts.scanStale) setScanStaleGen(gen);
   }
 
   const projectQuery = useQuery({
@@ -200,8 +214,9 @@ export default function ProjectDetailPage() {
   const snapshotQuery = useQuery({
     queryKey: queryKeys.projects.vulnerabilities(projectId, vulnSort),
     queryFn: ({ signal }) =>
-      logged("Failed to load vulnerabilities:", (): Promise<Snapshot<Vulnerability>> =>
-        readSnapshot<Vulnerability>(
+      logged("Failed to load vulnerabilities:", async (): Promise<PageSnapshot> => {
+        const gen = snapshotGen.current;
+        const snap = await readSnapshot<Vulnerability>(
           {
             latestSbomId: async () => (await api.projects.getLatestSbom(projectId, signal))?.id ?? null,
             scanStatus: async (id) => parseScanStatus(await api.projects.getScanStatus(projectId, id, signal)),
@@ -213,11 +228,15 @@ export default function ProjectDetailPage() {
               return { data: data || [], totalCount };
             },
           },
-          queryClient.getQueryData<Snapshot<Vulnerability>>(queryKeys.projects.vulnerabilities(projectId, vulnSort)),
+          queryClient.getQueryData<PageSnapshot>(queryKeys.projects.vulnerabilities(projectId, vulnSort)),
           signal,
-        )),
+        );
+        return { ...snap, gen };
+      }),
+    // No polling while the project itself is not loaded (error screen,
+    // "Project not found"; Codex R12): the first read still runs in parallel.
     refetchInterval: (query) =>
-      query.state.status === "error" || query.state.data?.statusFailed
+      !projectQuery.isSuccess || query.state.status === "error" || query.state.data?.statusFailed
         ? false
         : query.state.data && query.state.data.sbomId === null
           ? 60000
@@ -236,7 +255,7 @@ export default function ProjectDetailPage() {
   // because the answer on screen may be out of date (Codex R10).
   const vulnList: ListState = {
     failed: snapshotQuery.isError,
-    fresh: snapshotQuery.isSuccess && snapshotQuery.dataUpdatedAt >= listStaleBefore,
+    fresh: snapshotQuery.isSuccess && (snapshotQuery.data?.gen ?? -1) >= listStaleGen,
   };
   const scan = scanView({
     sbom: {
@@ -244,7 +263,7 @@ export default function ProjectDetailPage() {
       // until a snapshot read after it has answered.
       pending:
         !snapshotQuery.isError &&
-        (snapshot === undefined || snapshotQuery.dataUpdatedAt < scanStaleBefore),
+        (snapshot === undefined || (snapshotQuery.data?.gen ?? -1) < scanStaleGen),
       // A refresh that failed — at any stage — leaves nothing current to say
       // about the latest SBOM's scan (it may be a new SBOM whose list could
       // not be read; Codex R10). The previous answer is not shown as current.
@@ -269,10 +288,9 @@ export default function ProjectDetailPage() {
   // starts now; until it answers the counts are "checking", and after an
   // upload the scan state too.
   async function refreshVulnerabilities(opts?: { newSbom?: boolean }) {
-    await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId), (at) => {
-      setListStaleBefore(at);
-      if (opts?.newSbom) setScanStaleBefore(at);
-    });
+    await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId), () =>
+      bumpSnapshotGen({ scanStale: opts?.newSbom === true }),
+    );
   }
 
   const vexQuery = useQuery({
@@ -546,10 +564,7 @@ export default function ProjectDetailPage() {
         // The snapshot cached behind the error screen may be out of date
         // (Codex R11): it is not shown as current until it is read again.
         onRetry={() =>
-          void refetchFresh(queryKeys.projects.byId(projectId), (at) => {
-            setListStaleBefore(at);
-            setScanStaleBefore(at);
-          })
+          void refetchFresh(queryKeys.projects.byId(projectId), () => bumpSnapshotGen({ scanStale: true }))
         }
         retrying={projectQuery.isFetching}
       />

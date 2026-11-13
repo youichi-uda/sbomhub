@@ -5,6 +5,7 @@ import {
     createProject,
     createVulnerableProject,
     deleteProject,
+    API_BASE_URL,
     FIXTURE_CVES,
     uniqueName,
     uploadSbom,
@@ -1107,6 +1108,7 @@ test.describe('project page: overlapping foreground refreshes (Codex R11)', () =
     test('project Retry does not show the snapshot cached behind the error screen as current', async ({ page, request }) => {
         const p = await createProject(request, uniqueName('Scan Status R11 Project Retry'));
         projects.push(p.id);
+        const projectName = (await (await request.get(`${API_BASE_URL}/api/v1/projects/${p.id}`)).json()).name as string;
         await uploadSbom(request, p.id, cleanSbom);
         let projectFails = true;
         let holdLatest = false;
@@ -1135,7 +1137,7 @@ test.describe('project page: overlapping foreground refreshes (Codex R11)', () =
         projectFails = false;
         holdLatest = true; // the snapshot re-read is slow
         await alert.getByRole('button', { name: en.Common.retry }).click();
-        await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+        await expect(page.getByRole('heading', { level: 1, name: projectName })).toBeVisible();
         await expect(vulnTab(page)).not.toHaveText(tabText(0, null));
         await expect(page.getByTestId('scan-finished-announcer')).toHaveText('');
         holdLatest = false;
@@ -1178,4 +1180,66 @@ test.describe('project page: overlapping foreground refreshes (Codex R11)', () =
         release();
         await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null), { timeout: 15_000 });
     });
+});
+
+// Codex R12 Low: leaving the page aborts the latest-SBOM and list requests
+// themselves (not only the requests after them).
+test.describe('project page: leaving aborts the snapshot requests in flight (Codex R12)', () => {
+    let projectId: string | undefined;
+    test.beforeAll(async ({ request }) => {
+        projectId = (await createProject(request, uniqueName('Scan Status R12 Abort'))).id;
+        await uploadSbom(request, projectId, cleanSbom);
+    });
+    test.afterEach(async ({ page }) => {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+    });
+    test.afterAll(async ({ request }) => {
+        await deleteProject(request, projectId);
+    });
+
+    for (const [name, matches] of [
+        ['latest SBOM', (path: string) => path === `/api/v1/projects/${projectId}/sbom`],
+        ['vulnerability list', (path: string) => path === `/api/v1/projects/${projectId}/vulnerabilities`],
+    ] as const) {
+        test(`the ${name} request is aborted on leaving`, async ({ page }) => {
+            let release: () => void = () => {};
+            const held = new Promise<void>((r) => (release = r));
+            let heldSeen = false;
+            const aborted: string[] = [];
+            page.on('requestfailed', (r) => aborted.push(new URL(r.url()).pathname));
+            await page.route(
+                (url) => matches(url.pathname),
+                async (route) => {
+                    if (route.request().method() !== 'GET') return route.fallback();
+                    heldSeen = true;
+                    await held;
+                    return route.fallback().catch(() => {});
+                },
+            );
+            await page.goto(`/en/projects/${projectId}`);
+            await expect.poll(() => heldSeen, { timeout: 15_000 }).toBe(true);
+            await page.getByRole('link', { name: en.ProjectDetail.backToProjects }).click();
+            await expect(page).toHaveURL(/\/en\/projects\/?$/);
+            await expect.poll(() => aborted.some((p) => matches(p)), { timeout: 10_000 }).toBe(true);
+            release();
+        });
+    }
+});
+
+// Codex R12 Low: no snapshot polling behind "Project not found".
+test('project page: no scan polling behind "Project not found" (Codex R12)', async ({ page }) => {
+    const missing = '00000000-0000-0000-0000-00000000beef';
+    await page.clock.install();
+    let reads = 0;
+    page.on('request', (r) => {
+        const path = new URL(r.url()).pathname;
+        if (path.startsWith(`/api/v1/projects/${missing}/`)) reads++;
+    });
+    await page.goto(`/en/projects/${missing}`);
+    await expect(page.getByText(en.Common.projectNotFound, { exact: true })).toBeVisible();
+    await page.waitForLoadState('networkidle');
+    const before = reads;
+    await page.clock.fastForward('03:05');
+    await page.waitForTimeout(1_500);
+    expect(reads).toBe(before);
 });
