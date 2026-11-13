@@ -1794,7 +1794,8 @@ service since 2026-10-22**: JPCERT/CC's notice of that date
 undetermined. (An earlier edition of this section said the notice expected
 service to resume in November; it does not.) See §26 for how the outage is
 reported. While it is down, every JVN lookup
-fails and every scan that includes JVN is reported `failed` ("jvn: scan
+fails and every online scan that looks up at least one component in JVN
+(not with `SBOMHUB_OFFLINE=true`) is reported `failed` ("jvn: scan
 failed"); NVD's links are still committed. Nothing in this release changes that.
 
 MyJVN's `cpeName` parameter therefore could not be measured, and per this
@@ -2484,7 +2485,8 @@ New environment variables: `SBOMHUB_REDIS_BREAKER_THRESHOLD`, `SBOMHUB_REDIS_BRE
 
 JPCERT/CC suspended JVN iPedia and MyJVN on 2026-10-22 for system maintenance with
 no resumption date (https://jvn.jp/nav/info2026102281.html). Every MyJVN API URL
-answers HTTP 404, so every scan that includes JVN is reported `failed`.
+answers HTTP 404, so every online scan that looks up at least one component in
+JVN (not with `SBOMHUB_OFFLINE=true`) is reported `failed`.
 
 What changes:
 
