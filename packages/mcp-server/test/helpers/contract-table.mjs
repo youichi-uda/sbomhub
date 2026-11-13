@@ -174,11 +174,15 @@ const ok = (body, headers) => ({ status: 200, body, headers });
 // client compares across the walk to notice a scan that moved.
 export const scanStatusBody = (
   status,
-  { total = 0, sbomId = SBOM_NEWEST, buckets = {} } = {}
+  { total = 0, sbomId = SBOM_NEWEST, buckets = {}, skipped = [] } = {}
 ) => ({
   status,
   sbom_id: sbomId,
   project_id: PROJECT_ID,
+  // apps/api scan-status `skipped_sources` (SBOMHUB_JVN=off): present only
+  // when the scan skipped a source the operator switched off — omitted, as
+  // the handler omits it, when nothing was skipped.
+  ...(skipped.length > 0 ? { skipped_sources: skipped } : {}),
   // The client compares this WHOLE object across the walk, not just `total`: a
   // vulnerability relabelled LOW -> CRITICAL mid-walk leaves the total untouched
   // while making by_severity and any severity filter stale (Codex R4, High).
@@ -256,6 +260,7 @@ export const scanProbeChanging = (first, second) => {
           total: which.total ?? 0,
           sbomId: asked,
           buckets: which.buckets ?? {},
+          skipped: which.skipped ?? [],
         })
       );
     },
@@ -589,6 +594,51 @@ export const CONTRACT_CASES = [
       assert.equal(payload.scan_state, "completed");
       assert.equal(payload.counts_final, true);
       assert.equal(payload.scanned_sbom_id, SBOM_NEWEST);
+      // Nothing skipped: the field is present and empty, never absent, so
+      // "no source was skipped" is stated rather than implied.
+      assert.deepEqual(payload.skipped_sources, []);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "completed scan that skipped JVN (SBOMHUB_JVN=off) says so next to counts_final",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("completed", { total: VULNS.length, buckets: bucketsOf(VULNS), skipped: ["jvn"] }),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      // The scan is settled — the counts are final for what this deployment
+      // checks — but JVN was never consulted, and a model reading
+      // counts_final alone would take the numbers as covering it.
+      assert.equal(payload.scan_state, "completed");
+      assert.equal(payload.counts_final, true);
+      assert.equal(payload.scanned_sbom_id, SBOM_NEWEST);
+      assert.deepEqual(payload.skipped_sources, ["jvn"]);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "skipped sources moving between the two probes is a change, not a settled scan",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbeChanging(
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS) },
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), skipped: ["jvn"] }
+      ),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      // Same SBOM, same counts, but a different scan answered the second
+      // reading (one that skipped JVN): the rows cannot be attributed to
+      // either, and the skip is reported rather than dropped.
+      assert.equal(payload.scan_state, "changed");
+      assert.equal(payload.counts_final, false);
+      assert.deepEqual(payload.skipped_sources, ["jvn"]);
     },
   },
 

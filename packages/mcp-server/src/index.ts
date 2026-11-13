@@ -95,6 +95,9 @@ function errorResult(err: unknown): CallToolResult {
 //   counts_final=false  everything else, and the reasons are not equivalent —
 //                       running (wait), failed / no_sbom / unknown /
 //                       unavailable (the count is not an answer at all).
+//   skipped_sources     sources the scan did not consult because the operator
+//                       switched them off (SBOMHUB_JVN=off -> ["jvn"]); the
+//                       counts never cover them, final or not.
 //
 // Stated once and shared, for the reason SCOPE_NOTE is: a per-tool rewording is
 // a per-tool opportunity to describe a payload the tool does not produce. Every
@@ -111,7 +114,10 @@ const SCAN_STATE_NOTE =
   "その場合も確定値ではない)。" +
   "scan_state がどのSBOMについての状態かは scanned_sbom_id " +
   "(counts_final=true のときはその件数の出所でもある。特定できないときは null)。" +
-  "counts_final=false のときの0件や極端に少ない件数を「脆弱性なし」と断定しないこと。";
+  "counts_final=false のときの0件や極端に少ない件数を「脆弱性なし」と断定しないこと。" +
+  "skipped_sources に挙がった情報源 (例: jvn) は運用者の設定 (SBOMHUB_JVN=off) で" +
+  "照会されておらず、counts_final=true でもその情報源の脆弱性は件数に含まれない。" +
+  "空でないときは、その情報源について「脆弱性なし」と断定しないこと。";
 
 // The per-project tools all take this. The refusal a project-scoped key gets
 // for someone ELSE's project is stated on the argument that causes it, because

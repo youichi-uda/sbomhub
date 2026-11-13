@@ -555,6 +555,19 @@ test("a tool reporting scan counts reports whether the scan had finished", () =>
       /断定しないこと/,
       `${tool} does not tell the model what NOT to conclude from a low or zero count`
     );
+    // SBOMHUB_JVN=off: a settled scan can still have skipped a source. The
+    // payload says which, and the description tells the model to read it.
+    assert.equal(
+      keys.has("skipped_sources"),
+      true,
+      `${tool} reports counts_final but not skipped_sources, so a scan that never ` +
+        "consulted JVN reads as covering it"
+    );
+    assert.match(
+      description,
+      /skipped_sources/,
+      `${tool} carries skipped_sources but never names it where the model reads`
+    );
   }
 });
 

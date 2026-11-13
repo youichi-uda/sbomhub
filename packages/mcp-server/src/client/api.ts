@@ -64,6 +64,10 @@ const ScanStatusSchema = z.looseObject({
     kev: z.number(),
     total: z.number(),
   }),
+  // SBOMHUB_JVN=off (apps/api, additive): the sources the scan did not
+  // consult because the operator switched them off, e.g. ["jvn"]. Omitted
+  // when nothing was skipped, and by backends that predate the setting.
+  skipped_sources: z.array(z.string()).optional(),
 });
 
 export type SbomSummary = z.infer<typeof SbomSummarySchema>;
@@ -127,13 +131,33 @@ type ScanProbe = {
    * as one value. Null when the state could not be read.
    */
   counts: string | null;
+  /**
+   * The sources this reading says the scan skipped (sorted, de-duplicated).
+   * Empty when none were, or when the state could not be read.
+   */
+  skipped: string[];
 };
 
+/**
+ * `skipped_sources` names the sources the scan did not consult because the
+ * operator switched them off (apps/api SBOMHUB_JVN=off -> ["jvn"]). It is
+ * independent of `counts_final`: a settled scan is final for what this
+ * deployment checks, and these are what it did not. It is the union of what
+ * the readings behind this report said, so it can over-state a skip when the
+ * two readings disagree (they then also make `counts_final` false), never
+ * under-state one that was read.
+ */
 export type ScanReport = {
   scan_state: string;
   counts_final: boolean;
   scanned_sbom_id: string | null;
+  skipped_sources: string[];
 };
+
+/** Sorted, de-duplicated union of skipped-source lists. */
+function skippedUnion(...lists: string[][]): string[] {
+  return [...new Set(lists.flat())].sort();
+}
 
 // GET /mcp/projects/:id/vulnerabilities caps `?limit=` at 500 and
 // `?offset=` at 10000 (apps/api/internal/handler/sbom.go VulnsMaxLimit /
@@ -569,6 +593,7 @@ private async readScanState(
     state: SCAN_STATE_UNAVAILABLE,
     sbomId: null,
     counts: null,
+    skipped: [],
   };
 
   try {
@@ -600,6 +625,7 @@ private async readScanState(
           )
         )
       ),
+      skipped: skippedUnion(status.skipped_sources ?? []),
     };
   } catch {
     return unreadable;
@@ -725,10 +751,12 @@ private async probeScanState(
       scan_state: before.state,
       counts_final: false,
       scanned_sbom_id: before.sbomId,
+      skipped_sources: before.skipped,
     };
   }
 
   const after = await this.readScanState(projectId, signal);
+  const skipped_sources = skippedUnion(before.skipped, after.skipped);
   if (after.state === SCAN_STATE_UNAVAILABLE) {
     // The walk began on a finished scan, but whether it still is cannot be
     // read — which is not evidence that it is.
@@ -736,13 +764,17 @@ private async probeScanState(
       scan_state: SCAN_STATE_UNAVAILABLE,
       counts_final: false,
       scanned_sbom_id: before.sbomId,
+      skipped_sources,
     };
   }
 
+  // The skipped sources are compared too: the same summary from a scan that
+  // skipped a different set of sources is a different scan's answer.
   const settled =
     after.state === SCAN_STATE_FINAL &&
     after.sbomId === before.sbomId &&
-    after.counts === before.counts;
+    after.counts === before.counts &&
+    after.skipped.join(",") === before.skipped.join(",");
 
   if (!settled) {
     return {
@@ -752,6 +784,7 @@ private async probeScanState(
       // disagree about which SBOM (or about its contents), and the pages
       // were answered somewhere in between.
       scanned_sbom_id: after.sbomId === before.sbomId ? before.sbomId : null,
+      skipped_sources,
     };
   }
 
@@ -766,6 +799,7 @@ private async probeScanState(
     // "these are the project's numbers" about numbers that are not.
     counts_final: walkCovered,
     scanned_sbom_id: walkCovered ? before.sbomId : null,
+    skipped_sources,
   };
 }
 }
