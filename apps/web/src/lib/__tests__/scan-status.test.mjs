@@ -36,7 +36,11 @@ import {
 
 const FRESH = { failed: false, fresh: true };
 const sbom = (id = "s1") => ({ pending: false, error: false, id });
-const status = (data) => ({ pending: false, error: false, data: parseScanStatus(data) });
+const status = (data) => ({
+  pending: false,
+  error: false,
+  data: parseScanStatus({ vulnerabilities: { total: 0 }, ...data }),
+});
 
 describe("parseScanStatus", () => {
   test("reads the API shape", () => {
@@ -55,10 +59,17 @@ describe("parseScanStatus", () => {
     assert.equal(s.error, "jvn: scan failed (fetch_failed, source_unavailable)");
     assert.equal(s.total, 3);
   });
-  test("a missing or malformed total is null", () => {
-    assert.equal(parseScanStatus({ status: "completed" }).total, null);
-    assert.equal(parseScanStatus({ status: "completed", vulnerabilities: { total: "3" } }).total, null);
-    assert.equal(parseScanStatus({ status: "completed", vulnerabilities: { total: -1 } }).total, null);
+  // Codex R6: a settled answer without a usable total cannot be paired
+  // with a list (and used to never settle): it reads as unknown.
+  test("a completed / failed answer without a usable total is unknown", () => {
+    for (const vulnerabilities of [undefined, {}, { total: "3" }, { total: -1 }, { total: 1.5 }]) {
+      const c = parseScanStatus({ status: "completed", vulnerabilities, skipped_sources: ["jvn"] });
+      assert.equal(c.status, "unknown", JSON.stringify(vulnerabilities));
+      assert.equal(c.total, null);
+      assert.deepEqual(c.skippedSources, []);
+      assert.equal(parseScanStatus({ status: "failed", vulnerabilities, reasons: ["x"] }).status, "unknown");
+    }
+    assert.equal(parseScanStatus({ status: "running" }).status, "running");
   });
   test("an unrecognised or missing status is unknown, never completed", () => {
     assert.equal(parseScanStatus({ status: "done" }).status, "unknown");
@@ -67,19 +78,19 @@ describe("parseScanStatus", () => {
     assert.equal(parseScanStatus("completed").status, "unknown");
   });
   test("non-string members of reasons / skipped_sources are dropped, absent lists are empty", () => {
-    const s = parseScanStatus({ status: "failed", reasons: ["x", 3, null], skipped_sources: "jvn" });
+    const s = parseScanStatus({ status: "failed", reasons: ["x", 3, null], skipped_sources: "jvn", vulnerabilities: { total: 0 } });
     assert.deepEqual(s.reasons, ["x"]);
     assert.deepEqual(s.skippedSources, []);
-    assert.deepEqual(parseScanStatus({ status: "completed" }).skippedSources, []);
+    assert.deepEqual(parseScanStatus({ status: "completed", vulnerabilities: { total: 0 } }).skippedSources, []);
   });
   test("reasons and error are ignored unless failed, as the API documents", () => {
-    const s = parseScanStatus({ status: "completed", reasons: ["fetch_failed"], error: "x" });
+    const s = parseScanStatus({ status: "completed", reasons: ["fetch_failed"], error: "x", vulnerabilities: { total: 0 } });
     assert.deepEqual(s.reasons, []);
     assert.equal(s.error, undefined);
   });
   test("skipped_sources is kept for completed and failed only", () => {
-    assert.deepEqual(parseScanStatus({ status: "completed", skipped_sources: ["jvn"] }).skippedSources, ["jvn"]);
-    assert.deepEqual(parseScanStatus({ status: "failed", skipped_sources: ["jvn"] }).skippedSources, ["jvn"]);
+    assert.deepEqual(parseScanStatus({ status: "completed", skipped_sources: ["jvn"], vulnerabilities: { total: 0 } }).skippedSources, ["jvn"]);
+    assert.deepEqual(parseScanStatus({ status: "failed", skipped_sources: ["jvn"], vulnerabilities: { total: 0 } }).skippedSources, ["jvn"]);
     assert.deepEqual(parseScanStatus({ status: "running", skipped_sources: ["jvn"] }).skippedSources, []);
   });
 });
@@ -210,7 +221,9 @@ describe("sameScanAnswer", () => {
     assert.equal(sameScanAnswer(base, { ...base, skippedSources: ["jvn"] }), false);
     assert.equal(sameScanAnswer({ ...base, status: "failed", reasons: ["a"] }, { ...base, status: "failed", reasons: ["a", "b"] }), false);
     assert.equal(sameScanAnswer({ ...base, status: "failed", error: "x" }, { ...base, status: "failed", error: "y" }), false);
-    assert.equal(sameScanAnswer({ ...base, total: null }, { ...base, total: null }), false, "an unknown total never proves agreement");
+    // A null total only occurs for running / unknown (a settled answer
+    // without one parses as unknown), where agreement claims nothing.
+    assert.equal(sameScanAnswer({ ...base, status: "unknown", total: null }, { ...base, status: "unknown", total: null }), true);
   });
 });
 
@@ -228,7 +241,8 @@ describe("settleNeedsListRefetch", () => {
   // reads reads completed → completed; its findings changed the SBOM's total.
   test("the same settled state with a different total refetches the list", () => {
     assert.equal(settleNeedsListRefetch(st("completed", 2), st("completed", 3)), true);
-    assert.equal(settleNeedsListRefetch(st("completed", 2), st("completed", null)), true);
+    assert.equal(settleNeedsListRefetch(st("completed", 2), st("unknown", null)), true);
+    assert.equal(settleNeedsListRefetch(st("unknown", null), st("unknown", null)), false, "Codex R6: unknown settles");
   });
   test("a changed coverage (skipped sources) also refetches (Codex R4)", () => {
     assert.equal(settleNeedsListRefetch(st("completed", 2), { ...st("completed", 2), skippedSources: ["jvn"] }), true);
@@ -244,9 +258,8 @@ describe("settleNeedsListRefetch", () => {
 // running, so a failed / unknown / partial scan (or a failed list load on the
 // default tab) read as a final count.
 describe("countQualifierKey", () => {
-  test("a bare count only for a completed scan with nothing skipped, or no SBOM", () => {
+  test("a bare count only for a completed scan with nothing skipped", () => {
     assert.equal(countQualifierKey({ kind: "completed", skippedSources: [] }, FRESH), null);
-    assert.equal(countQualifierKey({ kind: "no-sbom" }, FRESH), null);
   });
   test("every other state qualifies the count", () => {
     assert.equal(countQualifierKey({ kind: "running" }, FRESH), "tabCountRunning");
@@ -268,6 +281,8 @@ describe("countQualifierKey", () => {
   // previous rows; their count is not the settled one.
   test("a list that is not fresh is 'checking', even for a completed scan", () => {
     assert.equal(countQualifierKey({ kind: "completed", skippedSources: [] }, { failed: false, fresh: false }), "tabCountChecking");
-    assert.equal(countQualifierKey({ kind: "no-sbom" }, { failed: false, fresh: false }), null);
+    // Codex R6: no SBOM is "not scanned", never a bare 0.
+    assert.equal(countQualifierKey({ kind: "no-sbom" }, { failed: false, fresh: false }), "tabCountNotScanned");
+    assert.equal(countQualifierKey({ kind: "no-sbom" }, FRESH), "tabCountNotScanned");
   });
 });

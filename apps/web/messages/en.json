@@ -1641,6 +1641,7 @@
     "tabCountIncomplete": "{count} · incomplete",
     "tabCountUnconfirmed": "{count} · unconfirmed",
     "tabCountPartial": "{count} · partial",
+    "tabCountNotScanned": "not scanned",
     "tabCountLoadFailed": "load failed",
     "scanFinishedAnnouncement": "The vulnerability scan has finished.",
     "truncatedTitle": "More vulnerabilities than shown ({shown} / {total})",

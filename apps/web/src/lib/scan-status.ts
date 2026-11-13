@@ -61,11 +61,15 @@ function stringList(v: unknown): string[] {
  */
 export function parseScanStatus(raw: unknown): ScanStatus {
   const o = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-  const status = STATES.includes(o.status as ScanState) ? (o.status as ScanState) : "unknown";
+  let status = STATES.includes(o.status as ScanState) ? (o.status as ScanState) : "unknown";
   const v = o.vulnerabilities !== null && typeof o.vulnerabilities === "object"
     ? (o.vulnerabilities as Record<string, unknown>)
     : {};
   const total = typeof v.total === "number" && Number.isInteger(v.total) && v.total >= 0 ? v.total : null;
+  // A settled answer without a usable finding total cannot be checked
+  // against the list (and could never be seen to settle): unknown, not
+  // completed / failed (Codex R6). The API always sends it.
+  if ((status === "completed" || status === "failed") && total === null) status = "unknown";
   const out: ScanStatus = { status, reasons: [], skippedSources: [], total };
   if (status === "failed") {
     out.reasons = stringList(o.reasons);
@@ -251,12 +255,12 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
  * Whether two scan-status answers agree on everything the page shows from
  * them: state, finding total, skipped sources, reasons and failure marker
  * (Codex R4: agreeing on state and total alone let a changed coverage
- * through). An unknown total never proves agreement.
+ * through). A null total only occurs for running / unknown answers
+ * (parseScanStatus), where agreement claims nothing final.
  */
 export function sameScanAnswer(a: ScanStatus, b: ScanStatus): boolean {
   return (
     a.status === b.status &&
-    a.total !== null &&
     a.total === b.total &&
     sameList(a.skippedSources, b.skippedSources) &&
     sameList(a.reasons, b.reasons) &&
@@ -271,6 +275,7 @@ export type CountQualifierKey =
   | "tabCountIncomplete"
   | "tabCountUnconfirmed"
   | "tabCountPartial"
+  | "tabCountNotScanned"
   | "tabCountLoadFailed";
 
 export interface ListState {
@@ -282,15 +287,15 @@ export interface ListState {
 
 /**
  * How the vulnerability count is qualified (tab counter, card header). null =
- * a bare number: only a completed scan with nothing skipped and a fresh list,
- * or no SBOM at all (zero is then simply the size of an empty list, and the
- * empty state says nothing was scanned). A failed list load wins — its count
+ * a bare number: only a completed scan with nothing skipped and a fresh list.
+ * A failed list load wins — its count
  * is not current, even when earlier rows are still on screen — then a list
  * still loading (Codex R2).
  */
 export function countQualifierKey(view: ScanView, list: ListState): CountQualifierKey | null {
   if (list.failed) return "tabCountLoadFailed";
-  if (view.kind === "no-sbom") return null;
+  // No SBOM: nothing was scanned, so a bare 0 would read as clean (Codex R6).
+  if (view.kind === "no-sbom") return "tabCountNotScanned";
   if (!list.fresh) return "tabCountChecking";
   switch (view.kind) {
     case "completed":

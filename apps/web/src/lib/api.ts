@@ -2245,9 +2245,10 @@ export const api = {
     // unknown). The raw body; src/lib/scan-status.ts parseScanStatus
     // normalises it (an unrecognised status reads as unknown). A 404 (the
     // SBOM is not in this project) is an error, not "no scan".
-    getScanStatus: (id: string, sbomId: string): Promise<unknown> =>
+    getScanStatus: (id: string, sbomId: string, signal?: AbortSignal): Promise<unknown> =>
       request<unknown>(
         `/api/v1/projects/${encodeURIComponent(id)}/sboms/${encodeURIComponent(sbomId)}/scan-status`,
+        signal ? { signal } : undefined,
       ),
     create: (data: { name: string; description: string }) =>
       request<Project>("/api/v1/projects", {

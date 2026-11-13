@@ -1641,6 +1641,7 @@
     "tabCountIncomplete": "{count}・不完全",
     "tabCountUnconfirmed": "{count}・未確認",
     "tabCountPartial": "{count}・一部のみ",
+    "tabCountNotScanned": "未スキャン",
     "tabCountLoadFailed": "読み込み失敗",
     "scanFinishedAnnouncement": "脆弱性スキャンが終了しました。",
     "truncatedTitle": "脆弱性が表示件数を超えています ({shown} / {total})",

@@ -259,6 +259,8 @@ test.describe('project page: scan status of the latest SBOM', () => {
 
     test('no SBOM yet: says nothing was scanned, not "no vulnerabilities"', async ({ page }) => {
         await page.goto(`/en/projects/${noSbom!.id}`);
+        // The always-visible counter does not say a bare 0 either (Codex R6).
+        await expect(vulnTab(page)).toHaveText(tabText(null, en.ScanStatus.tabCountNotScanned));
         await vulnTab(page).click();
         await expect(empty(page)).toHaveText(en.ScanStatus.emptyNoSbom);
         await expect(notice(page)).toHaveCount(0);
@@ -796,5 +798,67 @@ test.describe('project page: a list read after another upload (Codex R5)', () =>
         await expect.poll(() => polled.has(second), { timeout: 15_000 }).toBe(true);
         await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
         await expect(vulnTab(page)).toHaveText(new RegExp(`· scanning\\)$`));
+    });
+});
+
+// Codex R6.
+test.describe('project page: malformed settled answers, leaving mid-check (Codex R6)', () => {
+    let projectId: string | undefined;
+    test.beforeAll(async ({ request }) => {
+        projectId = (await createProject(request, uniqueName('Scan Status R6'))).id;
+        await uploadSbom(request, projectId, cleanSbom);
+    });
+    test.afterEach(async ({ page }) => {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+    });
+    test.afterAll(async ({ request }) => {
+        await deleteProject(request, projectId);
+    });
+
+    test('a completed answer without a finding total reads as unknown and stops fast polling', async ({ page }) => {
+        const polls = await mockScanStatus(page, projectId!, () => ({ status: 'completed', vulnerabilities: {} }) as unknown as ScanBody);
+        await page.goto(`/en/projects/${projectId}`);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'unknown');
+        await page.waitForLoadState('networkidle');
+        const settled = polls.length;
+        await page.waitForTimeout(7_000);
+        expect(polls.length).toBe(settled);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'unknown');
+    });
+
+    test('leaving the page while a settled answer is being checked starts no further requests', async ({ page }) => {
+        let release: () => void = () => {};
+        const held = new Promise<void>((r) => (release = r));
+        let heldSeen = false;
+        let phase: 'running' | 'held' = 'running';
+        let afterRelease = 0;
+        let released = false;
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${projectId}`),
+            async (route) => {
+                if (released) afterRelease++;
+                const path = new URL(route.request().url()).pathname;
+                if (!path.endsWith('/scan-status')) return route.fallback();
+                const res = await route.fetch();
+                const real = await res.json();
+                if (phase === 'held') {
+                    heldSeen = true;
+                    await held;
+                    return route.fulfill({ response: res, json: { ...real, status: 'completed' } });
+                }
+                return route.fulfill({ response: res, json: { ...real, status: 'running' } });
+            },
+        );
+        await page.goto(`/en/projects/${projectId}`);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+        phase = 'held';
+        await expect.poll(() => heldSeen, { timeout: 15_000 }).toBe(true);
+        // Client-side navigation away from the project page.
+        await page.getByRole('link', { name: en.ProjectDetail.backToProjects }).click();
+        await expect(page).toHaveURL(/\/en\/projects\/?$/);
+        released = true;
+        release();
+        await page.waitForTimeout(2_000);
+        expect(afterRelease).toBe(0);
     });
 });

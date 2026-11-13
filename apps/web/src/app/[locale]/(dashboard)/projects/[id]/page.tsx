@@ -276,21 +276,27 @@ export default function ProjectDetailPage() {
   // API exposes no scan generation.
   const scanStatusQuery = useQuery({
     queryKey: queryKeys.projects.scanStatus(projectId, sbomId),
-    queryFn: () =>
+    // `signal` is consumed, so react-query aborts the whole chain when the
+    // page unmounts or the query is cancelled; each stage checks it, so an
+    // answer that arrives late starts no further requests (Codex R6).
+    queryFn: ({ signal }) =>
       logged("Failed to load scan status:", async (): Promise<ScanStatus> => {
         const forSbom = sbomId as string;
         const key = queryKeys.projects.scanStatus(projectId, forSbom);
         let prev = queryClient.getQueryData<ScanStatus>(key);
-        let status = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom));
+        let status = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom, signal));
         for (let attempt = 0; attempt < SETTLE_ATTEMPTS; attempt++) {
           if (status.status === "running") return status;
           const listChanged = settleNeedsListRefetch(prev, status);
+          signal.throwIfAborted();
           if (listChanged) {
             await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
           }
+          signal.throwIfAborted();
           await refetchFresh(queryKeys.projects.latestSbomId(projectId));
           if (!listChanged) return status;
-          const again = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom));
+          signal.throwIfAborted();
+          const again = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom, signal));
           if (sameScanAnswer(again, status)) return status;
           prev = status;
           status = again;
