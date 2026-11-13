@@ -2485,9 +2485,11 @@ New environment variables: `SBOMHUB_REDIS_BREAKER_THRESHOLD`, `SBOMHUB_REDIS_BRE
 
 JPCERT/CC suspended JVN iPedia and MyJVN for system maintenance on 2026-10-22
 with no resumption date (https://jvn.jp/nav/info2026102281.html). Every MyJVN
-API URL answers HTTP 404. With JVN on (the default), every online scan that
+API URL answers HTTP 404. With JVN on (the default) and the default
+`SBOMHUB_JVN_URL`, every online scan that
 looks up at least one component in JVN (not with SBOMHUB_OFFLINE=true) is
-reported `failed`.
+reported `failed`. A `SBOMHUB_JVN_URL` mirror that still answers is not
+affected; keep `on` there.
 
 ### 26.1 The outage is named, and the sweep stops asking
 
@@ -2531,10 +2533,11 @@ again.
 
 Several replicas: set `off` only once every replica sharing the Redis runs this
 version. An older replica cannot report `skipped_sources`, so a scan polled
-through it reads a bare `completed`. The `sbomhub` CLI shows
+through it reads a bare `completed` (or `failed` without the field when another
+source failed). The `sbomhub` CLI shows
 `skipped_sources` (a warning, and the field in `--json`) from sbomhub-cli
 commit `2354439` on; exit codes and `--fail-on` are unchanged. Older CLI builds
-print a bare `completed`; read scan-status directly to see the field.
+print `completed` or `failed` without the skip; read scan-status directly to see the field.
 
 API changes are additive only: reason code `source_unavailable`, scan-status
 field `skipped_sources`, MCP payload field `skipped_sources`.
@@ -2570,7 +2573,7 @@ field `skipped_sources`, MCP payload field `skipped_sources`.
 **Who must act:** nobody. The API is unchanged.
 
 - The project page now reads `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` for the latest SBOM. It reads the latest SBOM, its scan state and the vulnerability list in one fixed-order read, and shows them only when they agree.
-- **Running:** a "scan in progress" notice and provisional counts (`n · scanning`). Polled every 3s, every 10s after a minute; not in hidden tabs. **Failed:** an alert with the `reasons` in words (ja/en), including `source_unavailable` (MyJVN suspended since 2026-10-22) and `interrupted` / `queue_full`; the list may be incomplete. **Unknown** (scan status is kept for at least an hour, §25.3) or not loadable: "not confirmed", with Retry. **`skipped_sources`:** a persistent coverage notice (e.g. JVN not checked, `SBOMHUB_JVN=off`).
+- **Running:** a "scan in progress" notice and provisional counts (`n · scanning`). While the state stays `running`, a poll re-reads only the SBOM and its scan state and keeps the provisional list from the last full read; the list is re-read when the state changes. Polled every 3s, every 10s after a minute; not in hidden tabs. **Failed:** an alert with the `reasons` in words (ja/en), including `source_unavailable` (MyJVN suspended since 2026-10-22) and `interrupted` / `queue_full`; the list may be incomplete. **Unknown** (scan status is kept for at least an hour, §25.3) or not loadable: "not confirmed", with Retry. **`skipped_sources`:** a persistent coverage notice (e.g. JVN not checked, `SBOMHUB_JVN=off`).
 - The page never says a bare "No vulnerabilities found.". `completed` does not prove every source and component was checked: offline mode, `?sources=nvd` and the scheduled scan complete without JVN. A completed scan's empty list is described as "recorded no vulnerabilities for what it could look up". Projects without an SBOM show "not scanned".
 - Counts on the tab, the heading and the truncation banner (now translated) are qualified (scanning / incomplete / unconfirmed / partial / checking / load failed) unless the scan completed with nothing skipped.
 - Settled states are re-read once a minute, and when the tab becomes visible again, so a rescan or a new upload (e.g. from CI) is picked up. A failed vulnerability list load is shown as an error, not as an empty list.

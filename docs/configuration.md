@@ -56,8 +56,9 @@ A full re-read is ~300 NVD requests and ~2.4 GB (measured 2026-11-08), takes rou
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SBOMHUB_JVN` | `on` | `on` or `off` (case-insensitive). `off` switches JVN lookups off: SBOM scans send no request to MyJVN. Any other value, including `false`, `0` or `disabled`, is refused at startup, before migrations run. |
+| `SBOMHUB_JVN_URL` | (empty = `https://jvndb.jvn.jp/myjvn`) | MyJVN API base URL, for example an internal mirror. No request is made when `SBOMHUB_OFFLINE=true` or `SBOMHUB_JVN=off`. |
 
-**When to set `off`.** JPCERT/CC suspended JVN iPedia and MyJVN for system maintenance on 2026-10-22, with no resumption date ([notice](https://jvn.jp/nav/info2026102281.html)). While it is down, every online scan that looks up at least one component in JVN (not with `SBOMHUB_OFFLINE=true`) is reported `failed`, with `reasons` including `fetch_failed` and `source_unavailable`, and `sbomhub scan --fail-on` exits 2. Set `SBOMHUB_JVN=off` to scan with NVD (and the distro step) only until it returns.
+**When to set `off`.** JPCERT/CC suspended JVN iPedia and MyJVN for system maintenance on 2026-10-22, with no resumption date ([notice](https://jvn.jp/nav/info2026102281.html)). While it is down, with the default `SBOMHUB_JVN_URL`, every online scan that looks up at least one component in JVN (not with `SBOMHUB_OFFLINE=true`) is reported `failed`, with `reasons` including `fetch_failed` and `source_unavailable`, and `sbomhub scan --fail-on` exits 2. Set `SBOMHUB_JVN=off` to scan with NVD (and the distro step) only until it returns. If `SBOMHUB_JVN_URL` points at a mirror that still answers, the outage does not affect you; keep `on`.
 
 **What `off` changes.**
 
@@ -70,7 +71,7 @@ A full re-read is ~300 NVD requests and ~2.4 GB (measured 2026-11-08), takes rou
 
 **Undo.** Unset `SBOMHUB_JVN`, or set it to `on`, and restart. Scans run JVN again from the next scan on; existing findings are not changed.
 
-**Several replicas.** Set `off` only once every replica sharing the Redis runs a version that knows `SBOMHUB_JVN`: an older replica cannot report `skipped_sources`, so a scan polled through it reads a bare `completed`. The `sbomhub` CLI shows `skipped_sources` (a warning, and the field in `--json`) from sbomhub-cli commit `2354439` on; older CLI builds print a bare `completed`, so read scan-status directly with those.
+**Several replicas.** Set `off` only once every replica sharing the Redis runs a version that knows `SBOMHUB_JVN`: an older replica cannot report `skipped_sources`, so a scan polled through it reads a bare `completed` (or, if another source failed, `failed` without the field). The `sbomhub` CLI shows `skipped_sources` (a warning, and the field in `--json`) from sbomhub-cli commit `2354439` on; older CLI builds print `completed` or `failed` without the skip, so read scan-status directly with those.
 
 ### OSV (Distro-Aware Matching)
 

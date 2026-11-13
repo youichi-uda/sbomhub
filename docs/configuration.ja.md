@@ -56,8 +56,9 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 | 変数 | 既定値 | 説明 |
 |------|--------|------|
 | `SBOMHUB_JVN` | `on` | `on` または `off` (大文字小文字は区別しない)。`off` で JVN の照会を止め、SBOM スキャンは MyJVN にリクエストを送りません。それ以外の値 (`false`、`0`、`disabled` を含む) は migration の前に起動時に拒否します。 |
+| `SBOMHUB_JVN_URL` | (空 = `https://jvndb.jvn.jp/myjvn`) | MyJVN API のベース URL (社内ミラーなど)。`SBOMHUB_OFFLINE=true` または `SBOMHUB_JVN=off` のときはリクエストしません。 |
 
-**`off` にする場面。** JPCERT/CC は 2026-10-22 にシステムメンテナンスのため JVN iPedia と MyJVN を一時停止し、再開時期は未定です ([お知らせ](https://jvn.jp/nav/info2026102281.html))。停止中は、JVN で 1 件以上の component を照会するオンラインのスキャン (`SBOMHUB_OFFLINE=true` 以外) がすべて `failed` (`reasons` に `fetch_failed` と `source_unavailable` を含む) になり、`sbomhub scan --fail-on` は 2 で終了します。再開までの間 NVD (と distro ステップ) だけでスキャンするには `SBOMHUB_JVN=off` を設定してください。
+**`off` にする場面。** JPCERT/CC は 2026-10-22 にシステムメンテナンスのため JVN iPedia と MyJVN を一時停止し、再開時期は未定です ([お知らせ](https://jvn.jp/nav/info2026102281.html))。停止中は、既定の `SBOMHUB_JVN_URL` のままだと、JVN で 1 件以上の component を照会するオンラインのスキャン (`SBOMHUB_OFFLINE=true` 以外) がすべて `failed` (`reasons` に `fetch_failed` と `source_unavailable` を含む) になり、`sbomhub scan --fail-on` は 2 で終了します。再開までの間 NVD (と distro ステップ) だけでスキャンするには `SBOMHUB_JVN=off` を設定してください。`SBOMHUB_JVN_URL` が応答するミラーを指している場合は停止の影響を受けないので、`on` のままにしてください。
 
 **`off` で変わること。**
 
@@ -70,7 +71,7 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 
 **元に戻す。** `SBOMHUB_JVN` を削除するか `on` にして再起動します。次のスキャンから JVN を再び照会します。既存の検出結果は変わりません。
 
-**複数レプリカ。** `off` にするのは、同じ Redis を使う全レプリカが `SBOMHUB_JVN` を知っている版になってからにしてください。古いレプリカは `skipped_sources` を返せないため、そこを経由して状態を読むと単なる `completed` に見えます。`sbomhub` CLI は sbomhub-cli のコミット `2354439` 以降で `skipped_sources` を表示します (警告と `--json` の項目)。それより古い CLI では単なる `completed` に見えるので、scan-status を直接読んでください。
+**複数レプリカ。** `off` にするのは、同じ Redis を使う全レプリカが `SBOMHUB_JVN` を知っている版になってからにしてください。古いレプリカは `skipped_sources` を返せないため、そこを経由して状態を読むと単なる `completed` (他の情報源が失敗していれば項目なしの `failed`) に見えます。`sbomhub` CLI は sbomhub-cli のコミット `2354439` 以降で `skipped_sources` を表示します (警告と `--json` の項目)。それより古い CLI では飛ばしたことが表示されない `completed` / `failed` に見えるので、scan-status を直接読んでください。
 
 ### OSV (ディストリビューション別の照合)
 
