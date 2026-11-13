@@ -51,6 +51,26 @@ A full re-read is ~300 NVD requests and ~2.4 GB (measured 2026-11-08), takes rou
 
 **Scan deadline.** The default (30 minutes) is about twice the slowest scan measured: a cold scan, without `NVD_API_KEY`, of an SBOM holding a Linux kernel took 68 NVD requests and 14 min 24 s (live NVD, 2026-11-08). Without a key every NVD request is paced at 6 s, so 30 minutes holds fewer than 300 NVD requests; a component costs one request on the keyword path and typically 1-5 on the CPE path (UPGRADE §13.5), so an SBOM beyond roughly 100-250 distinct components cannot finish in time without `NVD_API_KEY` (0.7 s per request) or a longer deadline. When the deadline fires, findings already obtained are committed, the scan is reported `failed` — `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` returns `"reasons": ["deadline_exceeded"]`, the scheduled scan's log reads `scan failed (deadline_exceeded)` — and nothing is cached as a complete answer. The API logs a `WARN` naming the deadline. No database transaction is held while a scan waits on NVD or JVN, so a long deadline costs no connection or locks.
 
+### JVN (MyJVN)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SBOMHUB_JVN` | `on` | `on` or `off` (case-insensitive). `off` switches JVN lookups off: SBOM scans send no request to MyJVN. Any other value, including `false`, `0` or `disabled`, is refused at startup, before migrations run. |
+
+**When to set `off`.** JPCERT/CC suspended JVN iPedia and MyJVN for system maintenance on 2026-10-22, with no resumption date ([notice](https://jvn.jp/nav/info2026102281.html)). While it is down, every online scan that looks up at least one component in JVN (not with `SBOMHUB_OFFLINE=true`) is reported `failed` with `"reasons": ["fetch_failed", "source_unavailable"]`, and `sbomhub scan --fail-on` exits 2. Set `SBOMHUB_JVN=off` to scan with NVD (and the distro step) only until it returns.
+
+**What `off` changes.**
+
+- The scan after an upload and `POST /api/v1/projects/:id/scan` skip the JVN step. A scan whose other sources succeeded reads `completed`; one whose other sources failed still reads `failed` with their reasons.
+- `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` adds `"skipped_sources": ["jvn"]` to a `completed` or `failed` scan that skipped JVN. The field is absent when nothing was skipped. It is kept in the shared scan status (Redis), so every API replica reports it.
+- `POST /api/v1/projects/:id/scan?sources=jvn` (or `nvd,jvn`) still answers `202`; JVN is skipped and reported in `skipped_sources`.
+- The scheduled scan (periodic and forced) runs NVD and the distro step only, with JVN `on` or `off`; this setting does not change it.
+- The API logs a `WARN` at startup naming the setting.
+
+**Undo.** Unset `SBOMHUB_JVN`, or set it to `on`, and restart. Scans run JVN again from the next scan on; existing findings are not changed.
+
+**Several replicas.** Set `off` only once every replica sharing the Redis runs a version that knows `SBOMHUB_JVN`: an older replica cannot report `skipped_sources`, so a scan polled through it reads a bare `completed`. The `sbomhub` CLI (up to the current release) does not show `skipped_sources` either; read scan-status directly to see it.
+
 ### OSV (Distro-Aware Matching)
 
 | Variable | Default | Description |

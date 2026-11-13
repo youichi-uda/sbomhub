@@ -51,6 +51,26 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 
 **スキャン期限。** 既定値 30 分は、計測した中で最も遅いスキャンのおよそ 2 倍です: `NVD_API_KEY` なしで Linux kernel を含む SBOM を cold cache でスキャンすると、NVD への 68 request で 14 分 24 秒かかりました (live NVD、2026-11-08)。API キーなしでは NVD への request が 1 件 6 秒に制限されるため、30 分に入る NVD request は 300 件未満です。component 1 件あたり keyword 経路で 1 request、CPE 経路で通常 1〜5 request かかる (UPGRADE §13.5) ので、distinct な component がおよそ 100〜250 を超える SBOM は `NVD_API_KEY` (1 件 0.7 秒) を設定するか期限を延ばさないと時間内に終わりません。期限に達すると、それまでに得た検出結果は commit され、スキャンは `failed` と報告されます — `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` が `"reasons": ["deadline_exceeded"]` を返し、定期スキャンのログは `scan failed (deadline_exceeded)` になります — また、完全な回答としては何も cache されません。API は期限を名指しする `WARN` を出力します。NVD / JVN の応答を待つ間に DB のトランザクションは保持しないため、期限を長くしても接続やロックは消費しません。
 
+### JVN (MyJVN)
+
+| 変数 | 既定値 | 説明 |
+|------|--------|------|
+| `SBOMHUB_JVN` | `on` | `on` または `off` (大文字小文字は区別しない)。`off` で JVN の照会を止め、SBOM スキャンは MyJVN にリクエストを送りません。それ以外の値 (`false`、`0`、`disabled` を含む) は migration の前に起動時に拒否します。 |
+
+**`off` にする場面。** JPCERT/CC は 2026-10-22 にシステムメンテナンスのため JVN iPedia と MyJVN を一時停止し、再開時期は未定です ([お知らせ](https://jvn.jp/nav/info2026102281.html))。停止中は、JVN で 1 件以上の component を照会するオンラインのスキャン (`SBOMHUB_OFFLINE=true` 以外) がすべて `failed` (`"reasons": ["fetch_failed", "source_unavailable"]`) になり、`sbomhub scan --fail-on` は 2 で終了します。再開までの間 NVD (と distro ステップ) だけでスキャンするには `SBOMHUB_JVN=off` を設定してください。
+
+**`off` で変わること。**
+
+- アップロード後のスキャンと `POST /api/v1/projects/:id/scan` は JVN ステップを飛ばします。他の情報源が成功したスキャンは `completed`、他の情報源が失敗したスキャンはその理由付きで従来どおり `failed` です。
+- `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` は、JVN を飛ばした `completed` / `failed` のスキャンに `"skipped_sources": ["jvn"]` を追加します。何も飛ばしていなければ項目自体がありません。共有スキャン状態 (Redis) に保存されるので、どの API レプリカからも同じく返ります。
+- `POST /api/v1/projects/:id/scan?sources=jvn` (`nvd,jvn` も) は従来どおり `202` を返し、JVN は飛ばして `skipped_sources` で知らせます。
+- 定期スキャン (定期実行・強制実行) は JVN の `on` / `off` にかかわらず NVD と distro ステップだけを実行します。この設定では変わりません。
+- `off` のとき API は起動時に設定名を含む `WARN` を出力します。
+
+**元に戻す。** `SBOMHUB_JVN` を削除するか `on` にして再起動します。次のスキャンから JVN を再び照会します。既存の検出結果は変わりません。
+
+**複数レプリカ。** `off` にするのは、同じ Redis を使う全レプリカが `SBOMHUB_JVN` を知っている版になってからにしてください。古いレプリカは `skipped_sources` を返せないため、そこを経由して状態を読むと単なる `completed` に見えます。`sbomhub` CLI (現行版まで) も `skipped_sources` を表示しないので、確認するには scan-status を直接読んでください。
+
 ### OSV (ディストリビューション別の照合)
 
 | 変数 | 既定値 | 説明 |
