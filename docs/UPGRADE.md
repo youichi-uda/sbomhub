@@ -2494,8 +2494,9 @@ reported `failed`.
 - A JVN lookup that gets no HTTP 200 at all (404, 410, 403, 408, 429, 5xx, or a
   network error / client timeout) is distinguished from one whose answer failed
   validation. When MyJVN is unavailable, scan-status `reasons` gain
-  `source_unavailable` in addition to `fetch_failed`, and the `error` marker
-  reads `jvn: scan failed (fetch_failed, source_unavailable)`. The verdict is
+  `source_unavailable` in addition to `fetch_failed`, and the `error` contains
+  the marker `jvn: scan failed (fetch_failed, source_unavailable)` (other
+  sources' failures can add their own reasons and markers). The verdict is
   unchanged: the scan is `failed`, `sbomhub scan --fail-on` exits 2, NVD
   findings are still committed.
 - After 3 consecutive unavailable lookups the JVN sweep stops querying MyJVN;
@@ -2559,7 +2560,7 @@ field `skipped_sources`, MCP payload field `skipped_sources`.
 **Who must act:** nobody.
 
 - **Dark mode:** the `dark:` variant is now tied to the `.dark` class (`@custom-variant dark`), the same condition as the theme tokens. Nothing sets `.dark`, so the UI renders light regardless of the OS colour scheme. Before, OS dark mode produced a mixed page, for example grey-on-white audit action labels. `color-scheme: light` keeps native controls light. A future theme toggle only has to set `.dark` on `<html>`.
-- **Tooltips:** the KEV, EOL, SSVC and ticket badges and the truncated METI titles are now keyboard focus stops. They open on focus, Enter/Space, hover or tap and close with Escape. Screen readers announce the explanation as the badge's description.
+- **Tooltips:** the KEV, EOL, SSVC and ticket badges and the truncated METI titles are now keyboard focus stops. They open on focus, hover or tap and close with Escape; the badges also toggle with Enter/Space (the METI titles, which are headings, do not). Screen readers announce the explanation as the badge's description.
 - **Narrow screens:** below 768px the dashboard sidebar becomes a menu button in the header. No main page scrolls sideways at 320px; wide tables and tab rows scroll inside their own box.
 - **Project page errors:** "Project not found" now appears only when the API answers 404 (or 400 for a malformed id). A server error (500, §27) or a network failure shows "Failed to load the project…" with a Retry button, instead of implying the project was deleted.
 - New UI strings: `Navigation.openMenu` / `closeMenu` / `mainMenu`, `Common.projectLoadFailed`.

@@ -57,7 +57,7 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 |------|--------|------|
 | `SBOMHUB_JVN` | `on` | `on` または `off` (大文字小文字は区別しない)。`off` で JVN の照会を止め、SBOM スキャンは MyJVN にリクエストを送りません。それ以外の値 (`false`、`0`、`disabled` を含む) は migration の前に起動時に拒否します。 |
 
-**`off` にする場面。** JPCERT/CC は 2026-10-22 にシステムメンテナンスのため JVN iPedia と MyJVN を一時停止し、再開時期は未定です ([お知らせ](https://jvn.jp/nav/info2026102281.html))。停止中は、JVN で 1 件以上の component を照会するオンラインのスキャン (`SBOMHUB_OFFLINE=true` 以外) がすべて `failed` (`"reasons": ["fetch_failed", "source_unavailable"]`) になり、`sbomhub scan --fail-on` は 2 で終了します。再開までの間 NVD (と distro ステップ) だけでスキャンするには `SBOMHUB_JVN=off` を設定してください。
+**`off` にする場面。** JPCERT/CC は 2026-10-22 にシステムメンテナンスのため JVN iPedia と MyJVN を一時停止し、再開時期は未定です ([お知らせ](https://jvn.jp/nav/info2026102281.html))。停止中は、JVN で 1 件以上の component を照会するオンラインのスキャン (`SBOMHUB_OFFLINE=true` 以外) がすべて `failed` (`reasons` に `fetch_failed` と `source_unavailable` を含む) になり、`sbomhub scan --fail-on` は 2 で終了します。再開までの間 NVD (と distro ステップ) だけでスキャンするには `SBOMHUB_JVN=off` を設定してください。
 
 **`off` で変わること。**
 
@@ -70,7 +70,7 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 
 **元に戻す。** `SBOMHUB_JVN` を削除するか `on` にして再起動します。次のスキャンから JVN を再び照会します。既存の検出結果は変わりません。
 
-**複数レプリカ。** `off` にするのは、同じ Redis を使う全レプリカが `SBOMHUB_JVN` を知っている版になってからにしてください。古いレプリカは `skipped_sources` を返せないため、そこを経由して状態を読むと単なる `completed` に見えます。`sbomhub` CLI (現行版まで) も `skipped_sources` を表示しないので、確認するには scan-status を直接読んでください。
+**複数レプリカ。** `off` にするのは、同じ Redis を使う全レプリカが `SBOMHUB_JVN` を知っている版になってからにしてください。古いレプリカは `skipped_sources` を返せないため、そこを経由して状態を読むと単なる `completed` に見えます。`sbomhub` CLI は sbomhub-cli のコミット `2354439` 以降で `skipped_sources` を表示します (警告と `--json` の項目)。それより古い CLI では単なる `completed` に見えるので、scan-status を直接読んでください。
 
 ### OSV (ディストリビューション別の照合)
 
