@@ -1789,8 +1789,11 @@ replaced.
 ### 13.6 JVN: why it was not changed
 
 MyJVN's API (and all of JVN iPedia except the RSS data feeds) has been **out of
-service since early November 2026**; the operator notice (updated 2026-11-06)
-expects service to resume during November. While it is down, every JVN lookup
+service since 2026-10-22**: JPCERT/CC's notice of that date
+(https://jvn.jp/nav/info2026102281.html) says the resumption date is
+undetermined. (An earlier edition of this section said the notice expected
+service to resume in November; it does not.) See §26 for how the outage is
+reported. While it is down, every JVN lookup
 fails and every scan that includes JVN is reported `failed` ("jvn: scan
 failed"); NVD's links are still committed. Nothing in this release changes that.
 
@@ -2476,3 +2479,44 @@ At most this many upload, manual (`POST .../scan`) and forced (`POST /settings/s
 
 New environment variables: `SBOMHUB_REDIS_BREAKER_THRESHOLD`, `SBOMHUB_REDIS_BREAKER_COOLDOWN`, `SBOMHUB_SCAN_TENANT_CONCURRENCY`. An invalid value stops the API at startup.
 
+
+## 26. JVN outage is reported as `source_unavailable`; the sweep stops querying a dead MyJVN
+
+JPCERT/CC suspended JVN iPedia and MyJVN on 2026-10-22 for system maintenance with
+no resumption date (https://jvn.jp/nav/info2026102281.html). Every MyJVN API URL
+answers HTTP 404, so every scan that includes JVN is reported `failed`.
+
+What changes:
+
+- A JVN lookup that gets no HTTP 200 at all (404, 410, 403, 408, 429, 5xx, or a
+  network error / client timeout) is now distinguished from one whose answer
+  failed validation. When MyJVN is unavailable, the scan-status `reasons` gain
+  `source_unavailable` **in addition to** `fetch_failed`, and the `error` marker
+  reads `jvn: scan failed (fetch_failed, source_unavailable)`. The verdict is
+  unchanged: the scan is still `failed`, `sbomhub scan --fail-on` still exits 2,
+  and NVD findings are still committed.
+- After 3 consecutive unavailable lookups the JVN sweep stops querying MyJVN; the
+  remaining components are reported as not checked (server log:
+  `abandoned_unavailable=N`). Before, the sweep sent one request per component
+  at 2/s into the outage.
+- API change is additive: one new reason code, `source_unavailable`. No field was
+  renamed or removed.
+
+Workaround while MyJVN is down: on-demand scans can exclude JVN with
+`POST /api/v1/projects/:id/scan?sbom_id=<id>&sources=nvd` (completes normally).
+Upload scans always include JVN.
+
+## 27. `cvss_version` on the dashboard and SSVC, Ollama finish reasons, project lookup errors
+
+- `cvss_version` (see §20 for the selection rule) is now also returned in the `top_risks` rows of `GET /api/v1/dashboard/summary` (and MCP `GET /api/v1/mcp/dashboard/summary`) and in each row of `GET /api/v1/dashboard/top-risks`. In the SSVC assessment lists (`GET /api/v1/projects/:id/ssvc/assessments`, `GET /api/v1/ssvc/immediate`) it is called `vulnerability_cvss_version`, next to `vulnerability_cvss_score`. The rules are the same as §24.3: it is left out when unknown, and it can appear without a score. This only adds fields, so existing clients are unaffected.
+- MCP server: the five tools that return `cvss_score` (`sbomhub_get_dashboard`, `sbomhub_get_project_dashboard`, `sbomhub_get_vulnerabilities`, `sbomhub_search_cve`, `sbomhub_search_component`) now explain `cvss_version` in their descriptions. Clients that pin `tools/list` descriptions will see those five strings change. Input schemas are unchanged.
+- Ollama: `llm_calls.finish_reason` now records what Ollama reports in `done_reason` (`stop`, `length`, …) instead of always `stop`. A draft that ran into `num_predict` now shows up as `length`. Ollama versions that do not send `done_reason` still record `stop` for finished responses. Rows written before this change are not rewritten, so `stop` on older Ollama rows does not rule out truncation.
+- `GET /api/v1/projects/:id` and `GET /api/v1/cli/projects/:id` now answer **500** `{"error":"failed to get project"}` when the database itself fails (connection, timeout, …). Before, this was reported as 404. A project that does not exist or belongs to another tenant still answers 404 `{"error":"project not found"}`. Clients that treated every 404 here as "deleted" will now see 500 during database outages, and should retry rather than drop the project.
+
+## 28. Web: match confidence on the vulnerability list, popover/card colours
+
+**Who must act:** nobody. The API is unchanged.
+
+- Every finding that is not a distro label (§22) now shows how it was matched (§13.2) and its confidence. Only `nvd_cpe` (CPE match, version verified) appears without a review flag. `nvd_cpe_distro` (medium), `nvd_cpe_unverified`, `nvd_keyword`, `jvn_keyword`, `cve_sync_keyword` (low), links made before §13 ("match method not recorded", confidence unknown) and match methods the page does not recognise lead with "Needs review" / 「要確認」. If `match_method` and `match_confidence` disagree, or `match_confidence` is missing, the lower or unknown value is shown. Nothing is hidden or removed from counts; the explanation (keyboard, touch, screen reader, ja/en) says the finding stays listed until a person reviews it.
+- Tooltips (KEV, EOL, SSVC badges) and Select dropdowns were transparent: `bg-popover` / `bg-card` were never defined in the theme. They now render on an opaque background, and tooltips stay inside the viewport on narrow screens. `bg-card` panels (analytics, audit, reports, settings) now have the card colour (white in light mode).
+- The tooltip's entry animation never existed (tailwindcss-animate was not installed) and its classes were removed; legal/privacy/terms lost the inert `prose` classes. Neither changes what is rendered.
