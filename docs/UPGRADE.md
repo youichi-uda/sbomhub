@@ -2530,8 +2530,10 @@ again.
 
 Several replicas: set `off` only once every replica sharing the Redis runs this
 version. An older replica cannot report `skipped_sources`, so a scan polled
-through it reads a bare `completed`. The `sbomhub` CLI does not display
-`skipped_sources` yet; read scan-status directly to see it.
+through it reads a bare `completed`. The `sbomhub` CLI shows
+`skipped_sources` (a warning, and the field in `--json`) from sbomhub-cli
+commit `2354439` on; exit codes and `--fail-on` are unchanged. Older CLI builds
+print a bare `completed`; read scan-status directly to see the field.
 
 API changes are additive only: reason code `source_unavailable`, scan-status
 field `skipped_sources`, MCP payload field `skipped_sources`.
