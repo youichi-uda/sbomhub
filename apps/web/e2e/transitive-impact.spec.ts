@@ -387,3 +387,84 @@ test.describe('Cross-project transitive blast-radius (M30 F403)', () => {
     await expect(page.getByTestId('transitive-impact-project')).toHaveCount(0);
   });
 });
+
+// Codex (web dark/narrow) R3 Medium-2: component names come from uploaded
+// SBOMs, so an unbroken 90-character name is valid. The component rows, the
+// degraded row and the reused path pills kept that min-content width and
+// widened the search page at 320px.
+test.describe('transitive blast radius at 320px', () => {
+  test.use({ viewport: { width: 320, height: 800 } });
+
+  test('long unbroken project / component names wrap instead of widening the page', async ({ page }) => {
+    const long = (p: string) => `${p}-${'x'.repeat(90)}`;
+    const node = (name: string, type = 'library') => ({ id: `pkg:npm/${name}`, name, version: '1.0.0', type });
+    const paths = {
+      cve_id: CVE,
+      severity: 'HIGH',
+      cvss_score: 7.5,
+      epss_score: 0,
+      in_kev: false,
+      affected_project_count: 2,
+      total_project_count: 2,
+      affected_projects: [
+        {
+          project_id: '11111111-1111-4111-8111-111111111111',
+          project_name: long('project'),
+          sbom_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          format: 'cyclonedx',
+          degraded: false,
+          component_count: 1,
+          affected_components: [
+            {
+              name: long('component'),
+              version: '1.0.0',
+              purl: `pkg:npm/${long('component')}@1.0.0`,
+              in_graph: true,
+              is_direct: false,
+              truncated: false,
+              path_count: 1,
+              paths: [[node(long('app'), 'application'), node(long('parent')), node(long('component'))]],
+            },
+          ],
+        },
+        {
+          project_id: '22222222-2222-4222-8222-222222222222',
+          project_name: long('spdx-project'),
+          sbom_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          format: 'spdx',
+          degraded: true,
+          component_count: 1,
+          affected_components: [
+            {
+              name: long('degraded-component'),
+              version: '1.0.0',
+              purl: `pkg:npm/${long('degraded-component')}@1.0.0`,
+              in_graph: false,
+              is_direct: false,
+              truncated: false,
+              path_count: 0,
+              paths: [],
+            },
+          ],
+        },
+      ],
+    };
+    const impact = {
+      ...IMPACT,
+      affected_projects: [{ ...IMPACT.affected_projects[0], project_name: long('impact-project') }],
+    };
+    await mockSearch(page, paths, impact);
+    await runSearch(page);
+    await page.getByTestId('transitive-impact-toggle').click();
+    const container = page.getByTestId('transitive-impact-projects');
+    await expect(container).toContainText(long('component'));
+    await expect(container).toContainText(long('degraded-component'));
+    await expect(container).toContainText(long('parent'));
+
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    expect(scrollWidth, 'the search page must not scroll sideways at 320px').toBeLessThanOrEqual(clientWidth);
+  });
+});

@@ -412,12 +412,15 @@ export function PathChain({ nodes }: { nodes: ComponentPathNode[] }) {
       {nodes.map((node, ni) => {
         const role = roleFor(ni, nodes.length);
         return (
+          // min-w-0 / max-w-full / wrap-anywhere: a component name is
+          // whatever the uploaded SBOM says, and an unbroken 90-character
+          // one widened the page at 320px.
           <span
             key={`${ni}-${node.id}`}
-            className="inline-flex items-center gap-1.5"
+            className="inline-flex min-w-0 max-w-full items-center gap-1.5"
           >
             <span data-role={role} className={pathNodeClass(role)}>
-              <span className="font-medium">{node.name || node.id}</span>
+              <span className="min-w-0 font-medium wrap-anywhere">{node.name || node.id}</span>
               {node.version && (
                 <span className="font-mono text-xs opacity-80">
                   {node.version}
@@ -437,7 +440,7 @@ export function PathChain({ nodes }: { nodes: ComponentPathNode[] }) {
 /** Per-role pill styling for the textual chain nodes. */
 function pathNodeClass(role: PathNodeRole): string {
   const base =
-    "inline-flex items-center gap-1.5 rounded px-2 py-0.5 border text-xs";
+    "inline-flex min-w-0 max-w-full items-center gap-1.5 rounded px-2 py-0.5 border text-xs";
   switch (role) {
     case "root":
       return `${base} border-indigo-300 bg-indigo-50 text-indigo-900 dark:border-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-200`;
