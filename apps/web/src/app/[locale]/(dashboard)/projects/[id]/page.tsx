@@ -32,6 +32,7 @@ import {
   parseScanStatus,
   pollIntervalMs,
   scanView,
+  sameScanAnswer,
   settleNeedsListRefetch,
   type ListState,
   type ScanStatus,
@@ -164,6 +165,25 @@ export default function ProjectDetailPage() {
   });
   const components = componentsQuery.data ?? [];
 
+  // Latest SBOM id, used to check license violations. Through the API
+  // client so it carries the auth / org headers (it used to be a bare fetch
+  // that 401'd in Clerk mode — M64 residual). No SBOM (404) is null; any
+  // other failure is an error the license tab shows (Codex R1: treating it
+  // as "no SBOM" silently showed no violations).
+  const sbomIdQuery = useQuery({
+    queryKey: queryKeys.projects.latestSbomId(projectId),
+    queryFn: () =>
+      logged("Failed to load SBOM ID:", async (): Promise<string | null> =>
+        (await api.projects.getLatestSbom(projectId))?.id ?? null),
+    // Re-read once a minute (visible tab only): an SBOM uploaded elsewhere
+    // (CI) while this page is open — also while the previous one is still
+    // being scanned (Codex R3) — moves the page to it (the scan-status key
+    // follows the id). The scan-status query also re-reads it after every
+    // settled answer.
+    refetchInterval: (query) => (query.state.status === "success" ? 60000 : false),
+  });
+  const sbomId = sbomIdQuery.data ?? null;
+
   // #F28: the meta variant reads X-Total-Count instead of inferring the
   // count from the (page-truncated) array length. vulnTotalCount carries
   // that server-side total (M1 Codex review #F28): the tab counter and the
@@ -174,7 +194,7 @@ export default function ProjectDetailPage() {
   // (this replaces the M38 Phase D F448 request-sequence guard). The
   // previous order stays on screen until the new one arrives (or fails).
   const vulnerabilitiesQuery = useQuery({
-    queryKey: queryKeys.projects.vulnerabilities(projectId, vulnSort),
+    queryKey: queryKeys.projects.vulnerabilities(projectId, vulnSort, sbomId),
     queryFn: () =>
       logged("Failed to load vulnerabilities:", async (): Promise<{ data: Vulnerability[]; totalCount: number }> => {
         const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId, {
@@ -182,8 +202,13 @@ export default function ProjectDetailPage() {
         });
         return { data: data || [], totalCount };
       }),
+    // Wait for the latest SBOM lookup (success or failure) so the list is
+    // keyed by the SBOM it belongs to; a failed lookup still loads it.
+    enabled: !sbomIdQuery.isPending,
   });
-  const vulnerabilitiesPage = useRetainedData(vulnerabilitiesQuery.data, projectId);
+  // Rows are kept through a refetch or a sort change of the SAME SBOM only:
+  // another SBOM's rows never stand in for this one's (Codex R4).
+  const vulnerabilitiesPage = useRetainedData(vulnerabilitiesQuery.data, `${projectId}:${sbomId ?? ""}`);
   const vulnerabilities: Vulnerability[] = vulnerabilitiesPage?.data ?? [];
   const vulnTotalCount = vulnerabilitiesPage?.totalCount ?? 0;
   const vulnLoadError = loadErrorState(vulnerabilitiesQuery.isError, vulnerabilities.length > 0);
@@ -211,24 +236,6 @@ export default function ProjectDetailPage() {
   });
   const licensePolicies = licensePoliciesQuery.data ?? [];
 
-  // Latest SBOM id, used to check license violations. Through the API
-  // client so it carries the auth / org headers (it used to be a bare fetch
-  // that 401'd in Clerk mode — M64 residual). No SBOM (404) is null; any
-  // other failure is an error the license tab shows (Codex R1: treating it
-  // as "no SBOM" silently showed no violations).
-  const sbomIdQuery = useQuery({
-    queryKey: queryKeys.projects.latestSbomId(projectId),
-    queryFn: () =>
-      logged("Failed to load SBOM ID:", async (): Promise<string | null> =>
-        (await api.projects.getLatestSbom(projectId))?.id ?? null),
-    // Re-read once a minute (visible tab only): an SBOM uploaded elsewhere
-    // (CI) while this page is open — also while the previous one is still
-    // being scanned (Codex R3) — moves the page to it (the scan-status key
-    // follows the id). The scan-status query also re-reads it after every
-    // settled answer.
-    refetchInterval: (query) => (query.state.status === "success" ? 60000 : false),
-  });
-  const sbomId = sbomIdQuery.data ?? null;
 
   // Background scan of the latest SBOM (integration Codex review 2026-11-13,
   // High): the empty list and the count say what the scan state allows
@@ -273,7 +280,7 @@ export default function ProjectDetailPage() {
           await refetchFresh(queryKeys.projects.latestSbomId(projectId));
           if (!listChanged) return status;
           const again = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom));
-          if (again.status === status.status && again.total === status.total) return status;
+          if (sameScanAnswer(again, status)) return status;
           prev = status;
           status = again;
         }
@@ -535,10 +542,11 @@ export default function ProjectDetailPage() {
       await queryClient.cancelQueries({ queryKey: latestKey });
       if (created && typeof created.id === "string" && created.id !== "") {
         queryClient.setQueryData(latestKey, created.id);
-      } else {
-        await refetchFresh(latestKey);
       }
-      void refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
+      // Then confirm it is still the latest (another upload may have landed
+      // in between, Codex R4); the list is keyed by the SBOM id, so a new id
+      // brings a new list by itself.
+      void refetchFresh(latestKey);
       alert(tp("uploadSuccess"));
       selectTab("components");
     } catch (error) {

@@ -237,9 +237,31 @@ export function pollIntervalMs(state: ScanState | undefined, answers: number): n
 export function settleNeedsListRefetch(prev: ScanStatus | undefined, next: ScanStatus): boolean {
   if (next.status === "running") return false;
   if (prev === undefined) return true;
-  // The same settled state with a different total: another scan of this
-  // SBOM ran between the two answers and changed its findings (Codex R2).
-  return prev.status !== next.status || prev.total !== next.total || next.total === null;
+  // Any difference the page would show — e.g. the same settled state with a
+  // different total or coverage: another scan of this SBOM ran between the
+  // two answers (Codex R2 / R4).
+  return !sameScanAnswer(prev, next);
+}
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+/**
+ * Whether two scan-status answers agree on everything the page shows from
+ * them: state, finding total, skipped sources, reasons and failure marker
+ * (Codex R4: agreeing on state and total alone let a changed coverage
+ * through). An unknown total never proves agreement.
+ */
+export function sameScanAnswer(a: ScanStatus, b: ScanStatus): boolean {
+  return (
+    a.status === b.status &&
+    a.total !== null &&
+    a.total === b.total &&
+    sameList(a.skippedSources, b.skippedSources) &&
+    sameList(a.reasons, b.reasons) &&
+    (a.error ?? "") === (b.error ?? "")
+  );
 }
 
 /** "ScanStatus" message keys that qualify the vulnerability count. */

@@ -25,6 +25,7 @@ import { describe, test } from "node:test";
 import {
   countQualifierKey,
   emptyStateKey,
+  sameScanAnswer,
   parseScanStatus,
   pollIntervalMs,
   reasonItems,
@@ -195,6 +196,24 @@ describe("pollIntervalMs", () => {
 // react-query v5 reuses an in-flight request that has no data yet. The list
 // is refetched (fresh, after the status answer arrived) whenever the status
 // settles into a state it was not in before.
+// Codex R4 High: two answers agree only if everything the page shows from
+// them agrees — not just state and total (skipped sources, reasons, error).
+describe("sameScanAnswer", () => {
+  const base = { status: "completed", total: 0, reasons: [], skippedSources: [] };
+  test("identical answers agree", () => {
+    assert.equal(sameScanAnswer(base, { ...base }), true);
+    assert.equal(sameScanAnswer({ ...base, status: "failed", reasons: ["a", "b"], error: "x" }, { ...base, status: "failed", reasons: ["a", "b"], error: "x" }), true);
+  });
+  test("any shown difference disagrees", () => {
+    assert.equal(sameScanAnswer(base, { ...base, status: "failed" }), false);
+    assert.equal(sameScanAnswer(base, { ...base, total: 1 }), false);
+    assert.equal(sameScanAnswer(base, { ...base, skippedSources: ["jvn"] }), false);
+    assert.equal(sameScanAnswer({ ...base, status: "failed", reasons: ["a"] }, { ...base, status: "failed", reasons: ["a", "b"] }), false);
+    assert.equal(sameScanAnswer({ ...base, status: "failed", error: "x" }, { ...base, status: "failed", error: "y" }), false);
+    assert.equal(sameScanAnswer({ ...base, total: null }, { ...base, total: null }), false, "an unknown total never proves agreement");
+  });
+});
+
 describe("settleNeedsListRefetch", () => {
   const st = (status, total = 0) => ({ status, total, reasons: [], skippedSources: [] });
   test("a settled state the page did not have before refetches the list", () => {
@@ -210,6 +229,9 @@ describe("settleNeedsListRefetch", () => {
   test("the same settled state with a different total refetches the list", () => {
     assert.equal(settleNeedsListRefetch(st("completed", 2), st("completed", 3)), true);
     assert.equal(settleNeedsListRefetch(st("completed", 2), st("completed", null)), true);
+  });
+  test("a changed coverage (skipped sources) also refetches (Codex R4)", () => {
+    assert.equal(settleNeedsListRefetch(st("completed", 2), { ...st("completed", 2), skippedSources: ["jvn"] }), true);
   });
   test("not while running, and not when state and total are unchanged", () => {
     assert.equal(settleNeedsListRefetch(undefined, st("running")), false);

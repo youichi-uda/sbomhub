@@ -43,8 +43,12 @@ export const queryKeys = {
     byId,
     detail: (projectId: string) => [...byId(projectId), "detail"] as const,
     components: (projectId: string) => [...byId(projectId), "components"] as const,
-    vulnerabilities: (projectId: string, sort: "cvss" | "epss") =>
-      [...byId(projectId), "vulnerabilities", { sort }] as const,
+    // `sbomId` is the latest SBOM the page knows of (null: none, or not
+    // known): the list endpoint answers for the latest SBOM, so a new one
+    // (an upload, CI) is a new list — never the previous SBOM's rows under
+    // the new SBOM's scan state (Codex R4).
+    vulnerabilities: (projectId: string, sort: "cvss" | "epss", sbomId: string | null) =>
+      [...byId(projectId), "vulnerabilities", { sort, sbomId }] as const,
     // Prefix of every sort's entry: a scan reaching a terminal state
     // invalidates all of them (src/lib/scan-status.ts needsVulnRefetch).
     vulnerabilitiesAll: (projectId: string) => [...byId(projectId), "vulnerabilities"] as const,

@@ -695,3 +695,66 @@ test.describe('project page: settled answers that move, uploads during a scan, t
         await expect(banner).toHaveCount(0);
     });
 });
+
+// Codex R4.
+test.describe('project page: list bound to its SBOM, coverage changes between reads (Codex R4)', () => {
+    const projects: string[] = [];
+    test.afterEach(async ({ page }) => {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+    });
+    test.afterAll(async ({ request }) => {
+        for (const id of projects) await deleteProject(request, id);
+    });
+
+    test("a newer SBOM found while scanning shows its own list, not the previous SBOM's rows", async ({ page, request }) => {
+        const vp = await createVulnerableProject(request, 'Scan Status List Bound');
+        projects.push(vp.projectId);
+        await page.clock.install();
+        const polled = new Set<string>();
+        await mockScanStatus(page, vp.projectId, () => ({ status: 'running' }));
+        page.on('request', (r) => {
+            const m = new URL(r.url()).pathname.match(/\/sboms\/([^/]+)\/scan-status$/);
+            if (m) polled.add(m[1]);
+        });
+        await page.goto(`/en/projects/${vp.projectId}`);
+        await vulnTab(page).click();
+        await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length);
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, en.ScanStatus.tabCountRunning));
+        // CI uploads a clean SBOM; the page finds it on its next latest-SBOM read.
+        const second = await uploadSbom(request, vp.projectId, cleanSbom);
+        await page.clock.fastForward('01:05');
+        await expect.poll(() => polled.has(second), { timeout: 15_000 }).toBe(true);
+        await expect(page.getByTestId('vuln-entry')).toHaveCount(0);
+        await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountRunning));
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyRunning);
+    });
+
+    test('skipped sources that appear between two settled reads are shown, not the first read', async ({ page, request }) => {
+        const p = await createProject(request, uniqueName('Scan Status Coverage Moves'));
+        projects.push(p.id);
+        await uploadSbom(request, p.id, cleanSbom);
+        let phase: 'running' | 'settling' = 'running';
+        let listServedWhileSettling = false;
+        await mockScanStatus(page, p.id, () =>
+            phase === 'running'
+                ? { status: 'running' }
+                : { status: 'completed', skipped_sources: listServedWhileSettling ? ['jvn'] : [] },
+        );
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${p.id}/vulnerabilities`,
+            async (route) => {
+                const res = await route.fetch();
+                await route.fulfill({ response: res });
+                if (phase === 'settling') listServedWhileSettling = true;
+            },
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveAttribute('data-empty-state', 'emptyRunning');
+        await page.waitForLoadState('networkidle');
+        phase = 'settling';
+        await expect(page.getByTestId('scan-coverage-notice')).toBeVisible({ timeout: 15_000 });
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyPartial.replace('{sources}', 'JVN'));
+        await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountPartial));
+    });
+});
