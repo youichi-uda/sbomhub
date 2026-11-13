@@ -34,7 +34,7 @@ import {
   scanView,
   type ListState,
 } from "@/lib/scan-status";
-import { readSnapshot, SnapshotError, type Snapshot } from "@/lib/scan-snapshot";
+import { readSnapshot, type Snapshot } from "@/lib/scan-snapshot";
 
 // M13-1 #87 / F174: "apikeys" rejoined the Tab union so the project
 // detail page surfaces project-scoped API key CRUD again.
@@ -120,6 +120,10 @@ export default function ProjectDetailPage() {
   // artefact and matches the CLI default (`sbomhub evidence-pack --format
   // zip`). "markdown" keeps the original single-file bundle one click away.
   const [evidencePackFormat, setEvidencePackFormat] = useState<"zip" | "markdown">("zip");
+  // Snapshot refreshes the operator started that are still running, and
+  // whether one of them follows an upload (see refreshVulnerabilities).
+  const [refreshing, setRefreshing] = useState(0);
+  const [awaitingNewSbom, setAwaitingNewSbom] = useState(false);
 
   // ---- data loading (react-query) ----------------------------------
   //
@@ -194,11 +198,12 @@ export default function ProjectDetailPage() {
       logged("Failed to load vulnerabilities:", (): Promise<Snapshot<Vulnerability>> =>
         readSnapshot<Vulnerability>(
           {
-            latestSbomId: async () => (await api.projects.getLatestSbom(projectId))?.id ?? null,
+            latestSbomId: async () => (await api.projects.getLatestSbom(projectId, signal))?.id ?? null,
             scanStatus: async (id) => parseScanStatus(await api.projects.getScanStatus(projectId, id, signal)),
             list: async () => {
               const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId, {
                 sort: vulnSort,
+                signal,
               });
               return { data: data || [], totalCount };
             },
@@ -219,20 +224,23 @@ export default function ProjectDetailPage() {
   const vulnerabilities: Vulnerability[] = snapshot?.list.data ?? [];
   const vulnTotalCount = snapshot?.list.totalCount ?? 0;
   const vulnLoadError = loadErrorState(snapshotQuery.isError, vulnerabilities.length > 0);
-  const snapshotFailedAt =
-    snapshotQuery.error instanceof SnapshotError ? snapshotQuery.error.stage : snapshotQuery.isError ? "latest" : null;
   // The list for the CURRENT sort is a validated answer (rows retained from
-  // the other sort are not; Codex R2), and its last read did not fail.
+  // the other sort are not; Codex R2), its last read did not fail, and no
+  // refresh the operator asked for (tab, Retry, upload) is still running —
+  // a background poll does not unsettle it, but those refreshes exist
+  // because the answer on screen may be out of date (Codex R10).
   const vulnList: ListState = {
     failed: snapshotQuery.isError,
-    fresh: snapshotQuery.isSuccess,
+    fresh: snapshotQuery.isSuccess && refreshing === 0,
   };
   const scan = scanView({
     sbom: {
-      pending: snapshot === undefined && !snapshotQuery.isError,
-      // The latest SBOM could not be read (now), or nothing was ever read:
-      // nothing about the scan is known.
-      error: snapshotFailedAt === "latest" || (snapshot === undefined && snapshotQuery.isError),
+      // After an upload the previous SBOM's state does not apply any more.
+      pending: (snapshot === undefined && !snapshotQuery.isError) || awaitingNewSbom,
+      // A refresh that failed — at any stage — leaves nothing current to say
+      // about the latest SBOM's scan (it may be a new SBOM whose list could
+      // not be read; Codex R10). The previous answer is not shown as current.
+      error: snapshotQuery.isError,
       id: snapshot?.sbomId ?? null,
     },
     status: {
@@ -248,10 +256,19 @@ export default function ProjectDetailPage() {
       ? String(vulnTotalCount)
       : t(`ScanStatus.${vulnTotalQualifier}`, { count: String(vulnTotalCount) });
 
-  // Opening the vulnerabilities tab, the scan notice's Retry and the list's
-  // Retry all re-read the whole snapshot with a request that starts now.
-  async function refreshVulnerabilities() {
-    await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
+  // Opening the vulnerabilities tab, the scan notice's Retry, the list's
+  // Retry and an upload re-read the whole snapshot with a request that
+  // starts now; until it answers the counts are "checking", and after an
+  // upload the scan state too.
+  async function refreshVulnerabilities(opts?: { newSbom?: boolean }) {
+    setRefreshing((n) => n + 1);
+    if (opts?.newSbom) setAwaitingNewSbom(true);
+    try {
+      await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
+    } finally {
+      setRefreshing((n) => n - 1);
+      if (opts?.newSbom) setAwaitingNewSbom(false);
+    }
   }
 
   const vexQuery = useQuery({
@@ -474,7 +491,7 @@ export default function ProjectDetailPage() {
       // license tab's SBOM id. refetchFresh cancels reads that started
       // before the upload, so their answers (the OLD SBOM) are discarded
       // (Codex R1 High).
-      void refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
+      void refreshVulnerabilities({ newSbom: true });
       void refetchFresh(queryKeys.projects.latestSbomId(projectId));
       alert(tp("uploadSuccess"));
       selectTab("components");

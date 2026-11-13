@@ -1014,3 +1014,82 @@ test.describe('project page: overlapping reads (Codex R9)', () => {
         await expect(vulnTab(page)).toHaveText(new RegExp(`· scanning\\)$`));
     });
 });
+
+// Codex R10: a refresh of the same sort, and a refresh that fails on a new SBOM.
+test.describe('project page: refreshes of the snapshot (Codex R10)', () => {
+    const projects: string[] = [];
+    test.afterEach(async ({ page }) => {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+    });
+    test.afterAll(async ({ request }) => {
+        for (const id of projects) await deleteProject(request, id);
+    });
+
+    test('after an upload, the previous SBOM\'s final count is not shown while the new one is read', async ({ page, request }) => {
+        const p = await createProject(request, uniqueName('Scan Status R10 Upload'));
+        projects.push(p.id);
+        await uploadSbom(request, p.id, cleanSbom);
+        page.on('dialog', (d) => void d.accept());
+        let holdLatest = false;
+        let release: () => void = () => {};
+        const held = new Promise<void>((r) => (release = r));
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${p.id}/sbom`,
+            async (route) => {
+                if (route.request().method() !== 'GET' || !holdLatest) return route.fallback();
+                await held;
+                return route.fallback();
+            },
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
+        await expect(vulnTab(page)).toHaveText(tabText(0, null));
+        await page.waitForLoadState('networkidle');
+        // Upload from the page; the re-read of the latest SBOM is slow.
+        holdLatest = true;
+        await page.getByRole('button', { name: new RegExp(`^${en.Projects.upload}`) }).click();
+        await page.locator('input[type="file"]').setInputFiles({
+            name: 'next.json',
+            mimeType: 'application/json',
+            buffer: Buffer.from(JSON.stringify(vulnerableSbom())),
+        });
+        await vulnTab(page).click();
+        // The old SBOM's completed state is not presented as final meanwhile.
+        await expect(vulnTab(page)).not.toHaveText(tabText(0, null));
+        await expect(page.locator('[data-empty-state="emptyCompleted"]')).toHaveCount(0);
+        holdLatest = false;
+        release();
+    });
+
+    test('a refresh that fails after a new SBOM was found does not keep the old SBOM\'s notice', async ({ page, request }) => {
+        const p = await createProject(request, uniqueName('Scan Status R10 Failed Refresh'));
+        projects.push(p.id);
+        const first = await uploadSbom(request, p.id, cleanSbom);
+        let failList = false;
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${p.id}/sboms/`) && url.pathname.endsWith('/scan-status'),
+            async (route) => {
+                const res = await route.fetch();
+                const real = await res.json();
+                const json = real.sbom_id === first
+                    ? { ...real, status: 'failed', reasons: ['source_unavailable'] }
+                    : { ...real, status: 'completed' };
+                await route.fulfill({ response: res, json });
+            },
+        );
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${p.id}/vulnerabilities`,
+            (route) => (failList ? route.fulfill({ status: 500, json: { error: 'internal' } }) : route.fallback()),
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'failed');
+        await page.waitForLoadState('networkidle');
+        await uploadSbom(request, p.id, cleanSbom); // CI: a new SBOM…
+        failList = true; // …whose list cannot be read
+        await vulnTab(page).click();
+        await expect(page.getByTestId('vulnerabilities-load-error')).toBeVisible();
+        // The first SBOM's "failed" notice no longer stands for the latest SBOM.
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'unavailable');
+    });
+});

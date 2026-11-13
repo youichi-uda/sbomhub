@@ -2233,9 +2233,9 @@ export const api = {
      * found"). Any other failure throws. Goes through request() so it
      * carries the auth / org headers (M64 residual).
      */
-    getLatestSbom: async (id: string): Promise<Sbom | null> => {
+    getLatestSbom: async (id: string, signal?: AbortSignal): Promise<Sbom | null> => {
       try {
-        return (await request<Sbom>(`/api/v1/projects/${id}/sbom`)) ?? null;
+        return (await request<Sbom>(`/api/v1/projects/${id}/sbom`, signal ? { signal } : undefined)) ?? null;
       } catch (err) {
         if (err instanceof APIError && err.status === 404) return null;
         throw err;
@@ -2328,7 +2328,7 @@ export const api = {
     // regression signal.
     getVulnerabilitiesWithMeta: async (
       id: string,
-      opts?: { limit?: number; offset?: number; sort?: "epss" | "cvss" },
+      opts?: { limit?: number; offset?: number; sort?: "epss" | "cvss"; signal?: AbortSignal },
     ): Promise<{ data: Vulnerability[]; totalCount: number }> => {
       const params = new URLSearchParams();
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
@@ -2354,7 +2354,7 @@ export const api = {
         if (orgId) headers["X-Clerk-Org-ID"] = orgId;
       }
 
-      const res = await fetch(`${API_URL}${path}`, { headers });
+      const res = await fetch(`${API_URL}${path}`, { headers, signal: opts?.signal });
       if (!res.ok) {
         let body: Record<string, unknown> | undefined;
         try {
