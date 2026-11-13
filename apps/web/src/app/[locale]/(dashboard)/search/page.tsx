@@ -87,15 +87,15 @@ function CVESearchResults({ result, locale }: { result: CVESearchResult; locale:
                 <div key={project.project_id} className="border rounded-lg p-4">
                   <Link
                     href={`/${locale}/projects/${project.project_id}`}
-                    className="font-medium text-blue-500 hover:underline"
+                    className="font-medium text-blue-500 hover:underline wrap-anywhere"
                   >
                     {project.project_name}
                   </Link>
                   <div className="mt-2 space-y-1">
                     {project.affected_components.map((comp) => (
-                      <div key={comp.id} className="flex items-center gap-2 text-sm">
+                      <div key={comp.id} className="flex flex-wrap items-center gap-x-2 text-sm">
                         <span className="text-red-500">●</span>
-                        <span className="font-mono">{comp.name}@{comp.version}</span>
+                        <span className="min-w-0 font-mono wrap-anywhere">{comp.name}@{comp.version}</span>
                         {comp.fixed_version && (
                           <span className="text-muted-foreground">
                             → {t("upgradeRecommended", { version: comp.fixed_version })}
@@ -126,7 +126,7 @@ function CVESearchResults({ result, locale }: { result: CVESearchResult; locale:
                 <Link
                   key={project.project_id}
                   href={`/${locale}/projects/${project.project_id}`}
-                  className="text-sm text-muted-foreground hover:text-foreground"
+                  className="min-w-0 text-sm text-muted-foreground hover:text-foreground wrap-anywhere"
                 >
                   {project.project_name}
                 </Link>

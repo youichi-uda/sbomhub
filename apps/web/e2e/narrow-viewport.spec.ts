@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import en from '../messages/en.json';
-import { createProject, createVulnerableProject, deleteProject, type VulnerableProject } from './fixtures/vuln-project';
+import { API_BASE_URL, createVulnerableProject, deleteProject, type VulnerableProject } from './fixtures/vuln-project';
 
 // At a 320px viewport (the narrowest phone width WCAG 1.4.10 reflow asks
 // for) no page may scroll sideways. The dashboard shell had a fixed 256px
@@ -119,6 +119,12 @@ test.describe(`no horizontal page scroll at ${WIDTH}px`, () => {
     let project: VulnerableProject | undefined;
     try {
       project = await createVulnerableProject(request, 'Narrow Viewport Project');
+      // Codex R2 Medium-1: a populated VEX row (CVE id + status + severity +
+      // Delete in nowrap rows) widened the page; an empty tab could not show it.
+      const vex = await request.post(`${API_BASE_URL}/api/v1/projects/${project.projectId}/vex`, {
+        data: { vulnerability_id: project.vuln('CVE-2021-44228').id, status: 'under_investigation' },
+      });
+      expect(vex.status(), `VEX create: ${await vex.text()}`).toBe(201);
       await page.goto(`/en/projects/${project.projectId}`);
       await expect(page.getByRole('heading', { level: 1, name: project.projectName })).toBeVisible();
       const tabs = [
@@ -135,6 +141,9 @@ test.describe(`no horizontal page scroll at ${WIDTH}px`, () => {
         if (name === en.Vulnerabilities.title) {
           await expect(page.getByTestId('vuln-entry')).toHaveCount(4, { timeout: 15_000 });
         }
+        if (name === 'VEX') {
+          await expect(page.getByText('CVE-2021-44228', { exact: true })).toBeVisible();
+        }
         await page.waitForLoadState('networkidle');
         await expectNoHorizontalScroll(page, `project tab "${name}"`);
       }
@@ -143,25 +152,30 @@ test.describe(`no horizontal page scroll at ${WIDTH}px`, () => {
     }
   });
 
-  // Codex R1 Medium-3: an unbroken project name (a hash, a repository id)
-  // kept its min-content width inside the wrapped header rows.
-  test('a long unbroken project name wraps on every project page', async ({ page, request }) => {
-    const name = `narrow-${'x'.repeat(90)}-${Date.now()}`;
-    const project = await createProject(request, name);
+  // Codex R1 Medium-3 / R2 Medium-2: an unbroken project name (a hash, a
+  // repository id) kept its min-content width. The project has the fixture
+  // vulnerabilities so it also shows up in the CVE search results; every
+  // page checked here asserts the name is actually on screen.
+  test('a long unbroken project name wraps wherever it is shown', async ({ page, request }) => {
+    let project: VulnerableProject | undefined;
     try {
-      const base = `/en/projects/${project.id}`;
-      for (const path of ['/en/projects', '/en/dashboard', base, `${base}/triage`, `${base}/cra-reports`, `${base}/meti`, `${base}/compliance`, `${base}/diff`, `${base}/share`]) {
+      project = await createVulnerableProject(request, `narrow-${'x'.repeat(90)}`);
+      const name = project.projectName;
+      const base = `/en/projects/${project.projectId}`;
+      for (const path of ['/en/projects', '/en/dashboard', base, `${base}/triage`, `${base}/cra-reports`, `${base}/meti`]) {
         await page.goto(path);
+        await expect(page.getByText(name, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
         await page.waitForLoadState('networkidle');
-        // The name is on screen (not a loading placeholder) where the page shows it.
-        // (The list pages may page it out among other specs' projects.)
-        if (path === base || /\/(triage|cra-reports|meti)$/.test(path)) {
-          await expect(page.getByText(name, { exact: true }).first()).toBeVisible();
-        }
         await expectNoHorizontalScroll(page, `${path} with a long project name`);
       }
+
+      await page.goto('/en/search');
+      await page.getByPlaceholder(en.Search.cvePlaceholder).fill('CVE-2021-44228');
+      await page.getByPlaceholder(en.Search.cvePlaceholder).press('Enter');
+      await expect(page.getByRole('link', { name, exact: true }).first()).toBeVisible({ timeout: 15_000 });
+      await expectNoHorizontalScroll(page, 'CVE search results with a long project name');
     } finally {
-      await deleteProject(request, project.id);
+      await deleteProject(request, project?.projectId);
     }
   });
 

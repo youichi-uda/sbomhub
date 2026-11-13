@@ -928,8 +928,10 @@ export default function ProjectDetailPage() {
               <div className="space-y-4">
                 {vexStatements.map((vex) => (
                   <div key={vex.id} className="border rounded-lg p-4">
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex items-center gap-2">
+                    {/* Wraps at phone width: the CVE id, status, severity and
+                        Delete overran 320px by ~50px (Codex R2 Medium-1). */}
+                    <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
+                      <div className="flex min-w-0 flex-wrap items-center gap-2">
                         <span className="font-mono font-bold">{vex.vulnerability_cve_id}</span>
                         <Badge variant={getVexStatusVariant(vex.status)}>
                           {vex.status.replace("_", " ")}
