@@ -250,6 +250,7 @@ test.describe('project page: scan status of the latest SBOM', () => {
         await expect(empty(page)).toHaveText(en.ScanStatus.emptyUnavailable);
         await expect(page.getByText(en.ProjectDetail.noVulnerabilities, { exact: true })).toHaveCount(0);
 
+        await page.waitForLoadState('networkidle');
         await page.unroute(path);
         await notice(page).getByRole('button', { name: en.Common.retry }).click();
         await expect(notice(page)).toHaveCount(0);
@@ -283,6 +284,8 @@ test.describe('project page: scan status of the latest SBOM', () => {
         await expect(err).toContainText(en.ScanStatus.listLoadFailed);
         await expect(empty(page)).toHaveCount(0);
         await expect(page.getByText(en.ProjectDetail.noVulnerabilities, { exact: true })).toHaveCount(0);
+        // Nothing still in flight may end the outage's effect by itself.
+        await page.waitForLoadState('networkidle');
         await page.unroute(path);
         await err.getByRole('button', { name: en.Common.retry }).click();
         await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
@@ -499,7 +502,7 @@ test.describe('project page: the scan state and the list stay paired (Codex R2)'
         const vp = await createVulnerableProject(request, 'Scan Status Sort Race');
         projects.push(vp.projectId);
         let phase: 'running' | 'completed' = 'running';
-        await mockScanStatus(page, vp.projectId, () => ({ status: phase }));
+        const statusPolls = await mockScanStatus(page, vp.projectId, () => ({ status: phase }));
         let releaseEpss: () => void = () => {};
         const epssHeld = new Promise<void>((r) => (releaseEpss = r));
         let cvssSettleSeen = false;
@@ -513,7 +516,9 @@ test.describe('project page: the scan state and the list stay paired (Codex R2)'
                 }
                 if (sort === 'epss') await epssHeld;
                 else {
-                    cvssSettleSeen = true;
+                    // the list refetch of the settled answer (a completed
+                    // answer has been served), not some earlier refresh
+                    if (statusPolls.includes('completed')) cvssSettleSeen = true;
                     await new Promise((r) => setTimeout(r, 1_500));
                 }
                 return route.fallback();
@@ -527,9 +532,11 @@ test.describe('project page: the scan state and the list stay paired (Codex R2)'
         await expect.poll(() => cvssSettleSeen, { timeout: 15_000 }).toBe(true);
         await page.getByRole('button', { name: en.Vulnerabilities.sortByEpss }).click();
         await expect(notice(page)).toHaveCount(0, { timeout: 15_000 });
-        // Completed is committed, but the EPSS list is still loading: not final.
-        await expect(empty(page)).toHaveAttribute('data-empty-state', 'emptyChecking');
-        await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountChecking));
+        // Completed is committed, but the EPSS list is still loading: the
+        // rows on screen (the CVSS list, or none) are not the final result.
+        const checking = en.ScanStatus.tabCountChecking.replace('{count}', '\\d+');
+        await expect(vulnTab(page)).toHaveText(new RegExp(`^${en.Vulnerabilities.title} \\(${checking}\\)$`));
+        await expect(page.locator('[data-empty-state]:not([data-empty-state="emptyChecking"])')).toHaveCount(0);
         releaseEpss();
         await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length);
         await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
@@ -589,5 +596,102 @@ test.describe('project page: the scan state and the list stay paired (Codex R2)'
         await notice(page).getByRole('button', { name: en.Common.retry }).click();
         await expect(notice(page)).toHaveCount(0);
         await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
+    });
+});
+
+// Codex R3.
+test.describe('project page: settled answers that move, uploads during a scan, the truncation banner (Codex R3)', () => {
+    const projects: string[] = [];
+    test.afterEach(async ({ page }) => {
+        await page.unrouteAll({ behavior: 'ignoreErrors' });
+    });
+    test.afterAll(async ({ request }) => {
+        for (const id of projects) await deleteProject(request, id);
+    });
+
+    test('a second settled read that differs from the first gets its own fresh list', async ({ page, request }) => {
+        const vp = await createVulnerableProject(request, 'Scan Status Moving Settle');
+        projects.push(vp.projectId);
+        // running → (settle) completed/0, list read before the commit → completed/4
+        let phase: 'running' | 'settling' = 'running';
+        let committed = false;
+        let settleReads = 0;
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${vp.projectId}/sboms/`) && url.pathname.endsWith('/scan-status'),
+            async (route) => {
+                const res = await route.fetch();
+                const real = await res.json();
+                if (phase === 'running') return route.fulfill({ response: res, json: { ...real, status: 'running' } });
+                settleReads++;
+                const total = committed ? FIXTURE_CVES.length : 0;
+                await route.fulfill({ response: res, json: { ...real, status: 'completed', vulnerabilities: { ...real.vulnerabilities, total } } });
+            },
+        );
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${vp.projectId}/vulnerabilities`,
+            async (route) => {
+                if (committed) return route.fallback();
+                const res = await route.fetch();
+                await route.fulfill({ response: res, json: [], headers: { ...res.headers(), 'x-total-count': '0' } });
+                // The list was served before another scan's findings landed;
+                // the next state read sees them.
+                if (phase === 'settling' && settleReads > 0) committed = true;
+            },
+        );
+        await page.goto(`/en/projects/${vp.projectId}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveAttribute('data-empty-state', 'emptyRunning');
+        // The tab's own refresh must be over: only the settle may fetch the list.
+        await page.waitForLoadState('networkidle');
+        phase = 'settling';
+        await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length, { timeout: 15_000 });
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
+    });
+
+    test('CI uploads another SBOM while this one is still running: the page moves to it', async ({ page, request }) => {
+        const p = await createProject(request, uniqueName('Scan Status Upload While Running'));
+        projects.push(p.id);
+        const first = await uploadSbom(request, p.id, cleanSbom);
+        await page.clock.install();
+        const polled = new Set<string>();
+        await mockScanStatus(page, p.id, () => ({ status: 'running' }));
+        page.on('request', (r) => {
+            const m = new URL(r.url()).pathname.match(/\/sboms\/([^/]+)\/scan-status$/);
+            if (m) polled.add(m[1]);
+        });
+        await page.goto(`/en/projects/${p.id}`);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'running');
+        await expect.poll(() => polled.has(first)).toBe(true);
+        const second = await uploadSbom(request, p.id, cleanSbom);
+        await page.clock.fastForward('01:05');
+        await expect.poll(() => polled.has(second), { timeout: 15_000 }).toBe(true);
+    });
+
+    test('the truncation banner is translated, and hidden while its numbers are not current', async ({ page, request }) => {
+        const vp = await createVulnerableProject(request, 'Scan Status Truncated');
+        projects.push(vp.projectId);
+        let fail = false;
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${vp.projectId}/vulnerabilities`,
+            async (route) => {
+                if (fail) return route.fulfill({ status: 500, json: { error: 'internal' } });
+                const res = await route.fetch();
+                // The server reports more matches than one page holds.
+                await route.fulfill({ response: res, headers: { ...res.headers(), 'x-total-count': '150' } });
+            },
+        );
+        await page.goto(`/en/projects/${vp.projectId}`);
+        await vulnTab(page).click();
+        const banner = page.getByTestId('vulnerabilities-truncated');
+        await expect(banner).toContainText(
+            en.ScanStatus.truncatedTitle.replace('{shown}', String(FIXTURE_CVES.length)).replace('{total}', '150'),
+        );
+        await expect(page.getByText('脆弱性が表示件数を超えています')).toHaveCount(0);
+        // A failed refresh keeps the rows, but the banner's numbers are not current.
+        fail = true;
+        await page.getByRole('button', { name: new RegExp(`^${en.Components.title} \\(`) }).click();
+        await vulnTab(page).click();
+        await expect(page.getByTestId('vulnerabilities-load-error')).toBeVisible();
+        await expect(banner).toHaveCount(0);
     });
 });

@@ -1643,6 +1643,8 @@
     "tabCountPartial": "{count}・一部のみ",
     "tabCountLoadFailed": "読み込み失敗",
     "scanFinishedAnnouncement": "脆弱性スキャンが終了しました。",
+    "truncatedTitle": "脆弱性が表示件数を超えています ({shown} / {total})",
+    "truncatedBody": "サーバーは {total} 件中 {shown} 件のみを返しています。追加分のトリアージは CLI (sbomhub triage) または API のページネーション (?limit=&offset=) を利用してください。",
     "sourceSeparator": "、"
   }
 }

@@ -1643,6 +1643,8 @@
     "tabCountPartial": "{count} · partial",
     "tabCountLoadFailed": "load failed",
     "scanFinishedAnnouncement": "The vulnerability scan has finished.",
+    "truncatedTitle": "More vulnerabilities than shown ({shown} / {total})",
+    "truncatedBody": "The server returned {shown} of {total}. Triage the rest with the CLI (sbomhub triage) or the API's pagination (?limit=&offset=).",
     "sourceSeparator": ", "
   }
 }

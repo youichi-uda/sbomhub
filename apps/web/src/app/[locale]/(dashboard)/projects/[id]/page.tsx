@@ -28,6 +28,7 @@ import { queryKeys } from "@/lib/query/keys";
 import { useRetainedData } from "@/lib/query/use-retained-data";
 import { loadErrorState } from "@/lib/load-state";
 import {
+  countQualifierKey,
   parseScanStatus,
   pollIntervalMs,
   scanView,
@@ -53,6 +54,10 @@ import {
 //   2. api-keys.spec.ts (M12-1 #82 carryover) was written for in-tab CRUD;
 //   3. the tenant-wide alternative remains at /settings/apikeys.
 type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "notifications" | "apikeys";
+
+// How many times a settled scan-status answer is re-validated (list → latest
+// SBOM → state) before a state that keeps moving is treated as not final.
+const SETTLE_ATTEMPTS = 3;
 
 // Loader helper: log a failed fetch under the same message the hand-written
 // loaders used, then rethrow so react-query keeps the previous data.
@@ -216,10 +221,12 @@ export default function ProjectDetailPage() {
     queryFn: () =>
       logged("Failed to load SBOM ID:", async (): Promise<string | null> =>
         (await api.projects.getLatestSbom(projectId))?.id ?? null),
-    // With an SBOM, the scan-status query re-reads the latest SBOM after
-    // every settled answer. Without one there is no scan status to poll, so
-    // look for a first upload (e.g. from CI) once a minute, visible tab only.
-    refetchInterval: (query) => (query.state.status === "success" && query.state.data === null ? 60000 : false),
+    // Re-read once a minute (visible tab only): an SBOM uploaded elsewhere
+    // (CI) while this page is open — also while the previous one is still
+    // being scanned (Codex R3) — moves the page to it (the scan-status key
+    // follows the id). The scan-status query also re-reads it after every
+    // settled answer.
+    refetchInterval: (query) => (query.state.status === "success" ? 60000 : false),
   });
   const sbomId = sbomIdQuery.data ?? null;
 
@@ -241,30 +248,38 @@ export default function ProjectDetailPage() {
   //      (CI), the page moves to it (its id changes the scan-status key:
   //      "checking", then that SBOM's own state) instead of pairing this
   //      SBOM's state with the other SBOM's list;
-  //   3. and the state is read once more: if a new scan of this SBOM began
-  //      meanwhile, that newer state is what the page shows.
+  //   3. and the state is read once more: if it moved (another scan of this
+  //      SBOM began, or finished and changed the finding total), steps 1–3
+  //      run again for the new answer (Codex R3) — a few times at most; a
+  //      state that keeps moving is still being written, so the page treats
+  //      it as running (not final) and keeps polling.
   // Residual: a whole scan of the same SBOM that starts AND ends between
-  // steps 1 and 3 without changing the finding total is not detectable —
-  // the API exposes no scan generation.
+  // two reads without changing the finding total is not detectable — the
+  // API exposes no scan generation.
   const scanStatusQuery = useQuery({
     queryKey: queryKeys.projects.scanStatus(projectId, sbomId),
     queryFn: () =>
       logged("Failed to load scan status:", async (): Promise<ScanStatus> => {
         const forSbom = sbomId as string;
         const key = queryKeys.projects.scanStatus(projectId, forSbom);
-        const prev = queryClient.getQueryData<ScanStatus>(key);
-        const status = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom));
-        if (status.status === "running") return status;
-        const listChanged = settleNeedsListRefetch(prev, status);
-        if (listChanged) {
-          await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
-        }
-        await refetchFresh(queryKeys.projects.latestSbomId(projectId));
-        if (listChanged) {
+        let prev = queryClient.getQueryData<ScanStatus>(key);
+        let status = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom));
+        for (let attempt = 0; attempt < SETTLE_ATTEMPTS; attempt++) {
+          if (status.status === "running") return status;
+          const listChanged = settleNeedsListRefetch(prev, status);
+          if (listChanged) {
+            await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
+          }
+          await refetchFresh(queryKeys.projects.latestSbomId(projectId));
+          if (!listChanged) return status;
           const again = parseScanStatus(await api.projects.getScanStatus(projectId, forSbom));
-          if (again.status !== status.status || again.total !== status.total) return again;
+          if (again.status === status.status && again.total === status.total) return status;
+          prev = status;
+          status = again;
         }
-        return status;
+        // Still moving: not final. "running" keeps the page polling and
+        // every count qualified until two reads agree.
+        return { status: "running", reasons: [], skippedSources: [], total: status.total };
       }),
     enabled: !!sbomId,
     refetchInterval: (query) =>
@@ -280,6 +295,13 @@ export default function ProjectDetailPage() {
       data: scanStatusQuery.data,
     },
   });
+  // The total as text, qualified like the tab counter (the truncation banner).
+  const vulnTotalQualifier = countQualifierKey(scan, vulnList);
+  const vulnTotalLabel =
+    vulnTotalQualifier === null
+      ? String(vulnTotalCount)
+      : t(`ScanStatus.${vulnTotalQualifier}`, { count: String(vulnTotalCount) });
+
   // Retry the chain in order (Codex R2): the latest SBOM, then its state
   // (whose settling refetches the list). Both may have failed in the same
   // outage; one click recovers both. A changed SBOM id re-keys the status
@@ -882,15 +904,19 @@ export default function ProjectDetailPage() {
                 rows are not actionable from here — operators should
                 triage them via the CLI (`sbomhub triage`) or via the
                 paginated API directly. */}
-            {vulnTotalCount > vulnerabilities.length && (
-              <div className="mb-4 rounded-md border border-yellow-300 bg-yellow-50 dark:border-yellow-700 dark:bg-yellow-900/30 p-3 text-sm">
+            {/* Only while the list is current (Codex R3): rows retained
+                through a failed or in-flight refresh do not carry current
+                numbers. The total stays qualified by the scan state. */}
+            {vulnList.fresh && !vulnList.failed && vulnTotalCount > vulnerabilities.length && (
+              <div
+                data-testid="vulnerabilities-truncated"
+                className="mb-4 rounded-md border border-yellow-300 bg-yellow-50 dark:border-yellow-700 dark:bg-yellow-900/30 p-3 text-sm"
+              >
                 <p className="font-semibold text-yellow-800 dark:text-yellow-200">
-                  脆弱性が表示件数を超えています ({vulnerabilities.length} / {vulnTotalCount})
+                  {t("ScanStatus.truncatedTitle", { shown: vulnerabilities.length, total: vulnTotalLabel })}
                 </p>
                 <p className="text-yellow-700 dark:text-yellow-300 mt-1">
-                  サーバーは {vulnTotalCount} 件中 {vulnerabilities.length} 件のみを返しています。
-                  追加分のトリアージは CLI (sbomhub triage) または API のページネーション
-                  (?limit=&amp;offset=) を利用してください。
+                  {t("ScanStatus.truncatedBody", { shown: vulnerabilities.length, total: vulnTotalLabel })}
                 </p>
               </div>
             )}
