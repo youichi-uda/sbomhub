@@ -252,6 +252,9 @@ export interface SSVCAssessmentWithVuln extends SSVCAssessment {
   // CVSS 0.0 is a real "None" score, so a 0 sentinel would make an
   // un-triaged CRITICAL look safe. Same shape as vulnerability_epss_score.
   vulnerability_cvss_score?: number;
+  // The CVSS version of vulnerability_cvss_score ("3.1", "4.0", ...);
+  // absent when the feed did not record one. Not displayed yet.
+  vulnerability_cvss_version?: string;
   vulnerability_in_kev: boolean;
   vulnerability_epss_score?: number;
 }
@@ -532,6 +535,10 @@ export interface TopRisk {
   // 0-sentinel — CVSS 0.0 is a real "None" score; render un-scored as
   // "—", never 0.0 (see Vulnerability.cvss_score).
   cvss_score?: number;
+  // The CVSS version of cvss_score ("3.1", "4.0", ...); absent when the
+  // feed did not record one. Not displayed yet (the vulnerability list
+  // does not show a version either).
+  cvss_version?: string;
   severity: string;
   project_id: string;
   project_name: string;
