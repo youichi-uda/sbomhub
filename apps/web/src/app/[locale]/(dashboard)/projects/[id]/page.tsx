@@ -63,7 +63,9 @@ async function logged<T>(message: string, fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (error) {
-    console.error(message, error);
+    // A read that was cancelled (a newer refresh, leaving the page) did not
+    // fail: not logged (it surfaced as an error in the Next dev overlay).
+    if (!(error instanceof Error && error.name === "AbortError")) console.error(message, error);
     throw error;
   }
 }
