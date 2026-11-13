@@ -64,6 +64,7 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 - アップロード後のスキャンと `POST /api/v1/projects/:id/scan` は JVN ステップを飛ばします。他の情報源が成功したスキャンは `completed`、他の情報源が失敗したスキャンはその理由付きで従来どおり `failed` です。
 - `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` は、JVN を飛ばした `completed` / `failed` のスキャンに `"skipped_sources": ["jvn"]` を追加します。何も飛ばしていなければ項目自体がありません。共有スキャン状態 (Redis) に保存されるので、どの API レプリカからも同じく返ります。
 - `POST /api/v1/projects/:id/scan?sources=jvn` (`nvd,jvn` も) は従来どおり `202` を返し、JVN は飛ばして `skipped_sources` で知らせます。
+- 以前のスキャンが JVN で見つけた検出は SBOM に残ります。`off` は JVN の検出を追加も削除もしないため、`skipped_sources: ["jvn"]` のスキャンにも以前の JVN の検出が含まれることがあり、それらは再確認されていません。
 - 定期スキャン (定期実行・強制実行) は JVN の `on` / `off` にかかわらず NVD と distro ステップだけを実行します。この設定では変わりません。
 - `off` のとき API は起動時に設定名を含む `WARN` を出力します。
 

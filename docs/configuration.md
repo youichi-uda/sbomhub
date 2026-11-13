@@ -64,6 +64,7 @@ A full re-read is ~300 NVD requests and ~2.4 GB (measured 2026-11-08), takes rou
 - The scan after an upload and `POST /api/v1/projects/:id/scan` skip the JVN step. A scan whose other sources succeeded reads `completed`; one whose other sources failed still reads `failed` with their reasons.
 - `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` adds `"skipped_sources": ["jvn"]` to a `completed` or `failed` scan that skipped JVN. The field is absent when nothing was skipped. It is kept in the shared scan status (Redis), so every API replica reports it.
 - `POST /api/v1/projects/:id/scan?sources=jvn` (or `nvd,jvn`) still answers `202`; JVN is skipped and reported in `skipped_sources`.
+- Findings that earlier scans of an SBOM made with JVN stay linked: `off` adds no JVN finding and removes none, so a scan with `skipped_sources: ["jvn"]` may still list older JVN findings, which are then not re-checked.
 - The scheduled scan (periodic and forced) runs NVD and the distro step only, with JVN `on` or `off`; this setting does not change it.
 - The API logs a `WARN` at startup naming the setting.
 

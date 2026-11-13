@@ -142,7 +142,10 @@ type ScanProbe = {
  * `skipped_sources` names the sources the scan did not consult because the
  * operator switched them off (apps/api SBOMHUB_JVN=off -> ["jvn"]). It is
  * independent of `counts_final`: a settled scan is final for what this
- * deployment checks, and these are what it did not. It is the union of what
+ * deployment checks, and these are what it did not. A skip removes nothing,
+ * so the counts may still hold findings an EARLIER scan of the SBOM made with
+ * such a source — for that source they are neither current nor complete. It
+ * is the union of what
  * the readings behind this report said, so it can over-state a skip when the
  * two readings disagree (they then also make `counts_final` false), never
  * under-state one that was read.

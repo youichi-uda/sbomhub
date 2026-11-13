@@ -568,6 +568,21 @@ test("a tool reporting scan counts reports whether the scan had finished", () =>
       /skipped_sources/,
       `${tool} carries skipped_sources but never names it where the model reads`
     );
+    // A skip stops new lookups; it does not remove findings an earlier scan
+    // of the same SBOM made with that source (Codex SBOMHUB_JVN R3, High).
+    // Telling the model the counts EXCLUDE the source would make it discount
+    // real findings that are still in them.
+    assert.doesNotMatch(
+      description,
+      /件数に含まれない/,
+      `${tool} claims a skipped source's findings are absent from the counts; earlier ` +
+        "findings from it are kept"
+    );
+    assert.match(
+      description,
+      /以前のスキャン/,
+      `${tool} does not say the counts may still hold a skipped source's earlier findings`
+    );
   }
 });
 
