@@ -78,7 +78,7 @@ function* sourceFiles(dir) {
 // Variants, including arbitrary ones (`[&_tr]:`, `data-[state=selected]:`).
 const VARIANTS = String.raw`(?:(?:[a-z0-9-]*\[[^\]\s]+\]|[a-z0-9-]+):)*`;
 const UTILITY_HINT = new RegExp(
-  `^${VARIANTS}-?(?:flex|grid|inline-flex|block|hidden|text-|bg-|border|rounded|p[xytrbl]?-|m[xytrbl]?-|w-|h-|gap-|items-|justify-|space-[xy]-|font-|shadow|ring)`,
+  `^${VARIANTS}-?(?:flex|grid|inline-flex|block|hidden|text-|bg-|border|rounded|p[xytrbl]?-|m[xytrbl]?-|w-|h-|gap-|items-|justify-|space-[xy]-|font-|shadow|ring|translate-|-translate-|opacity-|z-|top-|left-|right-|bottom-|inset-|overflow-|cursor-|transition|duration-|scale-|rotate-|min-[wh]-|max-[wh]-|leading-|tracking-|whitespace-|truncate|sr-only|outline|underline|line-clamp-|shrink|grow|self-(?:auto|start|end|center|stretch|baseline)|place-|order-|col-|row-)`,
 );
 // A utility candidate, optionally behind (arbitrary) variants. The utility
 // itself must end in a letter, digit, `]`, `)` or `%`, which keeps prose
@@ -224,7 +224,7 @@ describe("every class-like token in src/ generates CSS", () => {
     assert.ok(classUses.has("text-muted-foreground"));
     // Codex R1 Low-2: arbitrary variants must be scanned too (table.tsx,
     // alert.tsx), not dropped as non-class tokens.
-    for (const t of ["[&_tr]:border-b", "data-[state=selected]:bg-muted", "[&>svg]:text-destructive", "max-w-none", "flex"]) {
+    for (const t of ["[&_tr]:border-b", "data-[state=selected]:bg-muted", "[&>svg]:text-destructive", "max-w-none", "flex", "translate-x-5", "translate-x-0"]) {
       assert.ok(classUses.has(t), `${t} not collected by the class scan`);
     }
   });

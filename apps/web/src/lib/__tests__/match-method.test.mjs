@@ -369,6 +369,17 @@ describe("findingMatchBadge", () => {
     }
   });
 
+  // Codex R3 Low-1: the test above feeds Go's own confidence, so the
+  // minimum would mask a wrong (too high) local cap. With the API claiming
+  // "high", the result must still be exactly Go's confidence.
+  test("the local cap alone yields Go's confidence when the API claims high", () => {
+    for (const m of Object.keys(goConfidence).filter((x) => !x.startsWith("distro_"))) {
+      const b = findingMatchBadge(m, "high");
+      assert.equal(b?.confidence, goConfidence[m], m);
+      assert.equal(b?.needsReview, m !== "nvd_cpe", m);
+    }
+  });
+
   test("only a verified CPE match is not marked for review", () => {
     assert.deepEqual(findingMatchBadge("nvd_cpe", "high"), {
       method: "nvd_cpe",
