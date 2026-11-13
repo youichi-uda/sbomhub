@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"database/sql"
 	"errors"
 	"io"
 	"log/slog"
@@ -317,8 +318,17 @@ func (h *CLIHandler) GetProject(c echo.Context) error {
 
 	project, err := h.cliService.GetProject(c.Request().Context(), tenantID, projectID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{
-			"error": "project not found",
+		// Not found, or another tenant's (both sql.ErrNoRows), is 404. Any other
+		// error is the database failing, not the project being absent (M66
+		// residual, as for GET /projects/:id); the driver text stays in the log.
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{
+				"error": "project not found",
+			})
+		}
+		slog.Warn("cli: get project failed", "tenant_id", tenantID, "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to get project",
 		})
 	}
 

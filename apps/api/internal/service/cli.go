@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -542,7 +543,9 @@ func (s *CLIService) GetProject(ctx context.Context, tenantID uuid.UUID, project
 		return nil, err
 	}
 	if projectTenantID != tenantID {
-		return nil, fmt.Errorf("project not found")
+		// Another tenant's project reads as absent, like a missing one
+		// (sql.ErrNoRows), so the handler answers both with the same 404.
+		return nil, fmt.Errorf("project not found: %w", sql.ErrNoRows)
 	}
 
 	return project, nil
