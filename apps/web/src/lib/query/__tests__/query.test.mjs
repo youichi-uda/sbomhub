@@ -86,6 +86,8 @@ function allKeys(projectId) {
     k.projects.licenseViolations(projectId, "s1"),
     k.projects.licenseViolations(projectId, null),
     k.projects.latestSbomId(projectId),
+    k.projects.scanStatus(projectId, "s1"),
+    k.projects.scanStatus(projectId, null),
     k.projects.sboms(projectId),
     k.projects.notificationSettings(projectId),
     k.projects.notificationLogs(projectId),

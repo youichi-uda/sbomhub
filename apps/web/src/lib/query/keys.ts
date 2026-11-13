@@ -45,11 +45,18 @@ export const queryKeys = {
     components: (projectId: string) => [...byId(projectId), "components"] as const,
     vulnerabilities: (projectId: string, sort: "cvss" | "epss") =>
       [...byId(projectId), "vulnerabilities", { sort }] as const,
+    // Prefix of every sort's entry: a scan reaching a terminal state
+    // invalidates all of them (src/lib/scan-status.ts needsVulnRefetch).
+    vulnerabilitiesAll: (projectId: string) => [...byId(projectId), "vulnerabilities"] as const,
     vex: (projectId: string) => [...byId(projectId), "vex"] as const,
     licensePolicies: (projectId: string) => [...byId(projectId), "license-policies"] as const,
     licenseViolations: (projectId: string, sbomId: string | null) =>
       [...byId(projectId), "license-violations", { sbomId }] as const,
     latestSbomId: (projectId: string) => [...byId(projectId), "latest-sbom-id"] as const,
+    scanStatus: (projectId: string, sbomId: string | null) =>
+      [...byId(projectId), "scan-status", { sbomId }] as const,
+    // Prefix of every SBOM's scan-status entry.
+    scanStatusAll: (projectId: string) => [...byId(projectId), "scan-status"] as const,
     sboms: (projectId: string) => [...byId(projectId), "sboms"] as const,
     notificationSettings: (projectId: string) =>
       [...byId(projectId), "notification-settings"] as const,

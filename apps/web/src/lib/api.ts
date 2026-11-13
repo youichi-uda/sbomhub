@@ -2241,6 +2241,14 @@ export const api = {
         throw err;
       }
     },
+    // Background scan state of one SBOM (running / completed / failed /
+    // unknown). The raw body; src/lib/scan-status.ts parseScanStatus
+    // normalises it (an unrecognised status reads as unknown). A 404 (the
+    // SBOM is not in this project) is an error, not "no scan".
+    getScanStatus: (id: string, sbomId: string): Promise<unknown> =>
+      request<unknown>(
+        `/api/v1/projects/${encodeURIComponent(id)}/sboms/${encodeURIComponent(sbomId)}/scan-status`,
+      ),
     create: (data: { name: string; description: string }) =>
       request<Project>("/api/v1/projects", {
         method: "POST",
@@ -2248,8 +2256,9 @@ export const api = {
       }),
     delete: (id: string) =>
       request<void>(`/api/v1/projects/${id}`, { method: "DELETE" }),
+    // Answers 201 with the stored SBOM (its id is the new latest SBOM).
     uploadSbom: (id: string, sbom: string) =>
-      request<void>(`/api/v1/projects/${id}/sbom`, {
+      request<Sbom | null>(`/api/v1/projects/${id}/sbom`, {
         method: "POST",
         body: sbom,
       }),

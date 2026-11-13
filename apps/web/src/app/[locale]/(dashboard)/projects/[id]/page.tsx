@@ -2,7 +2,7 @@
 
 import { useTranslations } from "next-intl";
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,9 +17,23 @@ import { FindingMatchBadge } from "@/components/vulnerability/finding-match";
 import { EOLBadge } from "@/components/component/eol-badge";
 import { DependencyPathPanel } from "@/components/component/dependency-path";
 import { LoadError } from "@/components/ui/load-error";
+import {
+  ScanEmptyState,
+  ScanFinishedAnnouncer,
+  ScanStatusNotice,
+  VulnCount,
+} from "@/components/vulnerability/scan-status-notice";
 import Link from "next/link";
 import { queryKeys } from "@/lib/query/keys";
 import { useRetainedData } from "@/lib/query/use-retained-data";
+import { loadErrorState } from "@/lib/load-state";
+import {
+  parseScanStatus,
+  pollIntervalMs,
+  scanView,
+  settleNeedsListRefetch,
+  type ScanStatus,
+} from "@/lib/scan-status";
 
 // M13-1 #87 / F174: "apikeys" rejoined the Tab union so the project
 // detail page surfaces project-scoped API key CRUD again.
@@ -117,6 +131,18 @@ export default function ProjectDetailPage() {
   // Failures are logged and leave the previous data on screen (react-query
   // keeps a key's last data when a refetch fails), which is what the
   // try/catch-and-log loaders did.
+  const queryClient = useQueryClient();
+  // Refetch every active query under `queryKey` with a request that starts
+  // NOW. react-query v5 hands back an in-flight request that has no data yet
+  // instead of starting a new one (query-core query.js fetch), so a plain
+  // invalidate / refetch can resolve with an answer requested before the
+  // event that made the refetch necessary (Codex R1 High / Medium). Cancel
+  // first; a cancelled request's answer is discarded.
+  async function refetchFresh(queryKey: readonly unknown[]) {
+    await queryClient.cancelQueries({ queryKey });
+    await queryClient.refetchQueries({ queryKey, type: "active" });
+  }
+
   const projectQuery = useQuery({
     queryKey: queryKeys.projects.detail(projectId),
     queryFn: () => logged("Failed to load project:", () => api.projects.get(projectId)),
@@ -154,6 +180,7 @@ export default function ProjectDetailPage() {
   const vulnerabilitiesPage = useRetainedData(vulnerabilitiesQuery.data, projectId);
   const vulnerabilities: Vulnerability[] = vulnerabilitiesPage?.data ?? [];
   const vulnTotalCount = vulnerabilitiesPage?.totalCount ?? 0;
+  const vulnLoadError = loadErrorState(vulnerabilitiesQuery.isError, vulnerabilities.length > 0);
 
   const vexQuery = useQuery({
     queryKey: queryKeys.projects.vex(projectId),
@@ -183,6 +210,59 @@ export default function ProjectDetailPage() {
         (await api.projects.getLatestSbom(projectId))?.id ?? null),
   });
   const sbomId = sbomIdQuery.data ?? null;
+
+  // Background scan of the latest SBOM (integration Codex review 2026-11-13,
+  // High): the empty list and the count say what the scan state allows
+  // (src/lib/scan-status.ts). Polled while running (3s, then 10s after a
+  // minute; never in a hidden tab — react-query's refetchIntervalInBackground
+  // is off); a failed poll stops polling and shows the status as unavailable
+  // with a Retry. When an answer settles into a new state (completed / failed
+  // / unknown), the vulnerability list is fetched again with a request that
+  // starts after the answer arrived, and the answer is committed only once
+  // that list is in — so the page never pairs a settled state with a list
+  // read before the scan's findings committed.
+  const scanStatusQuery = useQuery({
+    queryKey: queryKeys.projects.scanStatus(projectId, sbomId),
+    queryFn: () =>
+      logged("Failed to load scan status:", async (): Promise<ScanStatus> => {
+        const key = queryKeys.projects.scanStatus(projectId, sbomId);
+        const prev = queryClient.getQueryData<ScanStatus>(key)?.status;
+        const status = parseScanStatus(await api.projects.getScanStatus(projectId, sbomId as string));
+        if (settleNeedsListRefetch(prev, status.status)) {
+          await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
+        }
+        return status;
+      }),
+    enabled: !!sbomId,
+    refetchInterval: (query) =>
+      query.state.status === "error"
+        ? false
+        : pollIntervalMs(query.state.data?.status, query.state.dataUpdateCount),
+  });
+  const scan = scanView({
+    sbom: { pending: sbomIdQuery.isPending, error: sbomIdQuery.isError, id: sbomId },
+    status: {
+      pending: scanStatusQuery.isPending,
+      error: scanStatusQuery.isError,
+      data: scanStatusQuery.data,
+    },
+  });
+  const retryScanStatus = () => {
+    if (sbomIdQuery.isError) void sbomIdQuery.refetch();
+    else void scanStatusQuery.refetch();
+  };
+
+  // Opening the vulnerabilities tab refreshes the list. The list endpoint
+  // answers for whichever SBOM is latest NOW (CI may have uploaded a new
+  // one since the page loaded), so the latest SBOM and its scan state are
+  // re-read first, then the list: a new SBOM re-keys the scan status
+  // (checking → its own state, which refetches the list when it settles),
+  // and the same SBOM gets its state re-read before the list is.
+  async function refreshVulnerabilities() {
+    await refetchFresh(queryKeys.projects.latestSbomId(projectId));
+    await refetchFresh(queryKeys.projects.scanStatusAll(projectId));
+    await refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
+  }
 
   const licenseViolationsQuery = useQuery({
     queryKey: queryKeys.projects.licenseViolations(projectId, sbomId),
@@ -254,7 +334,7 @@ export default function ProjectDetailPage() {
     if (tab === activeTab) return;
     setActiveTab(tab);
     if (tab === "components") loadComponents();
-    if (tab === "vulnerabilities") void vulnerabilitiesQuery.refetch();
+    if (tab === "vulnerabilities") void refreshVulnerabilities();
     if (tab === "vex") loadVexStatements();
     if (tab === "licenses") loadLicensePolicies();
     if (tab === "notifications") loadNotificationSettings();
@@ -382,7 +462,21 @@ export default function ProjectDetailPage() {
     setUploading(true);
     try {
       const content = await file.text();
-      await api.projects.uploadSbom(projectId, content);
+      const created = await api.projects.uploadSbom(projectId, content);
+      // The new SBOM is the latest one now: follow ITS scan (running right
+      // after the upload) and show its list, not the previous SBOM's. Its
+      // id is set directly (Codex R1 High): a latest-SBOM request still in
+      // flight from before the upload would otherwise be reused and answer
+      // the OLD id. The scan status re-keys to the new SBOM (checking, then
+      // running), and its settling refetches the list.
+      const latestKey = queryKeys.projects.latestSbomId(projectId);
+      await queryClient.cancelQueries({ queryKey: latestKey });
+      if (created && typeof created.id === "string" && created.id !== "") {
+        queryClient.setQueryData(latestKey, created.id);
+      } else {
+        await refetchFresh(latestKey);
+      }
+      void refetchFresh(queryKeys.projects.vulnerabilitiesAll(projectId));
       alert(tp("uploadSuccess"));
       selectTab("components");
     } catch (error) {
@@ -423,7 +517,13 @@ export default function ProjectDetailPage() {
         testId="project-load-error"
         message={tc("projectLoadFailed")}
         retryLabel={tc("retry")}
-        onRetry={() => void projectQuery.refetch()}
+        // Every project query failed with the project during an outage
+        // (react-query retries are off, src/lib/query/client.ts): refetch
+        // all of them, not just the project, or the tabs keep showing zero
+        // after the API recovers (integration Codex review, Medium).
+        // Cancel first: a sibling request still in flight from the outage
+        // would otherwise be reused and fail again (Codex R1 Medium).
+        onRetry={() => void refetchFresh(queryKeys.projects.byId(projectId))}
         retrying={projectQuery.isFetching}
       />
     );
@@ -487,6 +587,13 @@ export default function ProjectDetailPage() {
         </div>
       </div>
 
+      <ScanFinishedAnnouncer view={scan} />
+      <ScanStatusNotice
+        view={scan}
+        onRetry={retryScanStatus}
+        retrying={sbomIdQuery.isFetching || scanStatusQuery.isFetching}
+      />
+
       <div className="flex flex-wrap gap-2 mb-6">
         <Button
           variant={activeTab === "upload" ? "default" : "outline"}
@@ -511,7 +618,8 @@ export default function ProjectDetailPage() {
               length. Without this the tab counter silently capped at
               the default page size (100) for any project with more
               matched vulnerabilities. */}
-          {t("Vulnerabilities.title")} ({vulnTotalCount})
+          {t("Vulnerabilities.title")} (
+          <VulnCount view={scan} count={vulnTotalCount} listLoadFailed={vulnLoadError === "full"} />)
         </Button>
         <Button
           variant={activeTab === "vex" ? "default" : "outline"}
@@ -693,7 +801,8 @@ export default function ProjectDetailPage() {
               <CardTitle>
                 {t("Vulnerabilities.title")}{" "}
                 <span className="text-sm font-normal text-muted-foreground">
-                  ({vulnerabilities.length} / {vulnTotalCount})
+                  ({vulnerabilities.length} /{" "}
+                  <VulnCount view={scan} count={vulnTotalCount} listLoadFailed={vulnLoadError === "full"} />)
                 </span>
               </CardTitle>
               {/* M38-B (F447 #159): CVSS ⇄ EPSS priority sort toggle.
@@ -745,10 +854,20 @@ export default function ProjectDetailPage() {
                 </p>
               </div>
             )}
-            {vulnerabilities.length === 0 ? (
-              <p className="text-center text-muted-foreground py-8">
-                {tp("noVulnerabilities")}
-              </p>
+            {/* A failed load is never the empty state ("no
+                vulnerabilities" after a 500 is a false clean). */}
+            {vulnLoadError !== "none" && (
+              <LoadError
+                testId="vulnerabilities-load-error"
+                compact={vulnLoadError === "banner"}
+                message={t("ScanStatus.listLoadFailed")}
+                retryLabel={tc("retry")}
+                onRetry={() => void vulnerabilitiesQuery.refetch()}
+                retrying={vulnerabilitiesQuery.isFetching}
+              />
+            )}
+            {vulnLoadError === "full" ? null : vulnerabilities.length === 0 ? (
+              <ScanEmptyState view={scan} />
             ) : (
               <div className="space-y-4">
                 {vulnerabilities.map((vuln) => (
