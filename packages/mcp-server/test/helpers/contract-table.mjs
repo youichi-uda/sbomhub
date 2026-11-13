@@ -37,27 +37,71 @@ export const PROJECTS = [
   { id: "7c9e6679-7425-40de-944b-e07fc1f90ae7", name: "other-app" },
 ];
 
+// Shaped like model.DashboardSummary's top_risks (model.TopRisk): the second
+// row carries cvss_version without cvss_score, which apps/api returns for an
+// assessment that states a rating but no usable score.
 export const DASHBOARD = {
   total_projects: 2,
   total_vulnerabilities: 41,
   critical: 3,
+  top_risks: [
+    { cve_id: "CVE-2021-44228", epss_score: 0.97, cvss_score: 10.0, cvss_version: "3.1", severity: "CRITICAL" },
+    { cve_id: "CVE-2026-0002", epss_score: 0.4, cvss_version: "4.0", severity: "HIGH" },
+    { cve_id: "CVE-2026-0003", cvss_score: 5.0, severity: "MEDIUM" },
+  ],
 };
 
 export const COMPLIANCE = { score: 82, level: "B", meti_items: 12 };
 
-const vuln = (cve, severity, cvss) => ({
+// Shaped like model.Vulnerability: cvss_score and cvss_version are each
+// OMITTED when unknown (omitempty), never null — so a null/undefined argument
+// leaves the key out rather than writing it.
+const vuln = (cve, severity, cvss, cvssVersion) => ({
   cve_id: cve,
   severity,
-  cvss_score: cvss,
+  ...(cvss == null ? {} : { cvss_score: cvss }),
+  ...(cvssVersion == null ? {} : { cvss_version: cvssVersion }),
 });
 
 export const VULNS = [
-  vuln("CVE-2021-44228", "CRITICAL", 10.0),
-  vuln("CVE-2022-22965", "CRITICAL", 9.8),
-  vuln("CVE-2023-1111", "HIGH", 7.5),
+  vuln("CVE-2021-44228", "CRITICAL", 10.0, "3.1"),
+  vuln("CVE-2022-22965", "CRITICAL", 9.8, "3.1"),
+  vuln("CVE-2023-1111", "HIGH", 7.5, "3.0"),
   vuln("CVE-2023-2222", "MEDIUM", 5.3),
-  vuln("CVE-2023-3333", "LOW", 3.1),
+  vuln("CVE-2023-3333", "LOW", 3.1, "2.0"),
 ];
+
+// A v4.0 score, a version without a usable score, and a row with neither.
+export const VULNS_VERSION_ONLY = [
+  vuln("CVE-2026-1001", "CRITICAL", 9.3, "4.0"),
+  vuln("CVE-2026-1002", "HIGH", null, "4.0"),
+  vuln("CVE-2026-1003", "LOW", null, null),
+];
+
+// Shaped like model.CVESearchResult.
+export const CVE_SEARCH_RESULT = {
+  cve_id: "CVE-2021-44228",
+  description: "Log4Shell",
+  cvss_score: 10.0,
+  cvss_version: "3.1",
+  severity: "CRITICAL",
+  affected_projects: [],
+  unaffected_projects: [],
+};
+
+// Shaped like model.ComponentSearchResult: matches[].vulnerabilities are
+// model.Vulnerability rows.
+export const COMPONENT_SEARCH_RESULT = {
+  query: { name: "log4j" },
+  matches: [
+    {
+      project_id: PROJECT_ID,
+      project_name: "my-app",
+      component: { id: SBOM_NEWEST, name: "log4j-core", version: "2.14.1" },
+      vulnerabilities: [VULNS[0], VULNS_VERSION_ONLY[1]],
+    },
+  ],
+};
 
 /**
  * The per-severity buckets apps/api would report for a set of rows.
@@ -335,6 +379,9 @@ export const CONTRACT_CASES = [
       assert.equal(payload.vulnerabilities.scan_state, "completed");
       assert.equal(payload.vulnerabilities.counts_final, true);
       assert.equal(payload.vulnerabilities.scanned_sbom_id, SBOM_NEWEST);
+      // Rows pass through whole: cvss_version stays beside cvss_score, and a
+      // row without one stays without one.
+      assert.deepEqual(payload.vulnerabilities.top_by_cvss, VULNS);
     },
   },
 
@@ -407,10 +454,14 @@ export const CONTRACT_CASES = [
     tool: "sbomhub_search_cve",
     title: "searches tenant-wide by CVE id in ?q=, with no project filter",
     args: { cve_id: "CVE-2021-44228" },
-    routes: { [K.searchCve]: ok({ cve_id: "CVE-2021-44228", affected_projects: [] }) },
+    routes: { [K.searchCve]: ok(CVE_SEARCH_RESULT) },
     expect: [
       { method: "GET", path: P.searchCve, query: { q: "CVE-2021-44228" } },
     ],
+    check({ payload }) {
+      // cvss_version reaches the model unchanged, beside cvss_score.
+      assert.deepEqual(payload, CVE_SEARCH_RESULT);
+    },
   },
 
   {
@@ -427,10 +478,13 @@ export const CONTRACT_CASES = [
     tool: "sbomhub_search_component",
     title: "searches tenant-wide by name; version is omitted when not given",
     args: { name: "log4j" },
-    routes: { [K.searchComponent]: ok({ matches: [] }) },
+    routes: { [K.searchComponent]: ok(COMPONENT_SEARCH_RESULT) },
     expect: [
       { method: "GET", path: P.searchComponent, query: { name: "log4j" } },
     ],
+    check({ payload }) {
+      assert.deepEqual(payload, COMPONENT_SEARCH_RESULT);
+    },
   },
 
   {
@@ -573,6 +627,31 @@ export const CONTRACT_CASES = [
     expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0, "epss") }]),
     check({ payload }) {
       assert.equal(payload.sort, "epss");
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "cvss_version passes through unchanged, including without cvss_score",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS_VERSION_ONLY, {
+        "X-Total-Count": String(VULNS_VERSION_ONLY.length),
+      }),
+      ...scanProbe("completed", {
+        total: VULNS_VERSION_ONLY.length,
+        buckets: bucketsOf(VULNS_VERSION_ONLY),
+      }),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      // The client parses rows with z.looseObject; a strict object would drop
+      // cvss_version silently, and the model would see scores with no version.
+      assert.deepEqual(payload.vulnerabilities, VULNS_VERSION_ONLY);
+      const versionOnly = payload.vulnerabilities[1];
+      assert.equal("cvss_score" in versionOnly, false);
+      assert.equal(versionOnly.cvss_version, "4.0");
+      assert.equal("cvss_version" in payload.vulnerabilities[2], false);
     },
   },
 

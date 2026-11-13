@@ -48,6 +48,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 import { ApiClient } from "./client/api.js";
+import { CVSS_VERSION_NOTE } from "./cvss-notes.js";
 import { SCOPE_NOTE } from "./scope-notes.js";
 import { toolInput, uuidString } from "./zod-shapes.js";
 
@@ -161,7 +162,8 @@ server.registerTool(
     description:
       "テナント全体のダッシュボードサマリーを取得。" +
       SCOPE_NOTE.tenantWide +
-      " (絞り込むと集計値の意味が変わるため、サーバーは狭い答えを返さず拒否する)",
+      " (絞り込むと集計値の意味が変わるため、サーバーは狭い答えを返さず拒否する)。" +
+      CVSS_VERSION_NOTE,
   },
   async () => {
     try {
@@ -182,7 +184,8 @@ server.registerTool(
       "top_by_cvss は走査した analyzed 件の集計であって、" +
       "プロジェクトの全件を数えた値ではない (全体の件数は total)。" +
       SCAN_STATE_NOTE +
-      "これらは vulnerabilities の下に入る",
+      "これらは vulnerabilities の下に入る。" +
+      CVSS_VERSION_NOTE,
     inputSchema: toolInput({
       project_id: projectIdSchema,
     }),
@@ -223,7 +226,8 @@ server.registerTool(
       "CVE IDでテナントの全プロジェクトを横断検索。" +
       SCOPE_NOTE.tenantWide +
       "。「見つからない」と「見る権限が無い」を区別できなくなるため、" +
-      "絞り込みではなく拒否する",
+      "絞り込みではなく拒否する。" +
+      CVSS_VERSION_NOTE,
     inputSchema: toolInput({
       cve_id: z
         .string()
@@ -250,7 +254,8 @@ server.registerTool(
     description:
       "コンポーネント名でテナントの全プロジェクトを横断検索。" +
       SCOPE_NOTE.tenantWide +
-      " (理由は sbomhub_search_cve と同じ)",
+      " (理由は sbomhub_search_cve と同じ)。" +
+      CVSS_VERSION_NOTE,
     inputSchema: toolInput({
       name: z.string().min(1).describe("コンポーネント名 (例: log4j)"),
       // min(1) for the same reason as sbomhub_diff's version selectors: an
@@ -343,7 +348,8 @@ server.registerTool(
       "scan_truncated=true が返る。その場合 matched と returned は" +
       "走査した範囲での件数なので、プロジェクト全体の値として報告しないこと " +
       "(全体の件数は total_in_project)。" +
-      SCAN_STATE_NOTE,
+      SCAN_STATE_NOTE +
+      CVSS_VERSION_NOTE,
     inputSchema: toolInput({
       project_id: projectIdSchema,
       severity: z

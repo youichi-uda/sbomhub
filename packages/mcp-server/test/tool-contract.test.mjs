@@ -15,6 +15,7 @@
 // No description string is duplicated into this file. A test that pinned the
 // wording would pass just as happily against the pre-bad1b8c wording.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 
 import {
@@ -47,6 +48,9 @@ import {
   SCAN_STATE_FINAL,
   SCAN_STATE_UNAVAILABLE,
 } from "../dist/client/api.js";
+// The cvss_version clause the SHIPPED server embeds, and the version values it
+// enumerates — imported for the same reason SCOPE_NOTE is.
+import { CVSS_VERSION_NOTE, CVSS_VERSIONS } from "../dist/cvss-notes.js";
 
 // Everything `scan_state` may read. A description enumerating the states is
 // making a claim about this set, not about whichever states a particular
@@ -435,6 +439,69 @@ test("every response field a description names exists in what the tool returns",
     }
   }
   assert.equal(checked > 0, true, "no description named a field — the check is vacuous");
+});
+
+// cvss_version (M67 / migration 069, published beside cvss_score since M71)
+// is what makes a score readable: a v2 7.5 and a v3.1 7.5 are different
+// claims. Every tool observed returning cvss_score has to say what the field
+// beside it means, in the one shared clause; a tool that never returns a score
+// must not carry the clause (it would name fields the payload does not have).
+test("every tool returning cvss_score explains cvss_version, and only those", () => {
+  const scoring = [...payloadKeysByTool]
+    .filter(([, keys]) => keys.has("cvss_score"))
+    .map(([tool]) => tool)
+    .sort();
+  assert.deepEqual(
+    scoring,
+    [
+      "sbomhub_get_dashboard",
+      "sbomhub_get_project_dashboard",
+      "sbomhub_get_vulnerabilities",
+      "sbomhub_search_component",
+      "sbomhub_search_cve",
+    ],
+    "the set of tools observed returning cvss_score changed — the stub payloads no longer " +
+      "mirror the API shapes, or a tool stopped passing the score through"
+  );
+  for (const [tool, description] of descriptionByTool) {
+    const keys = payloadKeysByTool.get(tool) ?? new Set();
+    if (keys.has("cvss_score")) {
+      assert.equal(
+        description.includes(CVSS_VERSION_NOTE),
+        true,
+        `${tool} returns cvss_score but does not embed CVSS_VERSION_NOTE`
+      );
+      assert.equal(
+        keys.has("cvss_version"),
+        true,
+        `${tool} returns cvss_score, but no observed payload carried cvss_version beside it`
+      );
+    } else {
+      assert.equal(
+        description.includes("cvss_version"),
+        false,
+        `${tool} never returns cvss_score but its description talks about cvss_version`
+      );
+    }
+  }
+});
+
+// The versions the clause enumerates are the values the column can hold:
+// apps/api/internal/cvss/select.go's canonical Version constants (ParseVersion
+// maps every other spelling onto these or onto NULL). Read from the Go source so
+// a version added there fails here instead of going unexplained.
+test("CVSS_VERSIONS equals the canonical versions in apps/api/internal/cvss", () => {
+  const source = readFileSync(
+    new URL("../../../apps/api/internal/cvss/select.go", import.meta.url),
+    "utf8"
+  );
+  const block = /const \(\n((?:\s*V[0-9]+\s+Version = "[^"]+"\n)+)\)/.exec(source);
+  assert.ok(block, "the cvss.Version constant block was not found in select.go");
+  const goVersions = [...block[1].matchAll(/Version = "([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual([...CVSS_VERSIONS], goVersions);
+  for (const v of CVSS_VERSIONS) {
+    assert.equal(CVSS_VERSION_NOTE.includes(`"${v}"`), true, `the note omits "${v}"`);
+  }
 });
 
 // The counts come from an asynchronous scan (service.ScanTracker: running /
