@@ -1630,7 +1630,7 @@
     "reasonSourceUnavailable": "脆弱性情報源がまったく応答していません (例: 2026-10-22 から停止中の MyJVN)。復旧までは、運用者が SBOMHUB_JVN=off を設定すると JVN なしでスキャンできます。",
     "reasonTruncated": "一部のコンポーネントで、情報源の検索結果が読み切れないほど多く、取りこぼしがある可能性があります。",
     "reasonWriteRefused": "データベースが一部の検出結果の保存を拒否しました。",
-    "reasonDistroDataFailed": "一部のパッケージで Linux ディストリビューションの修正情報 (Debian、Ubuntu、AlmaLinux、Rocky Linux) を読み取れませんでした。これらの検出結果にはディストリビューションを考慮したラベルではなく、通常の NVD/JVN のラベルが付いたままです。",
+    "reasonDistroDataFailed": "一部のパッケージで Linux ディストリビューションの修正情報 (Debian、Ubuntu、AlmaLinux、Rocky Linux) を読み取れませんでした。これらの検出結果は既存のラベルのままで、再評価されていません。",
     "reasonQueueFull": "このテナントで待機中のスキャンが多すぎたため (SBOMHUB_SCAN_TENANT_CONCURRENCY)、このスキャンは実行されませんでした。",
     "reasonScanError": "内部エラーによりスキャンが停止しました。",
     "reasonInterrupted": "スキャンを実行していた API サーバーが、終了前に停止しました (クラッシュや再起動)。",

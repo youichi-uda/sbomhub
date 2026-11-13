@@ -1630,7 +1630,7 @@
     "reasonSourceUnavailable": "A vulnerability data source is not answering at all (for example MyJVN, suspended since 2026-10-22). An operator can set SBOMHUB_JVN=off to scan without JVN until it returns.",
     "reasonTruncated": "A source returned more matches than could be read for some components; some matches may be missing.",
     "reasonWriteRefused": "The database refused to save some findings.",
-    "reasonDistroDataFailed": "Linux distribution fix data (Debian, Ubuntu, AlmaLinux, Rocky Linux) could not be read for some packages; their findings keep the generic NVD/JVN label instead of the distribution-aware one.",
+    "reasonDistroDataFailed": "Linux distribution fix data (Debian, Ubuntu, AlmaLinux, Rocky Linux) could not be read for some packages; their findings keep the labels they already had and were not re-evaluated.",
     "reasonQueueFull": "Too many scans were waiting for this tenant (SBOMHUB_SCAN_TENANT_CONCURRENCY), so this scan did not run.",
     "reasonScanError": "The scan stopped with an internal error.",
     "reasonInterrupted": "The API server running the scan stopped (crash or restart) before the scan finished.",

@@ -25,6 +25,7 @@ import { describe, test } from "node:test";
 import {
   countQualifierKey,
   emptyStateKey,
+  latestAfterListRead,
   sameScanAnswer,
   parseScanStatus,
   pollIntervalMs,
@@ -284,5 +285,21 @@ describe("countQualifierKey", () => {
     // Codex R6: no SBOM is "not scanned", never a bare 0.
     assert.equal(countQualifierKey({ kind: "no-sbom" }, { failed: false, fresh: false }), "tabCountNotScanned");
     assert.equal(countQualifierKey({ kind: "no-sbom" }, FRESH), "tabCountNotScanned");
+  });
+});
+
+// Codex R7 Medium: a list read for SBOM A that saw B as latest must not move
+// the page back to B when it has meanwhile moved on to C.
+describe("latestAfterListRead", () => {
+  test("moves to what the list read saw only while the page is still on the list's SBOM", () => {
+    assert.equal(latestAfterListRead("A", "A", "B"), "B");
+    assert.equal(latestAfterListRead(null, null, "B"), "B");
+  });
+  test("never moves backwards or sideways once the page moved on", () => {
+    assert.equal(latestAfterListRead("C", "A", "B"), "C");
+    assert.equal(latestAfterListRead("C", null, "B"), "C");
+  });
+  test("no change when the list read saw the same SBOM", () => {
+    assert.equal(latestAfterListRead("A", "A", "A"), "A");
   });
 });

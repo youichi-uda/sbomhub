@@ -311,3 +311,18 @@ export function countQualifierKey(view: ScanView, list: ListState): CountQualifi
       return "tabCountUnconfirmed";
   }
 }
+
+/**
+ * The latest-SBOM id the page should hold after a vulnerability list read for
+ * `listSbom` saw `observed` as the latest SBOM. It moves to `observed` only
+ * while the page still holds `listSbom`: a slow read must not drag a page that
+ * has meanwhile moved on (another upload, a newer read) back to an older SBOM
+ * (Codex R7).
+ */
+export function latestAfterListRead(
+  current: string | null,
+  listSbom: string | null,
+  observed: string | null,
+): string | null {
+  return current === listSbom ? observed : current;
+}

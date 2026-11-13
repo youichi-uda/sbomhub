@@ -29,6 +29,7 @@ import { useRetainedData } from "@/lib/query/use-retained-data";
 import { loadErrorState } from "@/lib/load-state";
 import {
   countQualifierKey,
+  latestAfterListRead,
   parseScanStatus,
   pollIntervalMs,
   scanView,
@@ -195,7 +196,7 @@ export default function ProjectDetailPage() {
   // previous order stays on screen until the new one arrives (or fails).
   const vulnerabilitiesQuery = useQuery({
     queryKey: queryKeys.projects.vulnerabilities(projectId, vulnSort, sbomId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       logged("Failed to load vulnerabilities:", async (): Promise<{ data: Vulnerability[]; totalCount: number }> => {
         const forSbom = sbomId;
         const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId, {
@@ -207,9 +208,15 @@ export default function ProjectDetailPage() {
         // `forSbom`, the list was `forSbom`'s. If another SBOM appeared
         // (CI), move the page to it — the list and scan-status keys follow
         // the id, so this answer (filed under the old SBOM) is never shown.
+        signal.throwIfAborted();
         const latest = (await api.projects.getLatestSbom(projectId))?.id ?? null;
+        signal.throwIfAborted();
         if (latest !== forSbom) {
-          queryClient.setQueryData(queryKeys.projects.latestSbomId(projectId), latest);
+          // Only while the page still holds `forSbom` (Codex R7).
+          queryClient.setQueryData<string | null>(
+            queryKeys.projects.latestSbomId(projectId),
+            (current) => latestAfterListRead(current ?? null, forSbom, latest),
+          );
         }
         return { data: data || [], totalCount };
       }),
