@@ -618,7 +618,13 @@ func (h *SbomHandler) Get(c echo.Context) error {
 
 	sbom, err := h.sbomService.GetLatest(c.Request().Context(), projectID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "sbom not found"})
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "sbom not found"})
+		}
+		// A database failure is not "no SBOM": the web reads 404 as "not
+		// scanned". Log specifics server-side, return a generic body.
+		slog.Warn("sbom: get latest sbom failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to get SBOM"})
 	}
 
 	return c.JSON(http.StatusOK, sbom)
