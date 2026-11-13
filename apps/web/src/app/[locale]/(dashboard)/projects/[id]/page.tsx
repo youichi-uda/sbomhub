@@ -408,10 +408,14 @@ export default function ProjectDetailPage() {
   }
 
   if (!project) {
-    // Only a 404 means the project is gone (or belongs to another tenant).
+    // Only a 404 (gone, or another tenant's) or a 400 (the id in the URL is
+    // not a project id at all, so nothing can exist there) means not found.
     // A 500 / network failure must not read as "deleted": the API answers
     // 500 {"error":"failed to get project"} when the database is down.
-    if (projectQuery.error instanceof APIError && projectQuery.error.status === 404) {
+    if (
+      projectQuery.error instanceof APIError &&
+      (projectQuery.error.status === 404 || projectQuery.error.status === 400)
+    ) {
       return <div className="flex items-center justify-center h-64">{tc("projectNotFound")}</div>;
     }
     return (

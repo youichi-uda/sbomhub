@@ -66,6 +66,14 @@ test.describe('project page load failures', () => {
     await expect(page.getByTestId('project-load-error')).toHaveCount(0);
   });
 
+  test('a malformed project id (API 400) is "Project not found", without a Retry', async ({ page }) => {
+    // The API answers 400 {"error":"invalid project id"}: no project can
+    // exist at that URL, so retrying cannot help.
+    await page.goto('/en/projects/not-a-project-id');
+    await expect(page.getByText(en.Common.projectNotFound, { exact: true })).toBeVisible();
+    await expect(page.getByTestId('project-load-error')).toHaveCount(0);
+  });
+
   test('an unknown project id is "Project not found" from the real API', async ({ page }) => {
     await page.goto('/en/projects/00000000-0000-0000-0000-00000000dead');
     await expect(page.getByText(en.Common.projectNotFound, { exact: true })).toBeVisible();
