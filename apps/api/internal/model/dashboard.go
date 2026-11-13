@@ -45,7 +45,14 @@ type TopRisk struct {
 	// an un-triaged CRITICAL as harmless on the dashboard and in the
 	// PDF/Excel reports. Same contract as model.Vulnerability.CVSSScore
 	// (M46 wave 4; f97c7fa established the shape).
-	CVSSScore        *float64  `json:"cvss_score,omitempty"`
+	CVSSScore *float64 `json:"cvss_score,omitempty"`
+	// CVSSVersion is the CVSS version cvss_score (and severity) were taken
+	// from: "3.1", "3.0", "4.0" or "2.0" (M67, migration 069). Omitted when
+	// unknown — no usable assessment, an unrecognised feed version, or a row
+	// not re-derived since 069. It can be present without cvss_score (an
+	// assessment that states a rating but no usable score). Read from the
+	// same vulnerabilities row as CVSSScore.
+	CVSSVersion      *string   `json:"cvss_version,omitempty"`
 	Severity         string    `json:"severity"`
 	ProjectID        uuid.UUID `json:"project_id"`
 	ProjectName      string    `json:"project_name"`

@@ -45,13 +45,13 @@ func TestGetTopRisksByTenant_ReadsRealEPSSColumn(t *testing.T) {
 	mock.ExpectQuery(pattern.String()).
 		WithArgs(tenantID, 10).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"cve_id", "epss_score", "cvss_score", "severity",
+			"cve_id", "epss_score", "cvss_score", "cvss_version", "severity",
 			"project_id", "project_name", "component_name", "component_version",
 		}).
 			// Un-synced CVE: the bare column yields a raw NULL -> nil pointer.
-			AddRow("CVE-2026-0001", nil, 9.8, "CRITICAL", projID, "app-a", "libx", "1.0").
+			AddRow("CVE-2026-0001", nil, 9.8, nil, "CRITICAL", projID, "app-a", "libx", "1.0").
 			// Synced CVE: the real score passes through.
-			AddRow("CVE-2026-0002", 0.4237, 7.5, "HIGH", projID, "app-a", "liby", "2.0"))
+			AddRow("CVE-2026-0002", 0.4237, 7.5, nil, "HIGH", projID, "app-a", "liby", "2.0"))
 
 	risks, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, "cvss")
 	if err != nil {
@@ -103,13 +103,13 @@ func TestGetTopRisksByTenant_NoCVSSZeroSentinel(t *testing.T) {
 	mock.ExpectQuery(bare.String()).
 		WithArgs(tenantID, 10).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"cve_id", "epss_score", "cvss_score", "severity",
+			"cve_id", "epss_score", "cvss_score", "cvss_version", "severity",
 			"project_id", "project_name", "component_name", "component_version",
 		}).
 			// Un-scored CVE: the bare column yields a raw NULL -> nil pointer.
-			AddRow("CVE-2026-0003", float64(0), nil, "CRITICAL", projID, "app-a", "libz", "1.2").
+			AddRow("CVE-2026-0003", float64(0), nil, nil, "CRITICAL", projID, "app-a", "libz", "1.2").
 			// Real "None" score: 0.0 passes through non-nil.
-			AddRow("CVE-2026-0004", float64(0), float64(0), "LOW", projID, "app-a", "libw", "2.0"))
+			AddRow("CVE-2026-0004", float64(0), float64(0), nil, "LOW", projID, "app-a", "libw", "2.0"))
 
 	risks, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, "epss")
 	if err != nil {
@@ -142,7 +142,7 @@ func TestGetTopRisksByTenant_NoCVSSZeroSentinel(t *testing.T) {
 	repo2 := NewDashboardRepository(db2)
 	mock2.ExpectQuery(sentinel.String()).WithArgs(tenantID, 10).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"cve_id", "epss_score", "cvss_score", "severity",
+			"cve_id", "epss_score", "cvss_score", "cvss_version", "severity",
 			"project_id", "project_name", "component_name", "component_version",
 		}))
 	if _, err := repo2.GetTopRisksByTenant(context.Background(), tenantID, 10, "epss"); err == nil {
@@ -175,11 +175,11 @@ func TestGetTopRisksByTenant_NullEPSSScansCleanly(t *testing.T) {
 	mock.ExpectQuery(`(?is)FROM\s+vulnerabilities\s+v`).
 		WithArgs(tenantID, 10).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"cve_id", "epss_score", "cvss_score", "severity",
+			"cve_id", "epss_score", "cvss_score", "cvss_version", "severity",
 			"project_id", "project_name", "component_name", "component_version",
 		}).
-			AddRow("CVE-2026-0003", nil, 9.8, "CRITICAL", projID, "app-a", "libx", "1.0").
-			AddRow("CVE-2026-0004", float64(0), 9.8, "CRITICAL", projID, "app-a", "libx", "1.0"))
+			AddRow("CVE-2026-0003", nil, 9.8, nil, "CRITICAL", projID, "app-a", "libx", "1.0").
+			AddRow("CVE-2026-0004", float64(0), 9.8, nil, "CRITICAL", projID, "app-a", "libx", "1.0"))
 
 	risks, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, "cvss")
 	if err != nil {
@@ -208,7 +208,7 @@ func TestGetTopRisksByTenant_NullEPSSScansCleanly(t *testing.T) {
 // dedup order must stay unchanged in both branches.
 func TestGetTopRisksByTenant_OuterOrderBy(t *testing.T) {
 	cols := []string{
-		"cve_id", "epss_score", "cvss_score", "severity",
+		"cve_id", "epss_score", "cvss_score", "cvss_version", "severity",
 		"project_id", "project_name", "component_name", "component_version",
 	}
 
@@ -257,7 +257,7 @@ func TestGetTopRisksByTenant_OuterOrderBy(t *testing.T) {
 			mock.ExpectQuery(tc.wantOuter.String()).
 				WithArgs(tenantID, 10).
 				WillReturnRows(sqlmock.NewRows(cols).
-					AddRow("CVE-2026-1000", 0.9, 5.0, "MEDIUM", projID, "app", "lib", "1.0"))
+					AddRow("CVE-2026-1000", 0.9, 5.0, nil, "MEDIUM", projID, "app", "lib", "1.0"))
 
 			if _, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, tc.sortBy); err != nil {
 				t.Fatalf("GetTopRisksByTenant(%q): %v", tc.sortBy, err)
@@ -275,7 +275,7 @@ func TestGetTopRisksByTenant_OuterOrderBy(t *testing.T) {
 // outer wrapper order may change.
 func TestGetTopRisksByTenant_InnerDistinctOnUnchanged(t *testing.T) {
 	cols := []string{
-		"cve_id", "epss_score", "cvss_score", "severity",
+		"cve_id", "epss_score", "cvss_score", "cvss_version", "severity",
 		"project_id", "project_name", "component_name", "component_version",
 	}
 	inner := regexp.MustCompile(`(?is)DISTINCT ON \(v\.cve_id\).*ORDER BY v\.cve_id, v\.cvss_score DESC`)
@@ -291,7 +291,7 @@ func TestGetTopRisksByTenant_InnerDistinctOnUnchanged(t *testing.T) {
 		mock.ExpectQuery(inner.String()).
 			WithArgs(tenantID, 10).
 			WillReturnRows(sqlmock.NewRows(cols).
-				AddRow("CVE-2026-2000", 0.1, 8.0, "HIGH", projID, "app", "lib", "1.0"))
+				AddRow("CVE-2026-2000", 0.1, 8.0, nil, "HIGH", projID, "app", "lib", "1.0"))
 
 		if _, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, sortBy); err != nil {
 			t.Fatalf("GetTopRisksByTenant(%q): %v", sortBy, err)

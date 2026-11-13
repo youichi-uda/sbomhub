@@ -355,7 +355,7 @@ func ssvcWithVulnRow(rows *sqlmock.Rows, decision string, now time.Time) *sqlmoc
 		"none", "no", "partial", "minimal", "minimal",
 		decision, false, false, nil, now,
 		"notes", now, now,
-		"HIGH", 7.5, false, nil,
+		"HIGH", 7.5, nil, false, nil,
 	)
 }
 

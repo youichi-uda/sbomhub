@@ -146,6 +146,12 @@ type SSVCAssessmentWithVuln struct {
 	SSVCAssessment
 	VulnerabilitySeverity  string   `json:"vulnerability_severity"`
 	VulnerabilityCVSSScore *float64 `json:"vulnerability_cvss_score,omitempty"`
-	VulnerabilityInKEV     bool     `json:"vulnerability_in_kev"`
-	VulnerabilityEPSSScore *float64 `json:"vulnerability_epss_score,omitempty"`
+	// VulnerabilityCVSSVersion is the CVSS version vulnerability_cvss_score
+	// (and vulnerability_severity) were taken from: "3.1", "3.0", "4.0" or
+	// "2.0" (M67, migration 069). Omitted when unknown; it can be present
+	// without vulnerability_cvss_score. Same semantics as cvss_version on
+	// the vulnerability list (M71).
+	VulnerabilityCVSSVersion *string  `json:"vulnerability_cvss_version,omitempty"`
+	VulnerabilityInKEV       bool     `json:"vulnerability_in_kev"`
+	VulnerabilityEPSSScore   *float64 `json:"vulnerability_epss_score,omitempty"`
 }

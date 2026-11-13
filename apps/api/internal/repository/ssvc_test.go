@@ -18,7 +18,7 @@ var ssvcWithVulnColumns = []string{
 	"exploitation", "automatable", "technical_impact", "mission_prevalence", "safety_impact",
 	"decision", "exploitation_auto", "automatable_auto", "assessed_by", "assessed_at",
 	"notes", "created_at", "updated_at",
-	"severity", "cvss_score", "in_kev", "epss_score",
+	"severity", "cvss_score", "cvss_version", "in_kev", "epss_score",
 }
 
 // TestGetImmediateAssessments_ZeroRowsReturnsNonNilSlice pins the JSON

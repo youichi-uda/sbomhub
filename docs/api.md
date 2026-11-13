@@ -223,7 +223,11 @@ not re-derived since migration 069. It can be present without `cvss_score`, for
 an assessment that states a rating but no usable score. The same field is
 returned by `GET /api/v1/search/cve`, `GET /api/v1/search/component`,
 `GET /api/v1/vulnerabilities/:cve_id/impact`, `GET /api/v1/vulnerabilities/:cve_id/paths`,
-`GET /api/v1/projects/:id/kev` and the MCP equivalents.
+`GET /api/v1/projects/:id/kev`, the `top_risks` rows of `GET /api/v1/dashboard/summary`, the rows of
+`GET /api/v1/dashboard/top-risks`, and the MCP equivalents. The SSVC
+assessment lists (`GET /api/v1/projects/:id/ssvc/assessments`,
+`GET /api/v1/ssvc/immediate`) return it as `vulnerability_cvss_version`, beside
+`vulnerability_cvss_score`, with the same meaning.
 
 ---
 

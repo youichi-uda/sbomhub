@@ -224,8 +224,11 @@ CVSS のバージョンです: `"3.1"`、`"3.0"`、`"4.0"`、`"2.0"` のいず�
 省略されます。`cvss_score` なしで返ることもあります (スコアはないが評価の
 レーティングだけが示されている場合)。同じフィールドは `GET /api/v1/search/cve`、
 `GET /api/v1/search/component`、`GET /api/v1/vulnerabilities/:cve_id/impact`、
-`GET /api/v1/vulnerabilities/:cve_id/paths`、`GET /api/v1/projects/:id/kev` と
-MCP の対応エンドポイントでも返ります。
+`GET /api/v1/vulnerabilities/:cve_id/paths`、`GET /api/v1/projects/:id/kev`、
+`GET /api/v1/dashboard/summary` の `top_risks` 各行、`GET /api/v1/dashboard/top-risks` の各行、
+MCP の対応エンドポイントでも返ります。SSVC 評価の一覧
+(`GET /api/v1/projects/:id/ssvc/assessments`、`GET /api/v1/ssvc/immediate`) では
+`vulnerability_cvss_score` の横に `vulnerability_cvss_version` として同じ意味で返ります。
 
 ---
 

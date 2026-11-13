@@ -288,7 +288,7 @@ func (r *SSVCRepository) ListAssessments(ctx context.Context, projectID uuid.UUI
 			a.exploitation, a.automatable, a.technical_impact, a.mission_prevalence, a.safety_impact,
 			a.decision, a.exploitation_auto, a.automatable_auto, a.assessed_by, a.assessed_at,
 			COALESCE(a.notes, ''), a.created_at, a.updated_at,
-			COALESCE(v.severity, ''), v.cvss_score, v.in_kev, v.epss_score
+			COALESCE(v.severity, ''), v.cvss_score, v.cvss_version, v.in_kev, v.epss_score
 		FROM ssvc_assessments a
 		JOIN vulnerabilities v ON v.id = a.vulnerability_id
 		WHERE a.project_id = $1
@@ -327,7 +327,7 @@ func (r *SSVCRepository) ListAssessments(ctx context.Context, projectID uuid.UUI
 			&a.Exploitation, &a.Automatable, &a.TechnicalImpact, &a.MissionPrevalence, &a.SafetyImpact,
 			&a.Decision, &a.ExploitationAuto, &a.AutomatableAuto, &a.AssessedBy, &a.AssessedAt,
 			&a.Notes, &a.CreatedAt, &a.UpdatedAt,
-			&a.VulnerabilitySeverity, &a.VulnerabilityCVSSScore, &a.VulnerabilityInKEV, &a.VulnerabilityEPSSScore,
+			&a.VulnerabilitySeverity, &a.VulnerabilityCVSSScore, &a.VulnerabilityCVSSVersion, &a.VulnerabilityInKEV, &a.VulnerabilityEPSSScore,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -563,7 +563,7 @@ func (r *SSVCRepository) GetImmediateAssessments(ctx context.Context) ([]model.S
 			a.exploitation, a.automatable, a.technical_impact, a.mission_prevalence, a.safety_impact,
 			a.decision, a.exploitation_auto, a.automatable_auto, a.assessed_by, a.assessed_at,
 			COALESCE(a.notes, ''), a.created_at, a.updated_at,
-			COALESCE(v.severity, ''), v.cvss_score, v.in_kev, v.epss_score
+			COALESCE(v.severity, ''), v.cvss_score, v.cvss_version, v.in_kev, v.epss_score
 		FROM ssvc_assessments a
 		JOIN vulnerabilities v ON v.id = a.vulnerability_id
 		WHERE a.decision = 'immediate'
@@ -584,7 +584,7 @@ func (r *SSVCRepository) GetImmediateAssessments(ctx context.Context) ([]model.S
 			&a.Exploitation, &a.Automatable, &a.TechnicalImpact, &a.MissionPrevalence, &a.SafetyImpact,
 			&a.Decision, &a.ExploitationAuto, &a.AutomatableAuto, &a.AssessedBy, &a.AssessedAt,
 			&a.Notes, &a.CreatedAt, &a.UpdatedAt,
-			&a.VulnerabilitySeverity, &a.VulnerabilityCVSSScore, &a.VulnerabilityInKEV, &a.VulnerabilityEPSSScore,
+			&a.VulnerabilitySeverity, &a.VulnerabilityCVSSScore, &a.VulnerabilityCVSSVersion, &a.VulnerabilityInKEV, &a.VulnerabilityEPSSScore,
 		); err != nil {
 			return nil, err
 		}

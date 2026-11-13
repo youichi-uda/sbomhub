@@ -356,9 +356,9 @@ func TestGatherReportData_PopulatesSummaryAndTopRisksFromTenantScopedDashboard(t
 	mock.ExpectQuery(`(?is)DISTINCT ON \(v\.cve_id\).*ORDER BY epss_score DESC NULLS LAST`).
 		WithArgs(tenantID, 10).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"cve_id", "epss_score", "cvss_score", "severity",
+			"cve_id", "epss_score", "cvss_score", "cvss_version", "severity",
 			"project_id", "project_name", "component_name", "component_version",
-		}).AddRow("CVE-2026-9999", 0.75, 9.1, "CRITICAL", projID, "app-a", "libz", "1.2"))
+		}).AddRow("CVE-2026-9999", 0.75, 9.1, nil, "CRITICAL", projID, "app-a", "libz", "1.2"))
 
 	// 6. GetTrendByTenant(ctx, tenantID, 30) — arg order is (days, tenantID).
 	mock.ExpectQuery(`WITH date_series AS`).
