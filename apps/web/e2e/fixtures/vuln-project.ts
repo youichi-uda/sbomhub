@@ -225,17 +225,26 @@ export async function reportFullScanCoverage(page: Page): Promise<void> {
     await page.route(
         (url) => /^\/api\/v1\/projects\/[^/]+\/sboms\/[^/]+\/scan-status$/.test(url.pathname),
         async (route) => {
+            let res;
             try {
-                const res = await route.fetch();
-                const body = await res.json();
-                if (body && (body.status === 'completed' || body.status === 'failed')) {
-                    delete body.skipped_sources;
-                    body.checked_sources = ['nvd', 'jvn', 'distro'];
-                }
-                await route.fulfill({ response: res, json: body });
+                res = await route.fetch();
             } catch {
-                // the page closed while the request was in flight
+                // the page closed (or the API is down): do not leave it pending
+                return route.abort().catch(() => {});
             }
+            let body;
+            try {
+                body = await res.json();
+            } catch {
+                // not JSON: pass the API's answer through unchanged
+                return route.fulfill({ response: res }).catch(() => {});
+            }
+            if (body && (body.status === 'completed' || body.status === 'failed')) {
+                delete body.skipped_sources;
+                body.checked_sources = ['nvd', 'jvn', 'distro'];
+            }
+            // .catch: the page may have closed meanwhile
+            await route.fulfill({ response: res, json: body }).catch(() => {});
         },
     );
 }

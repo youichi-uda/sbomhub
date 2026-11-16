@@ -72,6 +72,10 @@ function stringList(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x !== "") : [];
 }
 
+function isSourceList(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === "string" && x !== "");
+}
+
 /**
  * Normalises a scan-status body. Anything the page does not recognise as a
  * state reads as unknown — never as completed.
@@ -94,8 +98,12 @@ export function parseScanStatus(raw: unknown): ScanStatus {
   }
   if (status === "completed" || status === "failed") {
     out.skippedSources = stringList(o.skipped_sources);
-    // Anything but an array is "not reported", never "none" (§31).
-    out.checkedSources = Array.isArray(o.checked_sources) ? stringList(o.checked_sources) : null;
+    // Coverage fails closed (§31; Codex webcov R1): checked_sources counts as
+    // reported only as a whole valid list — anything else is "not reported",
+    // never "none" — and a malformed skipped_sources (absent / null means
+    // none skipped) leaves what was skipped unknown, so it cannot be full.
+    const skippedValid = o.skipped_sources === undefined || o.skipped_sources === null || isSourceList(o.skipped_sources);
+    out.checkedSources = skippedValid && isSourceList(o.checked_sources) ? [...o.checked_sources] : null;
   }
   return out;
 }

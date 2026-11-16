@@ -312,9 +312,26 @@ describe("checked_sources (UPGRADE §31)", () => {
     assert.equal(p({}).checkedSources, null);
     assert.equal(p({ checked_sources: null }).checkedSources, null);
     assert.equal(p({ checked_sources: "nvd" }).checkedSources, null);
-    assert.deepEqual(p({ checked_sources: ["nvd", 3, "", null] }).checkedSources, ["nvd"]);
     assert.equal(parseScanStatus({ status: "running", checked_sources: ["nvd"] }).checkedSources, null);
     assert.equal(parseScanStatus({ status: "unknown", checked_sources: ["nvd"] }).checkedSources, null);
+  });
+  // Codex webcov R1 Medium: a malformed coverage field must not fail open
+  // (members dropped, any array taken as "reported").
+  test("parse: a malformed checked_sources or skipped_sources leaves coverage not reported", () => {
+    const p = (extra) => parseScanStatus({ status: "completed", vulnerabilities: { total: 0 }, ...extra });
+    assert.equal(p({ checked_sources: [42] }).checkedSources, null);
+    assert.equal(p({ checked_sources: ["nvd", "jvn", "distro", null] }).checkedSources, null);
+    assert.equal(p({ checked_sources: ["nvd", ""] }).checkedSources, null);
+    // skipped_sources malformed: what was skipped is unknown, so the checked
+    // list cannot prove full coverage
+    for (const skipped_sources of ["jvn", ["jvn", 3], { jvn: true }, [""]]) {
+      const s = p({ checked_sources: ["nvd", "jvn", "distro"], skipped_sources });
+      assert.equal(s.checkedSources, null, JSON.stringify(skipped_sources));
+      assert.notDeepEqual(scanCoverage(s.skippedSources, s.checkedSources), { kind: "full" });
+    }
+    // absent / null skipped_sources is "none skipped" (the API omits it)
+    assert.deepEqual(p({ checked_sources: ["nvd", "jvn", "distro"] }).checkedSources, ["nvd", "jvn", "distro"]);
+    assert.deepEqual(p({ checked_sources: ["nvd", "jvn", "distro"], skipped_sources: null }).checkedSources, ["nvd", "jvn", "distro"]);
   });
   test("coverage: full only with all three checked and nothing skipped", () => {
     assert.deepEqual(scanCoverage([], ALL), { kind: "full" });
