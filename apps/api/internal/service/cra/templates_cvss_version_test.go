@@ -59,8 +59,8 @@ func TestRender_CVSSVersionNamedWithScore(t *testing.T) {
 	}
 }
 
-// Golden fixtures carry no CVSSVersion, so the goldens are unchanged; with
-// both a version and a vector the version comes first, then the vector.
+// With both a version and a vector the version comes first, then the
+// vector (the golden fixtures carry both since M75).
 func TestRender_CVSSVersionAndVector(t *testing.T) {
 	data := fixedGoldenInput()
 	data.CVSSVersion = "3.1"

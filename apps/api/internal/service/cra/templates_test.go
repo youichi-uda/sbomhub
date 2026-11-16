@@ -24,9 +24,12 @@ func fixedGoldenInput() CRATemplateData {
 		ProductVersion: "1.4.2",
 		VendorName:     "Example Manufacturing Co., Ltd.",
 
-		CVEID:                "CVE-2026-12345",
-		CVSSScore:            "9.8",
-		CVSSVector:           "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+		CVEID:      "CVE-2026-12345",
+		CVSSScore:  "9.8",
+		CVSSVector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+		// M75: the runner now fills the stored cvss_version, so the goldens
+		// show the version label drafts carry.
+		CVSSVersion:          "3.1",
 		Severity:             "Critical",
 		VulnerabilitySummary: "Remote code execution via unauthenticated MQTT broker handler.",
 		VulnerabilityDetail:  "An attacker can craft a malformed CONNECT packet that triggers a buffer overflow in the MQTT broker module, leading to remote code execution as root on the gateway device.",

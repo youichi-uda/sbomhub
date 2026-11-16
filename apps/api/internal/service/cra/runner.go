@@ -60,6 +60,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -249,6 +250,16 @@ type VulnerabilityCVELookup interface {
 	GetCVEIDByIDInProject(ctx context.Context, tenantID, projectID, vulnerabilityID uuid.UUID) (string, error)
 }
 
+// VulnerabilityCVSSLookup loads the stored CVSS score and cvss_version of a
+// vulnerability, scoped to (tenant, project) like VulnerabilityCVELookup
+// (sql.ErrNoRows when out of scope). Satisfied by
+// *repository.VulnerabilityRepository (GetCVSSByIDInProject). M75: the
+// runner prints them in the draft's CVSS line; the templates print the
+// version only when it is a canonical stored value (§20).
+type VulnerabilityCVSSLookup interface {
+	GetCVSSByIDInProject(ctx context.Context, tenantID, projectID, vulnerabilityID uuid.UUID) (score *float64, version *string, err error)
+}
+
 // AuditLogWriter mirrors triage.AuditLogWriter; satisfied by
 // *repository.AuditRepository.
 type AuditLogWriter interface {
@@ -302,6 +313,7 @@ type Runner struct {
 	craReports          CRAReportWriter
 	llmCalls            LLMCallWriter
 	vulnCVE             VulnerabilityCVELookup
+	vulnCVSS            VulnerabilityCVSSLookup
 	audit               AuditLogWriter
 
 	defaultProvider  llm.Provider
@@ -326,7 +338,11 @@ type RunnerConfig struct {
 	CRAReports          CRAReportWriter
 	LLMCalls            LLMCallWriter
 	VulnerabilityCVE    VulnerabilityCVELookup
-	Audit               AuditLogWriter
+	// VulnerabilityCVSS is optional. When nil and VulnerabilityCVE also
+	// implements VulnerabilityCVSSLookup (the production repository does),
+	// that is used. With neither, drafts print no CVSS line (as before M75).
+	VulnerabilityCVSS VulnerabilityCVSSLookup
+	Audit             AuditLogWriter
 
 	Provider         llm.Provider
 	ProviderResolver ProviderResolver
@@ -386,6 +402,13 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		generatedBy = "SBOMHub/cra"
 	}
 
+	vulnCVSS := cfg.VulnerabilityCVSS
+	if vulnCVSS == nil {
+		if l, ok := cfg.VulnerabilityCVE.(VulnerabilityCVSSLookup); ok {
+			vulnCVSS = l
+		}
+	}
+
 	return &Runner{
 		vexDrafts:           cfg.VEXDrafts,
 		advisoryExcerpts:    cfg.AdvisoryExcerpts,
@@ -393,6 +416,7 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		craReports:          cfg.CRAReports,
 		llmCalls:            cfg.LLMCalls,
 		vulnCVE:             cfg.VulnerabilityCVE,
+		vulnCVSS:            vulnCVSS,
 		audit:               cfg.Audit,
 		defaultProvider:     cfg.Provider,
 		providerResolver:    cfg.ProviderResolver,
@@ -541,6 +565,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		sourceVEX  *repository.VEXDraft
 		advisories []repository.AdvisoryExcerpt
 		reachRows  []repository.ReachabilityResult
+		cvssInfo   craCVSS
 	)
 	if err := r.txManager.RunRead(ctx, in.TenantID, func(ctx context.Context) error {
 		var err error
@@ -556,6 +581,14 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			return err
 		}
 		in.CVEID = resolvedCVE
+
+		// M75: the stored CVSS score / version for the draft's CVSS line,
+		// read in the same tx and scope as the CVE re-resolve. Both the
+		// LLM and the AI-disabled path render it.
+		cvssInfo, err = r.loadCVSS(ctx, in.TenantID, in.ProjectID, in.VulnerabilityID)
+		if err != nil {
+			return err
+		}
 
 		// Resolve source VEX draft (caller-supplied or latest approved).
 		sourceVEX, err = r.resolveSourceVEXDraft(ctx, in)
@@ -591,7 +624,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 
 	// AI-disabled fork — skips Stage 2 (no LLM call).
 	if _, ok := provider.(*llm.DisabledProvider); ok {
-		return r.runAIDisabled(ctx, in, provider, sourceVEX, awarenessTime)
+		return r.runAIDisabled(ctx, in, provider, sourceVEX, awarenessTime, cvssInfo)
 	}
 
 	// ----------------------------------------------------------------
@@ -676,7 +709,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	}
 
 	// Build template data + render.
-	data := buildTemplateData(in, sourceVEX, advisories, reachRows, aiFields, r.generatedBy, r.clock(), provider)
+	data := buildTemplateData(in, sourceVEX, advisories, reachRows, aiFields, r.generatedBy, r.clock(), provider, cvssInfo)
 	rendered, err := Render(in.ReportType, in.Lang, data)
 	if err != nil {
 		return nil, fmt.Errorf("cra.Run: render template: %w", err)
@@ -801,7 +834,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 // Wrapped in a single TxManager.RunWrite so the AI-disabled path gets
 // the same connection-pool hygiene as the LLM-enabled path. TOCTOU
 // re-validate (cve_id re-resolve) runs at the top of the write tx.
-func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Provider, sourceVEX *repository.VEXDraft, awarenessTime *time.Time) (*RunResult, error) {
+func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Provider, sourceVEX *repository.VEXDraft, awarenessTime *time.Time, cvssInfo craCVSS) (*RunResult, error) {
 	reason := "BYOK key not configured"
 	if dp, ok := provider.(*llm.DisabledProvider); ok && dp.Reason != "" {
 		reason = dp.Reason
@@ -810,7 +843,7 @@ func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Pr
 	// Build template data with empty AI fields — the template's `{{if}}`
 	// guards render placeholders. Deterministic fields (ProductName,
 	// CVEID, ReporterName, etc.) still flow through from RunInput.
-	data := buildTemplateData(in, sourceVEX, nil, nil, &craLLMFields{}, r.generatedBy, r.clock(), provider)
+	data := buildTemplateData(in, sourceVEX, nil, nil, &craLLMFields{}, r.generatedBy, r.clock(), provider, cvssInfo)
 	rendered, err := Render(in.ReportType, in.Lang, data)
 	if err != nil {
 		return nil, fmt.Errorf("cra.runAIDisabled: render template: %w", err)
@@ -974,6 +1007,38 @@ func (r *Runner) resolveProvider(ctx context.Context, tenantID uuid.UUID) (llm.P
 		return r.defaultProvider, nil
 	}
 	return &llm.DisabledProvider{Reason: "no LLM provider configured (set tenant_llm_config or SBOMHUB_LLM_PROVIDER env)"}, nil
+}
+
+// craCVSS is the stored CVSS data a draft prints (M75).
+type craCVSS struct {
+	Score   string // "9.8"; "" when the vulnerability has no score
+	Version string // vulnerabilities.cvss_version as stored; "" when NULL
+}
+
+// loadCVSS reads the stored CVSS score and version through vulnCVSS. No
+// lookup wired: an empty craCVSS (no CVSS line, as before M75). sql.ErrNoRows
+// (the vulnerability left the project since the CVE re-resolve) is
+// ErrVulnerabilityNotInProject; any other error fails the run rather than
+// silently drafting a report without its score.
+func (r *Runner) loadCVSS(ctx context.Context, tenantID, projectID, vulnID uuid.UUID) (craCVSS, error) {
+	if r.vulnCVSS == nil {
+		return craCVSS{}, nil
+	}
+	score, version, err := r.vulnCVSS.GetCVSSByIDInProject(ctx, tenantID, projectID, vulnID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return craCVSS{}, fmt.Errorf("cra.Run: %w", ErrVulnerabilityNotInProject)
+		}
+		return craCVSS{}, fmt.Errorf("cra.Run: load cvss for vulnerability_id: %w", err)
+	}
+	var out craCVSS
+	if score != nil {
+		out.Score = strconv.FormatFloat(*score, 'f', 1, 64)
+	}
+	if version != nil {
+		out.Version = *version
+	}
+	return out, nil
 }
 
 // resolveAuthoritativeCVEID re-resolves the canonical cve_id for the
@@ -1320,6 +1385,7 @@ func buildTemplateData(
 	generatedBy string,
 	now time.Time,
 	provider llm.Provider,
+	cvssInfo craCVSS,
 ) CRATemplateData {
 	// TODO(cra): advisories / reach are deliberately unused in
 	// template-data construction — verified 2026-07-02 (M24-3 F359):
@@ -1357,6 +1423,11 @@ func buildTemplateData(
 		PermanentRemediation:    aiFields.PermanentRemediation,
 		PreventionMeasures:      aiFields.PreventionMeasures,
 		UserNotificationSummary: aiFields.UserNotificationSummary,
+
+		// M75: stored values, not LLM output. The template prints the
+		// version only beside a score and only when canonical.
+		CVSSScore:   cvssInfo.Score,
+		CVSSVersion: cvssInfo.Version,
 
 		ReporterName: in.ReporterName,
 		ReporterRole: in.ReporterRole,

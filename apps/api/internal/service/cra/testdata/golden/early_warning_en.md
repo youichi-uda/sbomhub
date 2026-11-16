@@ -20,7 +20,7 @@
 ## 3. Vulnerability summary
 
 - **CVE ID**: CVE-2026-12345
-- **CVSS score**: 9.8 (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H)
+- **CVSS score**: 9.8 (CVSS v3.1) (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H)
 - **Severity**: Critical
 - **Description**:
 

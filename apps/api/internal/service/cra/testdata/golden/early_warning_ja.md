@@ -20,7 +20,7 @@
 ## 3. 脆弱性概要
 
 - **CVE ID**: CVE-2026-12345
-- **CVSS スコア**: 9.8 (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H)
+- **CVSS スコア**: 9.8 (CVSS v3.1) (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H)
 - **重大度**: Critical
 - **脆弱性の概要**:
 
