@@ -814,6 +814,15 @@ type ScanStatusResponse struct {
 	// checked (offline mode). Absent otherwise: running/unknown, or a scan
 	// recorded by an older replica (coverage unknown, not "none").
 	CheckedSources *[]string `json:"checked_sources,omitempty"`
+	// ScanRun (additive, 2026-11) is an opaque identifier of the scan this
+	// answer is about: one group of overlapping runs of the SBOM
+	// (service/scan_run.go). It changes whenever activity starts on the SBOM
+	// while none was active, and never repeats, so two answers with the same
+	// value are about the same scan — nothing began in between, even when
+	// every other field is equal. Compare it for equality only. Absent =
+	// unknown (status unknown, a legacy or older-replica write, an answer
+	// from one process's memory): then nothing can be concluded from it.
+	ScanRun string `json:"scan_run,omitempty"`
 }
 
 // VulnerabilitySummaryCount aggregates vulnerability counts by severity
@@ -905,13 +914,14 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	// round, a scan finishing during the count query answered "completed"
 	// with the pre-commit counts.
 	state := service.ScanStateUnknown
-	var errMsg, version string
+	var errMsg, version, scanRun string
 	var reasons, skipped, checked []string
 	checkedKnown := false
 	if h.scanTracker != nil {
 		d := h.scanTracker.GetStatus(sbomID)
 		state, errMsg, reasons, skipped, version = d.State, d.Error, d.Reasons, d.Skipped, d.Version
 		checked, checkedKnown = d.Checked, d.CheckedKnown
+		scanRun = d.Run
 	}
 
 	vulns, err := h.sbomService.GetVulnerabilitiesBySbom(c.Request().Context(), projectID, sbomID)
@@ -936,6 +946,9 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 		if s2, _, _, v2 := h.scanTracker.GetDetailVersion(sbomID); s2 != state || v2 != version {
 			state, errMsg, reasons, skipped = service.ScanStateRunning, "", nil, nil
 			checked, checkedKnown = nil, false
+			// Something happened meanwhile: the first read's scan run may
+			// no longer be the current one.
+			scanRun = ""
 		}
 	}
 
@@ -948,6 +961,9 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	if state == service.ScanStateFailed {
 		resp.Error = errMsg
 		resp.Reasons = reasons
+	}
+	if state != service.ScanStateUnknown {
+		resp.ScanRun = scanRun
 	}
 	if state == service.ScanStateCompleted || state == service.ScanStateFailed {
 		resp.SkippedSources = skipped

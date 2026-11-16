@@ -121,6 +121,21 @@ func scanStatusKeys(sbomID uuid.UUID) []string {
 //	young_hold    '1': the state was held running because the key is young;
 //	              'c': completed while young without a hold (Redis could
 //	              not evict), re-held if the holding scripts read it young
+//	grev          (2026-11, scan_run) rev after this version's last write;
+//	              see run_check
+//
+// The scan run (2026-11): g of the marker-less outcomes entry is the opaque
+// identifier scan-status returns as scan_run (scan_run.go). This version's
+// scripts give it a NEW value (ARGV, random, from the API process) whenever
+// activity starts while no run of the SBOM is active: a Begin that starts a
+// new group, and also an intent, rejoin, revived heartbeat, merge or a late
+// finish (one of a run not active here) that finds the SBOM idle; runs that
+// join an active group keep it. It is dropped (absent = unknown) when the
+// key was written by any other script (an older replica during a rolling
+// upgrade: every released version bumps rev on each write, and only this
+// version's bump records grev), so an older replica that resumes or restarts
+// activity can never leave a stale identifier on new activity. In outcomes,
+// so every reset of a group (any version) clears it too.
 const scanStatusLua = `
 local K = KEYS[1]
 local function nowms()
@@ -405,9 +420,64 @@ local function activate(g, now, lease)
   redis.call('HSET', K, 'r:' .. g, now + tonumber(lease))
 end
 -- Every write bumps rev: the status version readers compare (Codex M72
--- R14 High-1; a millisecond time was not unique per write).
+-- R14 High-1; a millisecond time was not unique per write). This version
+-- also records the new rev as grev (see run_check).
 local function bump()
-  redis.call('HINCRBY', K, 'rev', 1)
+  local r = redis.call('HINCRBY', K, 'rev', 1)
+  redis.call('HSET', K, 'grev', r)
+end
+-- The scan run: g of the marker-less outcomes entry (see the key layout).
+local function run_id()
+  for _, e in ipairs(load_outcomes()) do
+    if e.m == '' and type(e.g) == 'string' and e.g ~= '' then return e.g end
+  end
+  return nil
+end
+-- set_run sets the scan run (id nil drops it), on the entry add_skipped and
+-- add_checked use; any other marker-less entry loses its g.
+local function set_run(id)
+  local o = load_outcomes()
+  local entry, changed = nil, false
+  for _, e in ipairs(o) do
+    if e.m == '' then
+      if entry == nil and type(e.s) == 'table' then
+        entry = e
+      elseif e.g ~= nil then
+        e.g = nil
+        changed = true
+      end
+    end
+  end
+  if id == nil or id == '' then
+    if entry and entry.g ~= nil then entry.g = nil; changed = true end
+  else
+    if not entry then
+      entry = {m = '', s = {}}
+      table.insert(o, entry)
+    end
+    if entry.g ~= id then entry.g = id; changed = true end
+  end
+  if changed then save_outcomes(o) end
+end
+-- run_check runs first in every script: a rev this version did not write
+-- (an older replica's write, which bumps rev but not grev) drops the scan
+-- run — whatever that write did (it may have started activity without a new
+-- identifier) cannot be vouched for.
+local function run_check()
+  if not run_id() then return end
+  if redis.call('HGET', K, 'grev') ~= redis.call('HGET', K, 'rev') then
+    set_run(nil)
+    bump()
+  end
+end
+-- live_count: runs and intents whose lease has not run out (what sweep
+-- would keep).
+local function live_count(now)
+  local runs, _, intents = fields()
+  local n = 0
+  for _, exp in pairs(runs) do if exp >= now then n = n + 1 end end
+  for _, exp in pairs(intents) do if exp >= now then n = n + 1 end end
+  return n
 end
 local function expire(ttl)
   bump()
@@ -452,9 +522,10 @@ func newStatusScriptsSpan(maxRunAge, young, span time.Duration) *statusScripts {
 // known here — this Begin is a retry, or its intent was written — so finding
 // no trace of it means the key was lost, and with it what the group's
 // earlier finishes reported: the coverage becomes unknown, Codex coverage R5
-// High-2).
+// High-2), new scan run id. Returns the group's scan run (empty = unknown).
 const scanStatusBeginLua = `
 local now = nowms()
+run_check()
 local lost_identity = ARGV[4] == '1' and redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 0 and
   redis.call('HEXISTS', K, 'p:' .. ARGV[1]) == 0 and redis.call('HEXISTS', K, 'l:' .. ARGV[1]) == 0
 ensure_born()
@@ -464,10 +535,13 @@ sweep(now, nil)
 -- Likewise a Begin replacing its own intent: the intent already made the
 -- run a member of the current group (Codex M72 R19 High-1).
 if redis.call('HEXISTS', K, 'l:' .. ARGV[1]) == 1 or redis.call('HEXISTS', K, 'p:' .. ARGV[1]) == 1 then
+  -- (a live intent counts itself: only a swept run can find the SBOM idle)
+  local idle = live_count(now) == 0
   activate(ARGV[1], now, ARGV[2])
+  if idle then set_run(ARGV[5]) end
   publish(now)
   expire(ARGV[3])
-  return 1
+  return run_id() or ''
 end
 if redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 1 then lost_identity = false end
 local runs_b, _, intents_b = fields()
@@ -479,14 +553,16 @@ if count(runs_b) == 0 and count(intents_b) == 0 then
   -- could still be writing (Codex M72 R10 High-1).
   redis.call('HDEL', K, 'state', 'error', 'reasons', 'updated')
   save_outcomes({})
+  set_run(ARGV[5])
 end
 if lost_identity then coverage_unknown() end
 activate(ARGV[1], now, ARGV[2])
 redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated', now)
 expire(ARGV[3])
-return 1`
+return run_id() or ''`
 
-// ARGV: gen, lease ms, ttl ms. An INTENT (Codex M72 R18 High-1): a Begin
+// ARGV: gen, lease ms, ttl ms, new scan run id. Returns the scan run (empty =
+// unknown). An INTENT (Codex M72 R18 High-1): a Begin
 // queued behind older writes of its SBOM is written ahead of them as p:<gen>,
 // which reads as running (so those older writes cannot publish a terminal
 // state meanwhile) but takes no part in group decisions; the queued Begin
@@ -494,18 +570,23 @@ return 1`
 // interrupted, like a run.
 const scanStatusIntentLua = `
 local now = nowms()
+run_check()
 ensure_born()
 sweep(now, nil)
-if redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 1 then return 0 end
+if redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 1 then return run_id() or '' end
+local idle = live_count(now) == 0
 redis.call('HSET', K, 'p:' .. ARGV[1], now + tonumber(ARGV[2]))
+if idle then set_run(ARGV[4]) end
 publish(now)
 expire(ARGV[3])
-return 1`
+return run_id() or ''`
 
 // ARGV: gen, ttl ms, error marker (empty = completed), reasons JSON, skipped
 // sources JSON (recorded either way too, like the failure), checked sources
 // JSON (” when the finish reports no coverage; recorded either way too:
-// it can only narrow a group that already has checked sources).
+// it can only narrow a group that already has checked sources), new scan
+// run id (used for a late finish that finds the SBOM idle: its outcome, and
+// possibly its findings, arrive after the status was terminal).
 // Returns 1 if the run was active or swept as interrupted, 2 if Redis did not
 // know it (its begin never landed, or it lapsed and its tombstone expired). A
 // failure is recorded EITHER WAY (Codex M72 R5 High-2): a failure is never
@@ -513,11 +594,13 @@ return 1`
 // "failed", never a false "completed".
 const scanStatusFinishLua = `
 local now = nowms()
+run_check()
 ensure_born()
 local active = redis.call('HDEL', K, 'r:' .. ARGV[1]) == 1
 if redis.call('HDEL', K, 'p:' .. ARGV[1]) == 1 then active = true end
 sweep(now, ARGV[1])
 local wasLost = redis.call('HDEL', K, 'l:' .. ARGV[1]) == 1
+if not active and live_count(now) == 0 then set_run(ARGV[7]) end
 local ok, rs = pcall(cjson.decode, ARGV[4])
 if not ok or type(rs) ~= 'table' then rs = {} end
 add_failure(ARGV[3], rs)
@@ -536,11 +619,13 @@ return 2`
 // "s": [skipped source...], "c": [checked source...] and "cr": [gen of a
 // folded finish that reported coverage...] (both only when one did),
 // "cu": true when a folded rejoin or Mark* made the coverage unknown},
-// lease ms, ttl ms. The coalesced writes of a queue that overflowed: runs
+// lease ms, ttl ms, new scan run id (used when the merge finds the SBOM
+// idle). The coalesced writes of a queue that overflowed: runs
 // that began (joined to the current group, never a new one), runs that
 // finished, and the failures among them (Codex M72 R5 High-3).
 const scanStatusMergeLua = `
 local now = nowms()
+run_check()
 -- A merge always follows earlier writes of the SBOM (its queue overflowed),
 -- so a missing key means it was lost: coverage unknown (Codex coverage R5
 -- High-2).
@@ -549,6 +634,8 @@ ensure_born()
 local ok, m = pcall(cjson.decode, ARGV[1])
 if not ok or type(m) ~= 'table' then return redis.error_reply('bad merge') end
 sweep(now, nil)
+-- Activity (begins, or outcomes of runs not active here) on an idle SBOM.
+if live_count(now) == 0 then set_run(ARGV[4]) end
 if type(m.b) == 'table' then
   for _, g in ipairs(m.b) do activate(g, now, ARGV[2]) end
 end
@@ -582,10 +669,12 @@ publish(now)
 expire(ARGV[3])
 return 1`
 
-// ARGV: gen, lease ms, ttl ms. Returns 1 while the run is (again) active, 0
-// when Redis does not know it.
+// ARGV: gen, lease ms, ttl ms, new scan run id (for a revival on an idle
+// SBOM). Returns 1 while the run is (again) active, 0 when Redis does not
+// know it.
 const scanStatusHeartbeatLua = `
 local now = nowms()
+run_check()
 if redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 1 then
   activate(ARGV[1], now, ARGV[2])
   expire(ARGV[3])
@@ -599,25 +688,31 @@ if redis.call('HEXISTS', K, 'p:' .. ARGV[1]) == 1 then
 end
 if redis.call('HEXISTS', K, 'l:' .. ARGV[1]) == 1 then
   -- swept as interrupted while it was alive: revive it
+  local idle = live_count(now) == 0
   activate(ARGV[1], now, ARGV[2])
+  if idle then set_run(ARGV[4]) end
   publish(now)
   expire(ARGV[3])
   return 1
 end
 return 0`
 
-// ARGV: gen, lease ms, ttl ms. A run that is alive but not active in Redis
+// ARGV: gen, lease ms, ttl ms, new scan run id (for a rejoin on an idle
+// SBOM). A run that is alive but not active in Redis
 // (its tombstone was dropped, or the entry expired) joins the CURRENT group
 // again: unlike Begin it never starts a new group, so the group's failures
 // and interruptions are kept (Codex M72 R4 High-3).
 const scanStatusRejoinLua = `
 local now = nowms()
+run_check()
 ensure_born()
 sweep(now, ARGV[1])
+local idle = live_count(now) == 0
 -- A run that is not active here lost its identity (or the key was lost):
 -- what the group's earlier finishes reported may be gone with it.
 if redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 0 then coverage_unknown() end
 activate(ARGV[1], now, ARGV[2])
+if idle then set_run(ARGV[4]) end
 publish(now)
 expire(ARGV[3])
 return 1`
@@ -636,9 +731,11 @@ expire(ARGV[4])
 return 1`
 
 // Returns false (nil) when there is no entry, else {state, error, reasons,
-// rev, skipped, checked (” when no finish of the group reported coverage)}.
+// rev, skipped, checked (” when no finish of the group reported coverage),
+// scan run (” when unknown)}.
 const scanStatusGetLua = `
 if redis.call('EXISTS', K) == 0 then return false end
+run_check()
 local now = nowms()
 local changed = sweep(now, nil) > 0
 local runs_now, _, intents_now = fields()
@@ -672,7 +769,7 @@ end)(), (function()
   if cs == nil then return '' end
   if #cs == 0 then return '[]' end
   return cjson.encode(cs)
-end)()}`
+end)(), run_id() or ''}`
 
 // statusView is one read of the shared status. version changes with every
 // write of it (the entry's rev counter).
@@ -688,8 +785,10 @@ type statusView struct {
 	// group reported coverage.
 	checked      []string
 	checkedKnown bool
-	version      string
-	found        bool
+	// run: the scan run (scan_run.go); "" = unknown.
+	run     string
+	version string
+	found   bool
 }
 
 // scanStatusStore is what the tracker needs from shared storage.
@@ -860,6 +959,13 @@ func (s *redisScanStatusStore) beginExpectingRun(ctx context.Context, sbomID uui
 }
 
 func (s *redisScanStatusStore) beginRun(ctx context.Context, sbomID uuid.UUID, gen uint64, expect bool) error {
+	_, err := s.beginScanRun(ctx, sbomID, gen, expect)
+	return err
+}
+
+// beginScanRun is begin (expect: beginExpectingRun) returning the scan run of
+// the group the run is in once applied ("" = unknown).
+func (s *redisScanStatusStore) beginScanRun(ctx context.Context, sbomID uuid.UUID, gen uint64, expect bool) (string, error) {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
 	e := "0"
@@ -867,7 +973,15 @@ func (s *redisScanStatusStore) beginRun(ctx context.Context, sbomID uuid.UUID, g
 		e = "1"
 	}
 	return s.sc().begin.Run(ctx, s.client, scanStatusKeys(sbomID),
-		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds(), e).Err()
+		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds(), e, newScanRunIDFn()).Text()
+}
+
+// scanRunStore is the optional store side of the scan run (scan_run.go):
+// begin and intent that report the scan run they found or started. Stores
+// without it (test fakes) report none.
+type scanRunStore interface {
+	beginScanRun(ctx context.Context, sbomID uuid.UUID, gen uint64, expect bool) (string, error)
+	intentScanRun(ctx context.Context, sbomID uuid.UUID, gen uint64) (string, error)
 }
 
 // recoveringBeginner is the optional store method for a Begin whose run
@@ -885,7 +999,7 @@ func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen
 		checked = reasonsJSON(cov.Checked)
 	}
 	n, err := s.sc().finish.Run(ctx, s.client, scanStatusKeys(sbomID),
-		genString(gen), s.ttl.Milliseconds(), errMsg, reasonsJSON(reasons), reasonsJSON(cov.Skipped), checked).Int()
+		genString(gen), s.ttl.Milliseconds(), errMsg, reasonsJSON(reasons), reasonsJSON(cov.Skipped), checked, newScanRunIDFn()).Int()
 	return n == 1, err
 }
 
@@ -1051,7 +1165,7 @@ func (s *redisScanStatusStore) merge(ctx context.Context, sbomID uuid.UUID, m *m
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
 	return s.sc().merge.Run(ctx, s.client, scanStatusKeys(sbomID),
-		m.json(), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
+		m.json(), s.lease.Milliseconds(), s.ttl.Milliseconds(), newScanRunIDFn()).Err()
 }
 
 func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey) ([]bool, error) {
@@ -1068,7 +1182,7 @@ func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey)
 		_, err := s.client.Pipelined(octx, func(p redis.Pipeliner) error {
 			for i, r := range runs {
 				cmds[i] = hb.EvalSha(octx, p, scanStatusKeys(r.sbom),
-					genString(r.gen), s.lease.Milliseconds(), s.ttl.Milliseconds())
+					genString(r.gen), s.lease.Milliseconds(), s.ttl.Milliseconds(), newScanRunIDFn())
 			}
 			return nil
 		})
@@ -1099,17 +1213,23 @@ func (s *redisScanStatusStore) heartbeatMany(ctx context.Context, runs []runKey)
 }
 
 func (s *redisScanStatusStore) intent(ctx context.Context, sbomID uuid.UUID, gen uint64) error {
+	_, err := s.intentScanRun(ctx, sbomID, gen)
+	return err
+}
+
+// intentScanRun is intent returning the scan run ("" = unknown).
+func (s *redisScanStatusStore) intentScanRun(ctx context.Context, sbomID uuid.UUID, gen uint64) (string, error) {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
 	return s.sc().intent.Run(ctx, s.client, scanStatusKeys(sbomID),
-		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
+		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds(), newScanRunIDFn()).Text()
 }
 
 func (s *redisScanStatusStore) rejoin(ctx context.Context, sbomID uuid.UUID, gen uint64) error {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
 	return s.sc().rejoin.Run(ctx, s.client, scanStatusKeys(sbomID),
-		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
+		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds(), newScanRunIDFn()).Err()
 }
 
 func (s *redisScanStatusStore) mark(ctx context.Context, sbomID uuid.UUID, state ScanState, errMsg string, reasons []string) error {
@@ -1129,7 +1249,7 @@ func (s *redisScanStatusStore) get(ctx context.Context, sbomID uuid.UUID) (statu
 	if err != nil {
 		return statusView{}, err
 	}
-	if len(v) != 6 {
+	if len(v) != 7 {
 		return statusView{}, fmt.Errorf("scan status: unexpected reply of %d values", len(v))
 	}
 	state := ScanState(v[0])
@@ -1138,7 +1258,7 @@ func (s *redisScanStatusStore) get(ctx context.Context, sbomID uuid.UUID) (statu
 	default:
 		return statusView{}, fmt.Errorf("scan status: unexpected state %q", v[0])
 	}
-	view := statusView{state: state, version: "s" + v[3], found: true}
+	view := statusView{state: state, version: "s" + v[3], run: v[6], found: true}
 	if state == ScanStateRunning {
 		return view, nil
 	}

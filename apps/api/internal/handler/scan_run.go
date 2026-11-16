@@ -194,10 +194,17 @@ func runSBOMScan(ctx context.Context, db *sql.DB, tenantID, sbomID uuid.UUID, de
 
 // beginScanRun starts a tracked run (0 without a tracker).
 func beginScanRun(tracker *service.ScanTracker, sbomID uuid.UUID) uint64 {
+	gen, _ := beginScanRunID(tracker, sbomID)
+	return gen
+}
+
+// beginScanRunID is beginScanRun plus the scan run of the run's group
+// (service.ScanTracker.BeginRun; "" when unknown or without a tracker).
+func beginScanRunID(tracker *service.ScanTracker, sbomID uuid.UUID) (uint64, string) {
 	if tracker == nil {
-		return 0
+		return 0, ""
 	}
-	return tracker.Begin(sbomID)
+	return tracker.BeginRun(sbomID)
 }
 
 // recordScanOutcome reports run gen's outcome to the tracker. The SBOM's state

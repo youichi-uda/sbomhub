@@ -115,6 +115,12 @@ type scanEntry struct {
 	checkedKnown      bool
 	groupChecked      []string
 	groupCheckedKnown bool
+	// run is the group's scan run (scan_run.go) in this process: set when a
+	// Begin starts a new group, kept by runs that join it; "" = unknown
+	// (legacy Mark*, an entry recreated by a finish). Reported only without
+	// a shared store: with one, the shared store's scan run is the one every
+	// replica agrees on.
+	run string
 	// rev is the tracker-wide sequence number of the entry's last
 	// transition (M72): GetDetail detects a transition that raced its Redis
 	// read (Codex M72 R4 High-1).
@@ -244,11 +250,20 @@ func (t *ScanTracker) MarkRunning(sbomID uuid.UUID) {
 // poller therefore never reads "completed" while some scan of the SBOM can
 // still add findings.
 func (t *ScanTracker) Begin(sbomID uuid.UUID) uint64 {
+	gen, _ := t.BeginRun(sbomID)
+	return gen
+}
+
+// BeginRun is Begin, also returning the scan run (scan_run.go) of the group
+// the run joined or started, as scan-status will report it: from the shared
+// store once its Begin (or intent) was applied within Begin's wait, from
+// this process without a shared store; "" when unknown.
+func (t *ScanTracker) BeginRun(sbomID uuid.UUID) (uint64, string) {
 	gen := newRunGenFn()
 	t.mu.Lock()
 	e, ok := t.entries[sbomID]
 	if !ok || len(e.active) == 0 || time.Since(e.updatedAt) > t.retention {
-		e = scanEntry{active: map[uint64]bool{}}
+		e = scanEntry{active: map[uint64]bool{}, run: newScanRunIDFn()}
 	}
 	e.state = ScanStateRunning
 	e.errMsg, e.reasons, e.skipped = "", nil, nil
@@ -259,12 +274,15 @@ func (t *ScanTracker) Begin(sbomID uuid.UUID) uint64 {
 	// Queued under t.mu, with the local change: the shared writes of one SBOM
 	// follow the order of its local transitions (Codex M72 R3 High-1).
 	ev := t.queueBeginLocked(sbomID, gen)
+	localRun := e.run
 	t.mu.Unlock()
 	if testHookAfterLocalBegin != nil {
 		testHookAfterLocalBegin(gen)
 	}
-	t.waitBegin(ev)
-	return gen
+	if t.shared == nil {
+		return gen, localRun
+	}
+	return gen, t.waitBegin(ev)
 }
 
 // testHookAfterLocalActiveCheck runs inside GetDetail after its local
@@ -419,6 +437,9 @@ type ScanStatusDetail struct {
 	// a run of the group reported its coverage; then Checked is non-nil.
 	Checked      []string
 	CheckedKnown bool
+	// Run is the scan run (scan_run.go): the same value in two answers means
+	// no activity began on the SBOM between them. "" = unknown.
+	Run string
 	// Version changes with every transition of the status (see
 	// GetDetailVersion).
 	Version string
@@ -469,12 +490,12 @@ func (t *ScanTracker) GetStatus(sbomID uuid.UUID) ScanStatusDetail {
 			// that entry — so it reads unknown (Codex M72 R11 High-1).
 			return t.localVersioned(sbomID, true)
 		case view.state == ScanStateRunning:
-			return ScanStatusDetail{State: view.state, Version: view.version}
+			return ScanStatusDetail{State: view.state, Run: view.run, Version: view.version}
 		case t.pendingShared(sbomID):
 			return t.localPending(sbomID)
 		}
 		d := ScanStatusDetail{State: view.state, Error: view.errMsg, Reasons: view.reasons,
-			Skipped: view.skipped, Checked: view.checked, CheckedKnown: view.checkedKnown, Version: view.version}
+			Skipped: view.skipped, Checked: view.checked, CheckedKnown: view.checkedKnown, Run: view.run, Version: view.version}
 		normaliseCoverage(&d)
 		return d
 	}
@@ -513,6 +534,13 @@ func (t *ScanTracker) localVersioned(sbomID uuid.UUID, withoutShared bool) ScanS
 	d := t.getDetailLocked(sbomID)
 	if withoutShared && d.State == ScanStateCompleted {
 		d = ScanStatusDetail{State: ScanStateUnknown}
+	}
+	if t.shared == nil && d.State != ScanStateUnknown {
+		// Without a shared store this process's group is the only one.
+		// With one, a local answer stands in for the shared state, whose
+		// scan run may differ (another replica's run in the same group, or
+		// a later group): unknown.
+		d.Run = t.entries[sbomID].run
 	}
 	if withoutShared {
 		withoutSharedCoverage(&d)

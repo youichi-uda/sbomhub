@@ -69,6 +69,9 @@ type sharedEvent struct {
 	// attempt of it failed (and may have been applied), or its intent was
 	// written. See redisScanStatusStore.beginExpectingRun.
 	expectRun bool
+	// run: the scan run an applied evBegin reported (scan_run.go); set under
+	// t.qMu before done is closed.
+	run string
 }
 
 // liveRun is one of this process's active runs.
@@ -268,10 +271,11 @@ func (t *ScanTracker) drain(sbomID uuid.UUID) {
 		t.qMu.Unlock()
 
 		var err error
+		var run string
 		if merged != nil {
 			err = t.shared.merge(context.Background(), sbomID, merged)
 		} else {
-			err = t.apply(sbomID, ev)
+			run, err = t.apply(sbomID, ev)
 		}
 
 		t.qMu.Lock()
@@ -297,34 +301,40 @@ func (t *ScanTracker) drain(sbomID uuid.UUID) {
 				}
 			}
 		}
+		ev.run = run
 		q.events = q.events[1:]
 		close(ev.done)
 		t.qMu.Unlock()
 	}
 }
 
-func (t *ScanTracker) apply(sbomID uuid.UUID, ev *sharedEvent) error {
+// apply writes ev; for an evBegin it also returns the scan run the store
+// reported ("" = unknown).
+func (t *ScanTracker) apply(sbomID uuid.UUID, ev *sharedEvent) (string, error) {
 	ctx := context.Background()
 	switch ev.kind {
 	case evBegin:
 		t.qMu.Lock()
 		expect := ev.expectRun
 		t.qMu.Unlock()
-		if rb, ok := t.shared.(recoveringBeginner); ok && expect {
-			return rb.beginExpectingRun(ctx, sbomID, ev.gen)
+		if rs, ok := t.shared.(scanRunStore); ok {
+			return rs.beginScanRun(ctx, sbomID, ev.gen, expect)
 		}
-		return t.shared.begin(ctx, sbomID, ev.gen)
+		if rb, ok := t.shared.(recoveringBeginner); ok && expect {
+			return "", rb.beginExpectingRun(ctx, sbomID, ev.gen)
+		}
+		return "", t.shared.begin(ctx, sbomID, ev.gen)
 	case evRejoin:
-		return t.shared.rejoin(ctx, sbomID, ev.gen)
+		return "", t.shared.rejoin(ctx, sbomID, ev.gen)
 	case evFinish:
 		known, err := t.shared.finish(ctx, sbomID, ev.gen, ev.msg, ev.reasons, ev.cov)
 		if err == nil && !known {
 			slog.Info("scan status: the shared store did not know this run; its outcome was merged into the current group",
 				"sbom_id", sbomID, "failed", ev.msg != "")
 		}
-		return err
+		return "", err
 	default:
-		return t.shared.mark(ctx, sbomID, ev.state, ev.msg, ev.reasons)
+		return "", t.shared.mark(ctx, sbomID, ev.state, ev.msg, ev.reasons)
 	}
 }
 
@@ -333,11 +343,19 @@ func (t *ScanTracker) apply(sbomID uuid.UUID, ev *sharedEvent) error {
 // t.qMu), so one SBOM's shared writes are queued in the order of its local
 // transitions.
 
-// queueBeginLocked queues run gen's begin; nil without a shared store (or if
-// the queue is full).
-func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) <-chan struct{} {
+// beginWaiter is what Begin waits on: done is closed once the begin (or its
+// intent) was applied; run then reads the scan run it reported (under
+// t.qMu).
+type beginWaiter struct {
+	done <-chan struct{}
+	run  func() string
+}
+
+// queueBeginLocked queues run gen's begin; a zero beginWaiter without a
+// shared store.
+func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) beginWaiter {
 	if t.shared == nil {
-		return nil
+		return beginWaiter{}
 	}
 	ev := &sharedEvent{kind: evBegin, gen: gen}
 	t.qMu.Lock()
@@ -348,16 +366,28 @@ func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) <-chan stru
 	behind := q != nil && (q.draining || len(q.events) > 0)
 	t.enqueueLocked(sbomID, ev)
 	if !behind {
-		return ev.done // applied at once (see enqueueLocked)
+		// Applied at once (see enqueueLocked). A Begin folded into a merge
+		// (queue full) reports no scan run.
+		return beginWaiter{done: ev.done, run: func() string { return ev.run }}
 	}
 	// Queued behind older writes of the SBOM: write an intent ahead of them,
 	// so the SBOM reads running from now on (Codex M72 R18 High-1).
 	done := make(chan struct{})
+	var intentRun string
 	go func() {
 		defer close(done)
-		err := t.shared.intent(context.Background(), sbomID, gen)
+		var err error
+		var run string
+		if rs, ok := t.shared.(scanRunStore); ok {
+			run, err = rs.intentScanRun(context.Background(), sbomID, gen)
+		} else {
+			err = t.shared.intent(context.Background(), sbomID, gen)
+		}
 		t.qMu.Lock()
 		defer t.qMu.Unlock()
+		if err == nil {
+			intentRun = run
+		}
 		if t.live[runKey{sbomID, gen}] != lr {
 			// The run already finished (its finish may have landed before
 			// this intent): remove the intent again, behind that finish
@@ -375,22 +405,28 @@ func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) <-chan stru
 		}
 		lr.acked = true // its lease (as an intent) is renewed from now on
 	}()
-	return done
+	return beginWaiter{done: done, run: func() string { return intentRun }}
 }
 
 // waitBegin waits, at most beginWait, for a Begin (or its intent) to reach
 // Redis: a run should normally be visible before another process's run of
-// the SBOM finishes, but Begin is on the request path.
-func (t *ScanTracker) waitBegin(done <-chan struct{}) {
-	if done == nil {
-		return
+// the SBOM finishes, but Begin is on the request path. It returns the scan
+// run the store reported, "" when unknown (not applied in time, an error,
+// folded into a merge).
+func (t *ScanTracker) waitBegin(w beginWaiter) string {
+	if w.done == nil {
+		return ""
 	}
 	timer := time.NewTimer(t.beginWait)
 	defer timer.Stop()
 	select {
-	case <-done:
+	case <-w.done:
 	case <-timer.C:
+		return ""
 	}
+	t.qMu.Lock()
+	defer t.qMu.Unlock()
+	return w.run()
 }
 
 func (t *ScanTracker) queueFinishLocked(sbomID uuid.UUID, gen uint64, errMsg string, reasons []string, cov ScanCoverage) {
