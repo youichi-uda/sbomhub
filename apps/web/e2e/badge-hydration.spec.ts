@@ -26,6 +26,16 @@
 //      have tagName === 'SPAN' (not 'DIV').
 //   2. Browser console must NOT emit the hydration error
 //      "cannot be a descendant of <p>" while the page renders.
+//   3. The rendered DOM has no flow-content element inside a <p> anywhere
+//      on the page.
+//
+// Production builds (what CI runs: the web image, `next build`): React only
+// validates DOM nesting in its DEVELOPMENT build, so check 2 can never fire
+// there — on its own it passed vacuously in CI. Check 3 reads the DOM itself
+// and does not depend on React's dev warnings; it is proven non-vacuous on
+// every run by planting a <div> in a <p> and expecting it to be reported.
+// Production React does report a hydration MISMATCH (minified error #418 /
+// #423 / #425, through window error events); those are collected too.
 //
 // Auth posture: dev:test launcher (PLAYWRIGHT_SKIP_WEB_SERVER unset →
 // playwright.config.ts spins up `npm run dev:test` with auth disabled),
@@ -46,7 +56,32 @@ const API_BASE_URL =
 // regardless of which child tag is offending — both "<div> p" and
 // "p <div>" cases are caught. F207 fix should leave zero matches.
 const HYDRATION_NESTING_PATTERN =
-    /(?:cannot be a descendant of <[^>]+>|cannot contain a nested)/i;
+    /(?:cannot be a descendant of <[^>]+>|cannot contain a nested|Minified React error #(?:418|423|425)\b|Hydration failed)/i;
+
+/** Flow content (anything but phrasing content) inside a <p>, as rendered. */
+async function blockInsideP(page: Page): Promise<string[]> {
+    return page.evaluate(() => {
+        const FLOW = 'address,article,aside,blockquote,details,dialog,div,dl,fieldset,figcaption,figure,footer,form,h1,h2,h3,h4,h5,h6,header,hgroup,hr,main,menu,nav,ol,p,pre,section,table,ul';
+        return Array.from(document.querySelectorAll('p'))
+            .flatMap((p) => Array.from(p.querySelectorAll(FLOW)).map((c) => `<${c.tagName.toLowerCase()}> in <p>: "${(p.textContent ?? '').trim().slice(0, 40)}"`))
+            .slice(0, 10);
+    });
+}
+
+async function expectValidNesting(page: Page) {
+    expect(await blockInsideP(page), 'no flow content inside a <p> (F207)').toEqual([]);
+    // The check itself sees a violation (it is not vacuous).
+    const planted = await page.evaluate(() => {
+        const p = document.createElement('p');
+        p.appendChild(document.createElement('div'));
+        p.dataset.sentinel = '';
+        document.body.appendChild(p);
+        return true;
+    });
+    expect(planted).toBe(true);
+    expect(await blockInsideP(page)).toHaveLength(1);
+    await page.evaluate(() => document.querySelector('p[data-sentinel]')?.remove());
+}
 
 // Integrations: the hermetic stack cannot create a tracker connection
 // (POST /integrations performs a live connection test against Jira /
@@ -130,6 +165,7 @@ test.describe('Badge primitive HTML nesting contract (F207)', () => {
             has: page.getByText(en.Settings.APIKeys.permissionRead, { exact: true }),
         }).last();
         await expectSpanBadgeInsideP(card.getByText(en.Settings.APIKeys.permissionRead, { exact: true }));
+        await expectValidNesting(page);
 
         expect(
             nestingErrors,
@@ -153,6 +189,7 @@ test.describe('Badge primitive HTML nesting contract (F207)', () => {
             has: page.getByText(STUB_CONNECTION.base_url),
         }).last();
         await expectSpanBadgeInsideP(card.getByText('Jira', { exact: true }));
+        await expectValidNesting(page);
 
         expect(
             nestingErrors,
