@@ -41,6 +41,8 @@ func TestClassifyFinishReason(t *testing.T) {
 		{"PROHIBITED_CONTENT", FinishFiltered},
 		{"SPII", FinishFiltered},
 		{"IMAGE_SAFETY", FinishFiltered},
+		{"LANGUAGE", FinishFiltered},   // Gemini (Codex R3 Medium)
+		{"ESCALATION", FinishFiltered}, // Gemini
 		// Anything else is not a normal end: fail closed.
 		{FinishReasonIncomplete, FinishUnfinished},
 		{FinishReasonUnrecognized, FinishUnfinished},

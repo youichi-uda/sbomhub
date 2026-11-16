@@ -80,6 +80,8 @@ var (
 		"image_safety":             {}, // Gemini
 		"image_prohibited_content": {}, // Gemini
 		"image_recitation":         {}, // Gemini
+		"language":                 {}, // Gemini: unsupported-language content
+		"escalation":               {}, // Gemini: filtered by an escalation rule
 	}
 )
 
