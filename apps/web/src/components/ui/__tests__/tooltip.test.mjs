@@ -66,7 +66,9 @@ test("it opens on hover, focus and tap, and closes on Escape", () => {
   assert.match(src, /onPointerEnter=\{onRootPointerEnter\}\s*onPointerLeave=\{onRootPointerLeave\}/);
   assert.match(src, /e\.key === "Escape"/);
   // Escape dismisses a hover-opened panel wherever focus is (dismissible).
-  assert.match(src, /document\.addEventListener\("keydown", onKeyDown\)/);
+  // Capture phase, so a focused trigger's stopPropagation cannot keep a
+  // hovered panel open.
+  assert.match(src, /document\.addEventListener\("keydown", onKeyDown, true\)/);
   // Hover ignores touch pointers: a tap's compatibility mouse events must not
   // reopen what the tap closed (trigger enter, wrapper enter and leave).
   assert.equal((src.match(/if \(e\.pointerType === "touch"\) return;/g) ?? []).length, 3);

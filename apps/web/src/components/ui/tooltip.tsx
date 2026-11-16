@@ -104,8 +104,9 @@ function Tooltip({ children }: { children: React.ReactNode }) {
     }, HOVER_LEAVE_GRACE_MS);
   };
 
-  // Escape dismisses an open panel wherever focus is (the trigger's own
-  // handler runs first when it has focus, and stops the event there).
+  // Escape dismisses an open panel wherever focus is. Capture phase: a
+  // focused trigger's own handler stops the event, and this must not depend
+  // on where React attaches its listeners (Codex R2).
   React.useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -113,8 +114,8 @@ function Tooltip({ children }: { children: React.ReactNode }) {
       setTapped(false);
       setDismissed(true);
     };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [open]);
 
   React.useEffect(() => {

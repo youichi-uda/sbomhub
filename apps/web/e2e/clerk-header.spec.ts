@@ -4,6 +4,7 @@ import ja from '../messages/ja.json';
 import {
   assertLocalTarget,
   CLERK_BASE_URL,
+  mintSessionToken,
   routeFakeClerkJs,
   signIn,
   startFakeBackendApi,
@@ -105,6 +106,8 @@ test('the fake Clerk fixture refuses a non-local target', async ({ browser }) =>
   for (const url of ['http://localhost:13523', 'http://127.0.0.1:3000', 'http://[::1]:3000']) {
     expect(() => assertLocalTarget(url), url).not.toThrow();
   }
+  // Codex R2: the lower-level token minter refuses too.
+  expect(() => mintSessionToken('https://sbomhub.app', ORG)).toThrow(/loopback/);
   const context = await browser.newContext();
   try {
     await expect(signIn(context, 'https://sbomhub.app', ORG)).rejects.toThrow(/loopback/);

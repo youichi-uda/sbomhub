@@ -75,6 +75,7 @@ export interface FakeOrg {
 
 /** An RS256 session token (v1 claims) for `sub` in `org`, valid for an hour. */
 export function mintSessionToken(origin: string, org: FakeOrg, sub = 'user_e2e_fake'): { token: string; iat: number } {
+  assertLocalTarget(origin);
   const iat = Math.floor(Date.now() / 1000) - 5;
   const header = { alg: 'RS256', typ: 'JWT', kid: KID };
   const payload = {
