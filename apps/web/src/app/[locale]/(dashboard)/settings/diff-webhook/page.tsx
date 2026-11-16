@@ -388,11 +388,11 @@ function DiffWebhookSettingsForm({
               {t("thresholdsHelp")}
             </p>
 
-            <div className="flex items-center justify-between pt-4 border-t">
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-4 border-t">
               <p className="text-sm text-muted-foreground">
                 {enabled ? t("statusEnabled") : t("statusDisabled")}
               </p>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
                   variant="outline"

@@ -53,8 +53,8 @@ export default function AnalyticsPage() {
         switch (severity.toUpperCase()) {
             case 'CRITICAL': return 'text-red-500';
             case 'HIGH': return 'text-orange-500';
-            case 'MEDIUM': return 'text-yellow-500';
-            case 'LOW': return 'text-green-500';
+            case 'MEDIUM': return 'text-yellow-700';
+            case 'LOW': return 'text-green-700';
             default: return 'text-gray-500';
         }
     };
@@ -79,8 +79,8 @@ export default function AnalyticsPage() {
 
     return (
         <div className="py-8 px-4">
-            <div className="flex items-center justify-between mb-6">
-                <div>
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+                <div className="min-w-0">
                     <h1 className="text-2xl font-bold">{t("title")}</h1>
                     <p className="text-sm text-muted-foreground mt-1">
                         {t("description")}
@@ -126,7 +126,7 @@ export default function AnalyticsPage() {
                     <div className="bg-card border border-border rounded-lg p-4">
                         <div className="flex items-center gap-3">
                             <div className="p-2 bg-green-100 dark:bg-green-900/30 rounded-lg">
-                                <CheckCircle2 className="w-5 h-5 text-green-500" />
+                                <CheckCircle2 className="w-5 h-5 text-green-700" />
                             </div>
                             <div>
                                 <p className="text-sm text-muted-foreground">{t("resolvedRecently", { days: 30 })}</p>
@@ -189,11 +189,11 @@ export default function AnalyticsPage() {
                                 const measured = m.mttr_hours !== null && m.mttr_hours !== undefined;
                                 return (
                                     <div key={m.severity} className="flex items-center gap-4">
-                                        <div className={`w-20 px-2 py-1 rounded text-center text-sm font-medium ${getSeverityBgColor(m.severity)} ${getSeverityColor(m.severity)}`}>
+                                        <div className={`w-20 shrink-0 px-2 py-1 rounded text-center text-sm font-medium ${getSeverityBgColor(m.severity)} ${getSeverityColor(m.severity)}`}>
                                             {m.severity}
                                         </div>
-                                        <div className="flex-1">
-                                            <div className="flex items-center justify-between mb-1">
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex flex-wrap items-center justify-between gap-x-2 mb-1">
                                                 <span className={`text-sm${measured ? '' : ' text-muted-foreground'}`}>
                                                     {formatMetricHours(m.mttr_hours)}
                                                     <span className="text-muted-foreground ml-1">
@@ -218,7 +218,7 @@ export default function AnalyticsPage() {
                                         {m.on_target === null || m.on_target === undefined ? (
                                             <MinusCircle className="w-5 h-5 text-muted-foreground" aria-label={t("notMeasured")} />
                                         ) : m.on_target ? (
-                                            <CheckCircle2 className="w-5 h-5 text-green-500" />
+                                            <CheckCircle2 className="w-5 h-5 text-green-700" />
                                         ) : (
                                             <AlertTriangle className="w-5 h-5 text-red-500" />
                                         )}
@@ -245,11 +245,11 @@ export default function AnalyticsPage() {
                                 const measured = pct !== null && pct !== undefined;
                                 return (
                                     <div key={slo.severity} className="flex items-center gap-4">
-                                        <div className={`w-20 px-2 py-1 rounded text-center text-sm font-medium ${getSeverityBgColor(slo.severity)} ${getSeverityColor(slo.severity)}`}>
+                                        <div className={`w-20 shrink-0 px-2 py-1 rounded text-center text-sm font-medium ${getSeverityBgColor(slo.severity)} ${getSeverityColor(slo.severity)}`}>
                                             {slo.severity}
                                         </div>
-                                        <div className="flex-1">
-                                            <div className="flex items-center justify-between mb-1">
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex flex-wrap items-center justify-between gap-x-2 mb-1">
                                                 <span className={`text-sm font-medium${measured ? '' : ' text-muted-foreground'}`}>
                                                     {formatMetricPct(pct)}
                                                 </span>

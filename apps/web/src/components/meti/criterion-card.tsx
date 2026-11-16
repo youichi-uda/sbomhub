@@ -189,11 +189,11 @@ function statusVariant(
 function StatusIcon({ status }: { status: string }) {
   switch (status) {
     case "achieved":
-      return <CheckCircle2 className="h-4 w-4 text-green-600" />;
+      return <CheckCircle2 className="h-4 w-4 text-green-700" />;
     case "not_achieved":
       return <XCircle className="h-4 w-4 text-red-600" />;
     case "needs_review":
-      return <AlertTriangle className="h-4 w-4 text-yellow-600" />;
+      return <AlertTriangle className="h-4 w-4 text-yellow-700" />;
     case "not_applicable":
       return <CircleDashed className="h-4 w-4 text-muted-foreground" />;
     default:
@@ -301,7 +301,7 @@ export function CriterionCard({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <CardTitle
-                      className="text-base cursor-help"
+                      className="text-base cursor-help min-w-0 wrap-anywhere"
                       data-testid="meti-criterion-title-truncated"
                       data-full-title={title}
                     >
@@ -314,13 +314,13 @@ export function CriterionCard({
                 </Tooltip>
               ) : (
                 <CardTitle
-                  className="text-base"
+                  className="text-base min-w-0 wrap-anywhere"
                   data-testid="meti-criterion-title"
                 >
                   {variant === "detail" ? title : titleTrunc.display}
                 </CardTitle>
               )}
-              <code className="font-mono text-xs text-muted-foreground">
+              <code className="min-w-0 font-mono text-xs text-muted-foreground wrap-anywhere">
                 {assessment.criterion_id}
               </code>
             </div>

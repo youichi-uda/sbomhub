@@ -203,14 +203,17 @@ export default function AuditLogPage() {
 
     return (
         <div className="py-8 px-4">
-            <div className="flex items-center justify-between mb-6">
-                <div>
+            {/* flex-wrap: at 320px the title and the two buttons (and below,
+                the page info and the pager) overran their row; with a large
+                log the longer counts pushed the page 2px sideways. */}
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+                <div className="min-w-0">
                     <h1 className="text-2xl font-bold">{t("title")}</h1>
                     <p className="text-sm text-muted-foreground mt-1">
                         {t("description", { count: total.toLocaleString() })}
                     </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                     <button
                         onClick={() => setShowFilters(!showFilters)}
                         className={`flex items-center gap-2 px-4 py-2 border rounded-lg hover:bg-muted transition-colors ${
@@ -368,7 +371,7 @@ export default function AuditLogPage() {
 
             {/* Pagination */}
             {totalPages > 1 && (
-                <div className="flex items-center justify-between mt-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 mt-4">
                     <p className="text-sm text-muted-foreground">
                         {t("pageInfo", {
                             start: ((page - 1) * (filter.limit || 50)) + 1,

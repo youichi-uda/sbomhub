@@ -92,6 +92,19 @@ async function clippedContent(page: Page): Promise<string[]> {
   });
 }
 
+/** Flex rows inside <main> whose content is wider than the row itself. */
+async function overrunRows(page: Page): Promise<string[]> {
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll<HTMLElement>('main *'))
+      .filter((el) => {
+        const cs = getComputedStyle(el);
+        return cs.display.includes('flex') && cs.overflowX === 'visible' && el.scrollWidth > el.clientWidth + 1;
+      })
+      .slice(0, 5)
+      .map((el) => `${el.tagName.toLowerCase()}.${String(el.className).slice(0, 60)} ${el.scrollWidth}>${el.clientWidth}`),
+  );
+}
+
 async function expectNoHorizontalScroll(page: Page, what: string): Promise<void> {
   const { extra, culprits } = await horizontalOverflow(page);
   expect(extra, `${what} scrolls ${extra}px sideways at ${WIDTH}px:\n  ${culprits.join('\n  ')}`).toBeLessThanOrEqual(0);
@@ -112,6 +125,9 @@ test.describe(`no horizontal page scroll at ${WIDTH}px`, () => {
       await expect(ready).toBeVisible({ timeout: 15_000 });
       await page.waitForLoadState('networkidle');
       await expectNoHorizontalScroll(page, path);
+      // A row overrunning its own box is the same defect one longer string
+      // later (the /en/audit 2px scroll); it is caught before it reaches the page.
+      expect(await overrunRows(page), `${path}: rows that overrun their own box`).toEqual([]);
     });
   }
 
@@ -211,6 +227,32 @@ test.describe(`no horizontal page scroll at ${WIDTH}px`, () => {
     const box = (await download.boundingBox())!;
     expect(box.x, 'Download left edge').toBeGreaterThanOrEqual(0);
     expect(box.x + box.width, 'Download right edge').toBeLessThanOrEqual(WIDTH);
+  });
+
+  // A flex row whose items do not fit overruns its own box without widening
+  // the document until the overrun passes the page padding. The audit log's
+  // header row did so at every size (275px of content in a 256px row) and its
+  // pager row once the log had more than one page; with a large log the
+  // longer counts ("1 - 50 / 12,345", "1 / 247") pushed the page 2px sideways.
+  test('the audit log with more than one page of entries', async ({ page, request }) => {
+    const total = async () => {
+      const r = await request.get(`${API_BASE_URL}/api/v1/audit-logs?limit=1`);
+      expect(r.status()).toBe(200);
+      return ((await r.json()) as { total: number }).total;
+    };
+    // Every checklist read is audited (checklist.viewed): seed until the
+    // log has a second page (50 per page).
+    for (let n = await total(); n <= 60; n = await total()) {
+      await Promise.all(
+        Array.from({ length: 20 }, () => request.get(`${API_BASE_URL}/api/v1/projects/${SEED_PROJECT}/checklist`)),
+      );
+    }
+    await page.goto('/en/audit');
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('button', { name: en.Audit.next })).toBeVisible();
+    await page.waitForLoadState('networkidle');
+    await expectNoHorizontalScroll(page, '/en/audit with two pages');
+    expect(await overrunRows(page), 'rows that overrun their own box at 320px').toEqual([]);
   });
 
   test('the component search form wraps', async ({ page }) => {
