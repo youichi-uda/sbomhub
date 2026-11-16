@@ -324,6 +324,12 @@ func (p *AzureOpenAIProvider) Complete(ctx context.Context, req CompleteRequest)
 		var errResp openaiChatResponse
 		_ = json.Unmarshal(errBody, &errResp)
 		if errResp.Error != nil {
+			if errResp.Error.Code == "content_filter" {
+				// M75: Azure's content filter refused the prompt (or
+				// the whole answer). Typed so callers see a filter
+				// stop, not a transport failure.
+				return nil, fmt.Errorf("azure_openai: %s: %w: %s", resp.Status, ErrFilteredResponse, errResp.Error.Message)
+			}
 			return nil, fmt.Errorf("azure_openai: %s: %s", resp.Status, errResp.Error.Message)
 		}
 		return nil, fmt.Errorf("azure_openai: %s: %s", resp.Status, string(errBody))

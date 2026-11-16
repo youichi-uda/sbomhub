@@ -19,12 +19,12 @@ func TestClassifyFinishReason(t *testing.T) {
 		// Normal ends, every provider's spelling.
 		{"", FinishNormal}, // provider did not say: unchanged behaviour
 		{"stop", FinishNormal},
-		{"STOP", FinishNormal},          // Gemini
-		{"end_turn", FinishNormal},      // Anthropic
-		{"stop_sequence", FinishNormal}, // Anthropic
-		{"tool_calls", FinishNormal},
-		{"tool_use", FinishNormal},
-		{"function_call", FinishNormal},
+		{"STOP", FinishNormal},              // Gemini
+		{"end_turn", FinishNormal},          // Anthropic
+		{"stop_sequence", FinishNormal},     // Anthropic
+		{"tool_calls", FinishUnfinished},    // tool stop: not a final answer (Codex R1 Low)
+		{"tool_use", FinishUnfinished},      // tool stop: not a final answer (Codex R1 Low)
+		{"function_call", FinishUnfinished}, // tool stop: not a final answer (Codex R1 Low)
 		{" stop ", FinishNormal},
 		// Token-limit truncation.
 		{"length", FinishTruncated},                        // OpenAI / Azure / Ollama
@@ -109,6 +109,12 @@ func TestComplete_ChecksFinishReason(t *testing.T) {
 	ok := &CompleteResponse{Content: "{}", FinishReason: "end_turn"}
 	if resp, err := Complete(context.Background(), finishStub{resp: ok}, CompleteRequest{}); err != nil || resp != ok {
 		t.Errorf("normal answer: resp=%v err=%v", resp, err)
+	}
+
+	// (nil, nil) from a faulty provider is an error, not a success the
+	// caller would dereference (Codex R1 Low).
+	if _, err := Complete(context.Background(), finishStub{}, CompleteRequest{}); err == nil {
+		t.Error("nil response with nil error accepted")
 	}
 
 	// A provider error wins; it is returned unchanged.

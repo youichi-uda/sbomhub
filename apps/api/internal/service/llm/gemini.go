@@ -150,6 +150,11 @@ type geminiResponse struct {
 		Content      geminiContent `json:"content"`
 		FinishReason string        `json:"finishReason"`
 	} `json:"candidates"`
+	// PromptFeedback.BlockReason is set, with no candidates, when the
+	// prompt itself was blocked (M75).
+	PromptFeedback struct {
+		BlockReason string `json:"blockReason"`
+	} `json:"promptFeedback"`
 	UsageMetadata struct {
 		PromptTokenCount     int `json:"promptTokenCount"`
 		CandidatesTokenCount int `json:"candidatesTokenCount"`
@@ -287,6 +292,16 @@ func (p *GeminiProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 		return nil, fmt.Errorf("gemini: parse response: %w", err)
 	}
 	if len(parsed.Candidates) == 0 {
+		if br := strings.TrimSpace(parsed.PromptFeedback.BlockReason); br != "" {
+			// M75: a blocked prompt. The response carries the block
+			// reason as its finish reason so llm_calls records it.
+			return &CompleteResponse{
+				InputTokens:  parsed.UsageMetadata.PromptTokenCount,
+				Model:        p.model,
+				FinishReason: NormalizeFinishReason(br),
+				RawResponse:  rawBody,
+			}, fmt.Errorf("gemini: prompt blocked: %w (blockReason %q)", ErrFilteredResponse, NormalizeFinishReason(br))
+		}
 		return nil, fmt.Errorf("gemini: empty candidates")
 	}
 

@@ -58,9 +58,9 @@ var (
 		"stop":          {}, // OpenAI / Azure / Ollama / Gemini "STOP"
 		"end_turn":      {}, // Anthropic
 		"stop_sequence": {}, // Anthropic
-		"tool_calls":    {}, // OpenAI / Azure
-		"function_call": {}, // OpenAI / Azure (legacy)
-		"tool_use":      {}, // Anthropic
+		// Not here: tool_calls / function_call / tool_use. They ask the
+		// caller to run a tool and continue; no SBOMHub caller offers
+		// tools, so such an answer is not a final one (FinishUnfinished).
 	}
 	truncatedFinishReasons = map[string]struct{}{
 		"length":                        {}, // OpenAI / Azure / Ollama
@@ -141,6 +141,9 @@ func Complete(ctx context.Context, p Provider, req CompleteRequest) (*CompleteRe
 	resp, err := p.Complete(ctx, req)
 	if err != nil {
 		return resp, err
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("%w: provider %s returned no response and no error", ErrIncompleteResponse, p.Name())
 	}
 	if ferr := CheckFinish(resp); ferr != nil {
 		return resp, ferr
