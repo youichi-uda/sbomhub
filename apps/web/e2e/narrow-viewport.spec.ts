@@ -1,6 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
 import en from '../messages/en.json';
-import { API_BASE_URL, createVulnerableProject, deleteProject, type VulnerableProject } from './fixtures/vuln-project';
+import {
+  API_BASE_URL,
+  createVulnerableProject,
+  deleteProject,
+  reportFullScanCoverage,
+  type VulnerableProject,
+} from './fixtures/vuln-project';
 
 // At a 320px viewport (the narrowest phone width WCAG 1.4.10 reflow asks
 // for) no page may scroll sideways. The dashboard shell had a fixed 256px
@@ -141,6 +147,7 @@ test.describe(`no horizontal page scroll at ${WIDTH}px`, () => {
         data: { vulnerability_id: project.vuln('CVE-2021-44228').id, status: 'under_investigation' },
       });
       expect(vex.status(), `VEX create: ${await vex.text()}`).toBe(201);
+      await reportFullScanCoverage(page); // the bare tab counts below (offline stack: UPGRADE §31)
       await page.goto(`/en/projects/${project.projectId}`);
       await expect(page.getByRole('heading', { level: 1, name: project.projectName })).toBeVisible();
       const tabs = [

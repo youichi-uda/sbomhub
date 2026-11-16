@@ -1,6 +1,11 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import en from '../messages/en.json';
-import { createVulnerableProject, deleteProject, type VulnerableProject } from './fixtures/vuln-project';
+import {
+  createVulnerableProject,
+  deleteProject,
+  reportFullScanCoverage,
+  type VulnerableProject,
+} from './fixtures/vuln-project';
 
 // The shared Tooltip (KEV / EOL / SSVC / ticket badges) wired onFocus on a
 // plain <span> badge with no tabIndex: Tab skipped the badge and the KEV
@@ -21,6 +26,7 @@ async function panelOf(page: Page, trigger: Locator): Promise<Locator> {
 }
 
 async function openVulnerabilities(page: Page, projectId: string): Promise<void> {
+  await reportFullScanCoverage(page); // the bare tab count below (offline stack: UPGRADE §31)
   await page.goto(`/en/projects/${projectId}`);
   await page.getByRole('button', { name: new RegExp(`^${en.Vulnerabilities.title} \\(4\\)$`) }).click();
   await expect(page.getByTestId('vuln-entry')).toHaveCount(4, { timeout: 15_000 });

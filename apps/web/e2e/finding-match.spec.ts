@@ -6,6 +6,7 @@ import {
   createProject,
   deleteProject,
   listVulns,
+  reportFullScanCoverage,
   uniqueName,
   uploadSbom,
 } from './fixtures/vuln-project';
@@ -51,6 +52,7 @@ let mixedProjectId: string | undefined;
 
 async function openVulnerabilities(page: Page, locale: 'en' | 'ja', id: string, count: number): Promise<void> {
   const msgs = locale === 'en' ? en : ja;
+  await reportFullScanCoverage(page); // the bare tab count below (offline stack: UPGRADE §31)
   await page.goto(`/${locale}/projects/${id}`);
   await page
     .getByRole('button', { name: new RegExp(`^${msgs.Vulnerabilities.title} \\(${count}\\)$`) })
