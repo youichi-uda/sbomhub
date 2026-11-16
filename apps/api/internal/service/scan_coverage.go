@@ -133,8 +133,14 @@ func normaliseCoverage(d *ScanStatusDetail) {
 //
 //	"<source>: scan failed (...)"   that source (nvd, jvn, distro)
 //	"scheduled: scan failed (...)"  the scheduled scan's steps: nvd, distro
-//	"scan: scan failed (...)"       no step ran (no slot, no scanner), except
-//	                                "interrupted", which is unknown
+//	"scan: scan failed (...)"       no step of that run ran (no slot): it
+//	                                checked nothing, so every source is out
+//	                                (Codex coverage R4 High); "interrupted"
+//	                                is unknown
+//
+// "scheduled" does not say which of its steps failed, so both are taken out:
+// the safe direction (a successful step may read not checked, never the
+// reverse).
 func failedScanSources(errMsg string) (failed []string, known bool) {
 	for _, m := range strings.Split(errMsg, "; ") {
 		prefix, rest, ok := strings.Cut(m, ": scan failed")
@@ -147,6 +153,7 @@ func failedScanSources(errMsg string) (failed []string, known bool) {
 		case prefix == "scheduled":
 			failed = append(failed, ScanSourceNVD, ScanSourceDistro)
 		case prefix == "scan" && !strings.Contains(rest, ScanReasonInterrupted):
+			failed = append(failed, ScanSources...)
 		default:
 			return nil, false
 		}

@@ -170,7 +170,7 @@ func TestScanCoverage_UnreportedFailureNarrowsChecked(t *testing.T) {
 		{"jvn: scan failed (fetch_failed, source_unavailable)", []string{"nvd", "distro"}},
 		{"nvd: scan failed (fetch_failed)", []string{"jvn", "distro"}},
 		{"scheduled: scan failed (deadline_exceeded)", []string{"jvn"}},
-		{"scan: scan failed (queue_full)", []string{"nvd", "jvn", "distro"}},
+		{"scan: scan failed (queue_full)", []string{}},
 		{"scan: scan failed (interrupted)", nil},
 		{"scan failed", nil},
 		{"osv: scan failed", nil},
