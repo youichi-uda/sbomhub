@@ -81,7 +81,7 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 |------|------|------|
 | `checked_sources` | ステップが実際の情報源に対して実行され (オンライン、有効、要求に含まれる)、失敗せずに終わった情報源。SBOM に照会対象がない (component がない、distro パッケージがない) ステップも照会済みとします。NVD / distro のキャッシュ (24 時間保持) から答えた照会も、従来どおり検出結果に使われるため照会済みとします。 | スキャンがカバレッジを報告した `completed` / `failed` で常に存在し、何も照会していなければ `[]` (オフライン)。`running` / `unknown` のとき、およびこの項目より古い API レプリカが記録したスキャンでは項目なし。項目なしは「不明」であり「照会なし」ではありません。 |
 | `skipped_sources` | 設定や要求のためにステップがリクエストしなかった情報源。`SBOMHUB_OFFLINE=true` (すべて)、`SBOMHUB_JVN=off` (`jvn`)、`?sources=` に含まれない (`?sources=nvd` なら `jvn`)、定期スキャン (`jvn`。NVD と distro のみ実行)、スキャナが設定されていないステップ。 | 何かを飛ばした `completed` / `failed` でのみ存在 (従来どおり)。 |
-| どちらでもない | ステップが失敗した情報源。`error` (`jvn: scan failed (...)`) と `reasons` に現れます。 | — |
+| どちらでもない | スキャンのいずれかの実行 (古いレプリカのものを含む) でステップが失敗した情報源。`error` (`jvn: scan failed (...)`。`scheduled: scan failed (...)` は `nvd` と `distro`) と `reasons` に現れます。情報源を特定できない失敗 (`scan: scan failed (interrupted)`) があると `checked_sources` は項目なしになります。 | — |
 
 どちらのリストも各情報源を 1 回だけ `nvd`、`jvn`、`distro` の順で並べ (この版が知らない名前はその後に辞書順)、互いに重なりません。同じ SBOM のスキャンが重なった場合、`skipped_sources` は各スキャンの和集合、`checked_sources` はカバレッジを報告したすべてのスキャンが照会した情報源です。すべての情報源を照会したのは、`checked_sources` が `["nvd","jvn","distro"]` で `skipped_sources` がない `completed` のスキャンだけです。
 

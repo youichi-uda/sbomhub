@@ -157,3 +157,38 @@ func TestScanCoverage_LocalFallbackStatesNoCheckedSources(t *testing.T) {
 		t.Fatalf("in-memory-only tracker dropped its coverage: %+v", st)
 	}
 }
+
+// Codex coverage R3 High: a failure from a run that reported no coverage (an
+// older replica, a legacy Finish) still takes its source out of the
+// group's checked sources; a failure that cannot be attributed to a source
+// makes the coverage unknown.
+func TestScanCoverage_UnreportedFailureNarrowsChecked(t *testing.T) {
+	for _, tc := range []struct {
+		marker string
+		want   []string // nil = unknown
+	}{
+		{"jvn: scan failed (fetch_failed, source_unavailable)", []string{"nvd", "distro"}},
+		{"nvd: scan failed (fetch_failed)", []string{"jvn", "distro"}},
+		{"scheduled: scan failed (deadline_exceeded)", []string{"jvn"}},
+		{"scan: scan failed (queue_full)", []string{"nvd", "jvn", "distro"}},
+		{"scan: scan failed (interrupted)", nil},
+		{"scan failed", nil},
+		{"osv: scan failed", nil},
+	} {
+		tr := NewScanTracker()
+		id := uuid.New()
+		a, b := tr.Begin(id), tr.Begin(id)
+		tr.FinishCoverage(id, a, nil, "", full())
+		tr.Finish(id, b, []string{ScanReasonFetchFailed}, tc.marker)
+		st := tr.GetStatus(id)
+		if tc.want == nil {
+			if st.CheckedKnown {
+				t.Errorf("%q: coverage %v, want unknown", tc.marker, st.Checked)
+			}
+			continue
+		}
+		if !st.CheckedKnown || !slices.Equal(st.Checked, tc.want) {
+			t.Errorf("%q: checked %v (known %t), want %v", tc.marker, st.Checked, st.CheckedKnown, tc.want)
+		}
+	}
+}

@@ -165,13 +165,22 @@ func (h *SbomHandler) WithDistroScanner(d *service.DistroService) *SbomHandler {
 // GUC, which caused RLS on `components` to filter every row and made
 // `--fail-on critical` silently report 0 vulnerabilities.
 func NewSbomHandler(db *sql.DB, ss *service.SbomService, nvd *service.NVDService, jvn *service.JVNService, tracker *service.ScanTracker) *SbomHandler {
-	return &SbomHandler{
+	h := &SbomHandler{
 		sbomService: ss,
-		nvdService:  nvd,
-		jvnService:  jvn,
 		scanTracker: tracker,
 		db:          db,
 	}
+	// Only non-nil services become scanners: a typed-nil pointer in the
+	// interface field is not nil, and the scan would call methods on it
+	// instead of reporting the source as not configured (Codex coverage R3
+	// Medium).
+	if nvd != nil {
+		h.nvdService = nvd
+	}
+	if jvn != nil {
+		h.jvnService = jvn
+	}
+	return h
 }
 
 // WithDiffWebhook enables the M12-4 (#85) auto-trigger that fires the

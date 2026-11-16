@@ -275,3 +275,18 @@ func TestScanCoverage_202NamesTheSkippedSources(t *testing.T) {
 		})
 	}
 }
+
+// Codex coverage R3 Medium: NewSbomHandler with unconfigured (nil) NVD / JVN
+// services must not hand typed-nil pointers to the scan, where the coverage
+// checks would call methods on them; the sources read as skipped.
+func TestScanCoverage_UploadWithNilServicesSkipsThem(t *testing.T) {
+	tr := service.NewScanTracker()
+	h := NewSbomHandler(nil, nil, nil, nil, tr)
+	id := uuid.New()
+	h.runScanRun(context.Background(), id, uuid.New(), tr.Begin(id))
+	st := tr.GetStatus(id)
+	if st.State != service.ScanStateCompleted || !st.CheckedKnown || len(st.Checked) != 0 ||
+		!slices.Equal(st.Skipped, []string{"nvd", "jvn", "distro"}) {
+		t.Fatalf("status %+v", st)
+	}
+}

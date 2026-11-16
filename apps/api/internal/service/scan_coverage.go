@@ -2,6 +2,7 @@ package service
 
 import (
 	"slices"
+	"strings"
 )
 
 // Scan coverage (2026-11): which data sources a scan actually checked.
@@ -108,11 +109,49 @@ func normaliseCoverage(d *ScanStatusDetail) {
 	} else {
 		d.Skipped = nil
 	}
+	if d.CheckedKnown && d.State == ScanStateFailed {
+		failed, known := failedScanSources(d.Error)
+		if !known {
+			d.CheckedKnown = false
+		} else {
+			d.Checked = withoutScanSources(d.Checked, failed)
+		}
+	}
 	if d.CheckedKnown {
 		d.Checked = OrderScanSources(withoutScanSources(d.Checked, d.Skipped))
 	} else {
 		d.Checked = nil
 	}
+}
+
+// failedScanSources reads, from a failed status's joined markers, the
+// sources that failed — including failures of runs that reported no
+// coverage (an older replica, a legacy Finish), which the checked sources
+// alone do not reflect (Codex coverage R3 High). known is false when a
+// marker cannot be attributed (an interrupted run, a bare "scan failed", a
+// source this version does not know): the coverage is then unknown.
+//
+//	"<source>: scan failed (...)"   that source (nvd, jvn, distro)
+//	"scheduled: scan failed (...)"  the scheduled scan's steps: nvd, distro
+//	"scan: scan failed (...)"       no step ran (no slot, no scanner), except
+//	                                "interrupted", which is unknown
+func failedScanSources(errMsg string) (failed []string, known bool) {
+	for _, m := range strings.Split(errMsg, "; ") {
+		prefix, rest, ok := strings.Cut(m, ": scan failed")
+		if !ok {
+			return nil, false
+		}
+		switch {
+		case slices.Contains(ScanSources, prefix):
+			failed = append(failed, prefix)
+		case prefix == "scheduled":
+			failed = append(failed, ScanSourceNVD, ScanSourceDistro)
+		case prefix == "scan" && !strings.Contains(rest, ScanReasonInterrupted):
+		default:
+			return nil, false
+		}
+	}
+	return failed, true
 }
 
 // groupCoverage folds a finished run's coverage into a group's (the

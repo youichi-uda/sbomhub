@@ -401,3 +401,30 @@ func TestCoverageRedis_MergeWithFoldedMarkMakesCoverageUnknown(t *testing.T) {
 		t.Fatalf("a folded mark kept the coverage: %+v", v)
 	}
 }
+
+// Codex coverage R3 High, through Redis: an older replica's run of the group
+// fails on JVN (its script records no coverage); JVN must not read checked.
+func TestCoverageRedis_OldReplicaFailureNarrowsChecked(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	store := a.shared.(*redisScanStatusStore)
+	_, oldFinish, _, _ := oldScripts(a.maxRunAge)
+	ctx := context.Background()
+	id := uuid.New()
+	for g := uint64(1); g <= 2; g++ {
+		if err := store.begin(ctx, id, g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.finish(ctx, id, 1, "", nil, full()); err != nil {
+		t.Fatal(err)
+	}
+	if err := oldFinish.Run(ctx, rdb, scanStatusKeys(id), "2", int64(time.Hour/time.Millisecond),
+		"jvn: scan failed (fetch_failed, source_unavailable)", `["fetch_failed","source_unavailable"]`, "[]").Err(); err != nil {
+		t.Fatal(err)
+	}
+	st := a.GetStatus(id)
+	if st.State != ScanStateFailed || !st.CheckedKnown || !slices.Equal(st.Checked, []string{"nvd", "distro"}) {
+		t.Fatalf("status %+v, want failed with checked [nvd distro]", st)
+	}
+}
