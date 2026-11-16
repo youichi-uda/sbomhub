@@ -52,7 +52,7 @@ test("a non-focusable as-child trigger becomes a focus stop", () => {
 });
 
 test("it opens on hover, focus and tap, and closes on Escape", () => {
-  for (const h of ["onPointerEnter", "onPointerLeave", "onFocus", "onBlur", "onTouchEnd", "onClick", "onKeyDown"]) {
+  for (const h of ["onPointerEnter", "onFocus", "onBlur", "onTouchEnd", "onClick", "onKeyDown"]) {
     // Merged with the child's own handler, never replacing it.
     assert.match(
       src,
@@ -60,10 +60,16 @@ test("it opens on hover, focus and tap, and closes on Escape", () => {
       `${h} must call the trigger's own handler too`,
     );
   }
+  // The trigger's own pointerleave still runs; leaving is tracked on the
+  // wrapper that also holds the panel (hoverable, WCAG 1.4.13).
+  assert.match(src, /onPointerLeave: theirs\.onPointerLeave,/);
+  assert.match(src, /onPointerEnter=\{onRootPointerEnter\}\s*onPointerLeave=\{onRootPointerLeave\}/);
   assert.match(src, /e\.key === "Escape"/);
+  // Escape dismisses a hover-opened panel wherever focus is (dismissible).
+  assert.match(src, /document\.addEventListener\("keydown", onKeyDown\)/);
   // Hover ignores touch pointers: a tap's compatibility mouse events must not
-  // reopen what the tap closed.
-  assert.equal((src.match(/if \(e\.pointerType === "touch"\) return;/g) ?? []).length, 2);
+  // reopen what the tap closed (trigger enter, wrapper enter and leave).
+  assert.equal((src.match(/if \(e\.pointerType === "touch"\) return;/g) ?? []).length, 3);
   assert.ok(!/onMouseEnter|onMouseLeave/.test(src), "hover must use pointer events, not compatibility mouse events");
   assert.match(src, /e\.key === "Enter" \|\| e\.key === " "/);
   // A tap elsewhere closes it (mobile browsers that do not focus a tapped span).

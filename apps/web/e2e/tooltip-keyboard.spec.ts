@@ -109,6 +109,53 @@ test.describe('shared Tooltip from the keyboard', () => {
     await expect(tip).toBeVisible();
   });
 
+  // WCAG 1.4.13 (content on hover or focus). The panel closed on leaving
+  // the TRIGGER, so the pointer could not reach the explanation to read or
+  // select it (not hoverable), and Escape only worked while the badge had
+  // keyboard focus, so a hover-opened panel could not be dismissed without
+  // moving the pointer (not dismissible).
+  test('hoverable: the pointer can move from the badge onto the panel, which stays open', async ({ page }) => {
+    await openVulnerabilities(page, project!.projectId);
+    const entry = page.locator(`[data-vuln-cve-id="${KEV_CVE}"]`);
+    const kev = entry.getByRole('button', { name: en.KEV.badge, exact: true });
+    const tip = await panelOf(page, kev);
+    await kev.hover();
+    await expect(tip).toBeVisible();
+    const k = (await kev.boundingBox())!;
+    const p = (await tip.boundingBox())!;
+    // The panel sits above the badge with a gap: walk straight up through it
+    // in small steps, as a hand on a mouse would, then into the panel.
+    const x = k.x + k.width / 2;
+    await page.mouse.move(x, k.y + 1);
+    await page.mouse.move(x, p.y + p.height / 2, { steps: 12 });
+    await expect(tip).toBeVisible();
+    // Persistent: no timeout closes it while the pointer is on it.
+    await page.waitForTimeout(1_500);
+    await expect(tip).toBeVisible();
+    // Leaving both closes it.
+    await page.mouse.move(0, 0);
+    await expect(tip).toBeHidden();
+  });
+
+  test('dismissible: Escape closes a hover-opened panel without moving the pointer or focus', async ({ page }) => {
+    await openVulnerabilities(page, project!.projectId);
+    const entry = page.locator(`[data-vuln-cve-id="${KEV_CVE}"]`);
+    const kev = entry.getByRole('button', { name: en.KEV.badge, exact: true });
+    const tip = await panelOf(page, kev);
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await kev.hover();
+    await expect(tip).toBeVisible();
+    await expect(kev).not.toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(tip).toBeHidden();
+    // Still hovering: it stays dismissed until the pointer leaves and returns.
+    await page.waitForTimeout(300);
+    await expect(tip).toBeHidden();
+    await page.mouse.move(0, 0);
+    await kev.hover();
+    await expect(tip).toBeVisible();
+  });
+
   test('a tap opens it, a second tap closes it, a tap elsewhere closes it', async ({ browser, baseURL }) => {
     const context = await browser.newContext({ baseURL, hasTouch: true, viewport: { width: 390, height: 800 } });
     const page = await context.newPage();

@@ -33,6 +33,18 @@ import { cn } from "@/lib/utils";
 //     own so leaving with the pointer does not hide what focus opened;
 //   - the trigger's own handlers and ARIA references are kept (merged).
 //
+// WCAG 1.4.13 (content on hover or focus), after M73:
+//   - hoverable: hover is tracked on the wrapper that holds the trigger AND
+//     the panel, so the pointer can move onto the panel to read it. The gap
+//     between them is the panel's own transparent padding (not a margin),
+//     so the walk from the badge to the panel never leaves the wrapper; a
+//     short grace period covers a diagonal path that cuts a corner;
+//   - dismissible: Escape closes an open panel wherever focus is — before,
+//     only while the trigger had focus, so a hover-opened panel could not be
+//     dismissed without moving the pointer. It stays dismissed until the
+//     pointer or focus comes back;
+//   - persistent: nothing closes it on a timer.
+//
 // Caller API is unchanged: `<Tooltip><TooltipTrigger asChild>...
 // </TooltipTrigger><TooltipContent>...</TooltipContent></Tooltip>`.
 
@@ -48,6 +60,9 @@ interface TooltipContextValue {
 }
 
 const TooltipContext = React.createContext<TooltipContextValue | null>(null);
+
+/** How long the pointer may be outside the trigger and panel before it closes. */
+const HOVER_LEAVE_GRACE_MS = 150;
 
 function TooltipProvider({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
@@ -67,6 +82,41 @@ function Tooltip({ children }: { children: React.ReactNode }) {
   // Some mobile browsers do not focus a tapped element, so neither blur nor
   // mouseleave fires when the user taps elsewhere: while open, a
   // pointerdown outside the trigger and its panel closes it.
+  // Hover leaves the wrapper (trigger + panel): close after a grace period
+  // that re-entering cancels.
+  const leaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelLeave = React.useCallback(() => {
+    if (leaveTimer.current !== null) clearTimeout(leaveTimer.current);
+    leaveTimer.current = null;
+  }, []);
+  React.useEffect(() => cancelLeave, [cancelLeave]);
+  const onRootPointerEnter = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === "touch") return;
+    cancelLeave();
+  };
+  const onRootPointerLeave = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === "touch") return;
+    cancelLeave();
+    leaveTimer.current = setTimeout(() => {
+      leaveTimer.current = null;
+      setHover(false);
+      setTapped(false);
+    }, HOVER_LEAVE_GRACE_MS);
+  };
+
+  // Escape dismisses an open panel wherever focus is (the trigger's own
+  // handler runs first when it has focus, and stops the event there).
+  React.useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setTapped(false);
+      setDismissed(true);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open]);
+
   React.useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: PointerEvent) => {
@@ -86,7 +136,12 @@ function Tooltip({ children }: { children: React.ReactNode }) {
 
   return (
     <TooltipContext.Provider value={value}>
-      <div ref={rootRef} className="relative inline-block">
+      <div
+        ref={rootRef}
+        className="relative inline-block"
+        onPointerEnter={onRootPointerEnter}
+        onPointerLeave={onRootPointerLeave}
+      >
         {children}
       </div>
     </TooltipContext.Provider>
@@ -179,11 +234,9 @@ function useTriggerProps(theirs: TriggerChildProps, nativelyFocusable: boolean) 
       setHover(true);
       setDismissed(false);
     }),
-    onPointerLeave: chain(theirs.onPointerLeave, (e: React.PointerEvent<HTMLElement>) => {
-      if (e.pointerType === "touch") return;
-      setHover(false);
-      setTapped(false);
-    }),
+    // Leaving is tracked on the Tooltip wrapper, which also holds the panel
+    // (hoverable, WCAG 1.4.13): leaving the trigger for the panel keeps it.
+    onPointerLeave: theirs.onPointerLeave,
     onFocus: chain(theirs.onFocus, () => {
       setFocus(true);
       setDismissed(false);
@@ -334,11 +387,13 @@ function TooltipContent({
     return () => window.removeEventListener("resize", clamp);
   }, [open]);
 
+  // The gap to the trigger is padding of the (transparent) positioned box,
+  // not a margin, so the pointer crossing it is still over the panel.
   const positionClasses = {
-    top: "bottom-full left-1/2 -translate-x-1/2 mb-2",
-    right: "left-full top-1/2 -translate-y-1/2 ml-2",
-    bottom: "top-full left-1/2 -translate-x-1/2 mt-2",
-    left: "right-full top-1/2 -translate-y-1/2 mr-2",
+    top: "bottom-full left-1/2 -translate-x-1/2 pb-2",
+    right: "left-full top-1/2 -translate-y-1/2 pl-2",
+    bottom: "top-full left-1/2 -translate-x-1/2 pt-2",
+    left: "right-full top-1/2 -translate-y-1/2 pr-2",
   };
 
   return (
@@ -357,12 +412,14 @@ function TooltipContent({
         // the badge's width and wrapped every word. The former
         // `animate-in fade-in-0 zoom-in-95` came from tailwindcss-animate,
         // which was never installed, and generated nothing.
-        "absolute z-50 w-max max-w-xs overflow-hidden rounded-md border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md",
+        "absolute z-50 w-max max-w-xs text-sm",
         positionClasses[side],
         className
       )}
     >
-      {children}
+      <div className="overflow-hidden rounded-md border bg-popover px-3 py-1.5 text-popover-foreground shadow-md">
+        {children}
+      </div>
     </div>
   );
 }
