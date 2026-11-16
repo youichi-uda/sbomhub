@@ -447,9 +447,15 @@ func newStatusScriptsSpan(maxRunAge, young, span time.Duration) *statusScripts {
 	}
 }
 
-// ARGV: gen, lease ms, ttl ms.
+// ARGV: gen, lease ms, ttl ms, expect ('1': the run should already be
+// known here — this Begin is a retry, or its intent was written — so finding
+// no trace of it means the key was lost, and with it what the group's
+// earlier finishes reported: the coverage becomes unknown, Codex coverage R5
+// High-2).
 const scanStatusBeginLua = `
 local now = nowms()
+local lost_identity = ARGV[4] == '1' and redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 0 and
+  redis.call('HEXISTS', K, 'p:' .. ARGV[1]) == 0 and redis.call('HEXISTS', K, 'l:' .. ARGV[1]) == 0
 ensure_born()
 sweep(now, nil)
 -- A begin of a run already swept as interrupted (a retried write) rejoins
@@ -462,6 +468,7 @@ if redis.call('HEXISTS', K, 'l:' .. ARGV[1]) == 1 or redis.call('HEXISTS', K, 'p
   expire(ARGV[3])
   return 1
 end
+if redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 1 then lost_identity = false end
 local runs_b, _, intents_b = fields()
 intents_b[ARGV[1]] = nil
 if count(runs_b) == 0 and count(intents_b) == 0 then
@@ -472,6 +479,7 @@ if count(runs_b) == 0 and count(intents_b) == 0 then
   redis.call('HDEL', K, 'state', 'error', 'reasons', 'updated')
   save_outcomes({})
 end
+if lost_identity then coverage_unknown() end
 activate(ARGV[1], now, ARGV[2])
 redis.call('HSET', K, 'state', 'running', 'error', '', 'reasons', '[]', 'updated', now)
 expire(ARGV[3])
@@ -532,6 +540,10 @@ return 2`
 // finished, and the failures among them (Codex M72 R5 High-3).
 const scanStatusMergeLua = `
 local now = nowms()
+-- A merge always follows earlier writes of the SBOM (its queue overflowed),
+-- so a missing key means it was lost: coverage unknown (Codex coverage R5
+-- High-2).
+local key_lost = redis.call('EXISTS', K) == 0
 ensure_born()
 local ok, m = pcall(cjson.decode, ARGV[1])
 if not ok or type(m) ~= 'table' then return redis.error_reply('bad merge') end
@@ -564,7 +576,7 @@ if type(m.cr) == 'table' then
   end
 end
 add_checked(m.c, reporter_member)
-if m.cu then coverage_unknown() end
+if m.cu or key_lost then coverage_unknown() end
 publish(now)
 expire(ARGV[3])
 return 1`
@@ -836,10 +848,32 @@ func reasonsJSON(reasons []string) string {
 }
 
 func (s *redisScanStatusStore) begin(ctx context.Context, sbomID uuid.UUID, gen uint64) error {
+	return s.beginRun(ctx, sbomID, gen, false)
+}
+
+// beginExpectingRun is begin for a run Redis should already know (a retried
+// Begin, or one whose intent was written): if it does not, the key was lost
+// and the group's coverage becomes unknown (recoveringBeginner).
+func (s *redisScanStatusStore) beginExpectingRun(ctx context.Context, sbomID uuid.UUID, gen uint64) error {
+	return s.beginRun(ctx, sbomID, gen, true)
+}
+
+func (s *redisScanStatusStore) beginRun(ctx context.Context, sbomID uuid.UUID, gen uint64, expect bool) error {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
+	e := "0"
+	if expect {
+		e = "1"
+	}
 	return s.sc().begin.Run(ctx, s.client, scanStatusKeys(sbomID),
-		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
+		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds(), e).Err()
+}
+
+// recoveringBeginner is the optional store method for a Begin whose run
+// should already be known (see beginExpectingRun). Stores without it (test
+// fakes) get a plain begin.
+type recoveringBeginner interface {
+	beginExpectingRun(ctx context.Context, sbomID uuid.UUID, gen uint64) error
 }
 
 func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons []string, cov ScanCoverage) (bool, error) {

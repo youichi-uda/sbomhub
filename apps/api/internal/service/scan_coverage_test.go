@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
@@ -190,5 +191,50 @@ func TestScanCoverage_UnreportedFailureNarrowsChecked(t *testing.T) {
 		if !st.CheckedKnown || !slices.Equal(st.Checked, tc.want) {
 			t.Errorf("%q: checked %v (known %t), want %v", tc.marker, st.Checked, st.CheckedKnown, tc.want)
 		}
+	}
+}
+
+// A Begin whose attempt failed is retried as one that expects its run.
+type expectRecorder struct {
+	*memStore
+	mu       chan struct{}
+	failOnce bool
+	expects  []bool
+}
+
+func (e *expectRecorder) begin(ctx context.Context, id uuid.UUID, gen uint64) error {
+	e.mu <- struct{}{}
+	e.expects = append(e.expects, false)
+	fail := e.failOnce
+	e.failOnce = false
+	<-e.mu
+	if fail {
+		return errStoreDown
+	}
+	return e.memStore.begin(ctx, id, gen)
+}
+
+func (e *expectRecorder) beginExpectingRun(ctx context.Context, id uuid.UUID, gen uint64) error {
+	e.mu <- struct{}{}
+	e.expects = append(e.expects, true)
+	<-e.mu
+	return e.memStore.begin(ctx, id, gen)
+}
+
+func TestScanCoverage_RetriedBeginExpectsItsRun(t *testing.T) {
+	st := &expectRecorder{memStore: newMemStore(), mu: make(chan struct{}, 1), failOnce: true}
+	tr := trackerOn(st, 20*time.Millisecond)
+	id := uuid.New()
+	tr.Begin(id)
+	waitFor(t, "the retried Begin", func() bool {
+		st.mu <- struct{}{}
+		defer func() { <-st.mu }()
+		return len(st.expects) >= 2
+	})
+	st.mu <- struct{}{}
+	got := append([]bool(nil), st.expects...)
+	<-st.mu
+	if got[0] || !got[1] {
+		t.Fatalf("expects = %v, want [false true ...]", got)
 	}
 }

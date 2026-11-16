@@ -65,6 +65,10 @@ type sharedEvent struct {
 	merged *mergeSet     // evMerge
 	// applying: an evMerge being applied; it takes no more writes.
 	applying bool
+	// expectRun: an evBegin whose run Redis should already know — an
+	// attempt of it failed (and may have been applied), or its intent was
+	// written. See redisScanStatusStore.beginExpectingRun.
+	expectRun bool
 }
 
 // liveRun is one of this process's active runs.
@@ -270,6 +274,8 @@ func (t *ScanTracker) drain(sbomID uuid.UUID) {
 
 		t.qMu.Lock()
 		if err != nil {
+			// The failed attempt may have been applied (its reply lost).
+			ev.expectRun = true
 			q.draining = false
 			t.qMu.Unlock()
 			t.logSharedError("scan status: shared write failed; retrying on the next heartbeat", sbomID, err)
@@ -299,6 +305,12 @@ func (t *ScanTracker) apply(sbomID uuid.UUID, ev *sharedEvent) error {
 	ctx := context.Background()
 	switch ev.kind {
 	case evBegin:
+		t.qMu.Lock()
+		expect := ev.expectRun
+		t.qMu.Unlock()
+		if rb, ok := t.shared.(recoveringBeginner); ok && expect {
+			return rb.beginExpectingRun(ctx, sbomID, ev.gen)
+		}
 		return t.shared.begin(ctx, sbomID, ev.gen)
 	case evRejoin:
 		return t.shared.rejoin(ctx, sbomID, ev.gen)
@@ -352,6 +364,9 @@ func (t *ScanTracker) queueBeginLocked(sbomID uuid.UUID, gen uint64) <-chan stru
 			t.enqueueLocked(sbomID, cleanupFinish(gen, lr))
 			return
 		}
+		// Its intent was (or, after an error, may have been) written: the
+		// queued Begin should find it.
+		ev.expectRun = true
 		if err != nil {
 			t.logSharedError("scan status: shared intent failed", sbomID, err)
 			return

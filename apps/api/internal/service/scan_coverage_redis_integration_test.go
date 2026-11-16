@@ -428,3 +428,60 @@ func TestCoverageRedis_OldReplicaFailureNarrowsChecked(t *testing.T) {
 		t.Fatalf("status %+v, want failed with checked [nvd distro]", st)
 	}
 }
+
+// Codex coverage R5 High-2: a Begin that should find its run (a retry, or
+// one behind its intent) and does not — the key was lost — makes the
+// group's coverage unknown, as an explicit rejoin does.
+func TestCoverageRedis_BeginRetryAfterKeyLossMakesCoverageUnknown(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	store := a.shared.(*redisScanStatusStore)
+	ctx := context.Background()
+	id := uuid.New()
+	for g := uint64(1); g <= 2; g++ {
+		if err := store.begin(ctx, id, g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.finish(ctx, id, 1, "", nil, ScanCoverage{Checked: []string{"nvd", "distro"}, Skipped: []string{"jvn"}, Reported: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Del(ctx, scanStatusKeys(id)...).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.beginExpectingRun(ctx, id, 2); err != nil { // run 2's Begin, retried
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id, 2, "", nil, full()); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); v.checkedKnown {
+		t.Fatalf("a retried Begin after a key loss: %+v", v)
+	}
+	// A retried Begin that does find its run changes nothing.
+	id2 := uuid.New()
+	if err := store.begin(ctx, id2, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.beginExpectingRun(ctx, id2, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id2, 1, "", nil, full()); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id2); !v.checkedKnown {
+		t.Fatalf("a retried Begin that found its run lost the coverage: %+v", v)
+	}
+	// A merge onto a lost key: unknown.
+	id3 := uuid.New()
+	m := newMergeSet()
+	m.begin(9, false)
+	m.finish(9)
+	m.addFinishCoverage(9, full())
+	if err := store.merge(ctx, id3, m); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id3); v.checkedKnown {
+		t.Fatalf("a merge onto a missing key: %+v", v)
+	}
+}
