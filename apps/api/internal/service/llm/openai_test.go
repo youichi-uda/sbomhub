@@ -49,14 +49,7 @@ func TestOpenAI_Complete_Success(t *testing.T) {
 			t.Errorf("messages = %+v, want [system, user]", req.Messages)
 		}
 		resp := openaiChatResponse{Model: req.Model}
-		resp.Choices = append(resp.Choices, struct {
-			Index   int `json:"index"`
-			Message struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		}{
+		resp.Choices = append(resp.Choices, openaiChoice{
 			Index:        0,
 			FinishReason: "stop",
 		})
@@ -125,14 +118,7 @@ func TestOpenAI_Complete_JSONMode(t *testing.T) {
 			t.Errorf("expected JSON mode response_format, got %+v", req.ResponseFormat)
 		}
 		resp := openaiChatResponse{Model: req.Model}
-		resp.Choices = append(resp.Choices, struct {
-			Index   int `json:"index"`
-			Message struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		}{Index: 0, FinishReason: "stop"})
+		resp.Choices = append(resp.Choices, openaiChoice{Index: 0, FinishReason: "stop"})
 		resp.Choices[0].Message.Content = "{}"
 		return http.StatusOK, resp
 	})

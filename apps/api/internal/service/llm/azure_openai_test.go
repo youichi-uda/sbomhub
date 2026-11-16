@@ -79,14 +79,7 @@ func fakeAzureServer(
 // so no test needs to vary it).
 func makeOpenAIChoice(content string) openaiChatResponse {
 	resp := openaiChatResponse{}
-	resp.Choices = append(resp.Choices, struct {
-		Index   int `json:"index"`
-		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"message"`
-		FinishReason string `json:"finish_reason"`
-	}{Index: 0, FinishReason: "stop"})
+	resp.Choices = append(resp.Choices, openaiChoice{Index: 0, FinishReason: "stop"})
 	resp.Choices[0].Message.Role = "assistant"
 	resp.Choices[0].Message.Content = content
 	return resp

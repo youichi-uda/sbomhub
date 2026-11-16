@@ -116,6 +116,9 @@ func CheckFinish(resp *CompleteResponse) error {
 	if resp == nil {
 		return nil
 	}
+	if strings.TrimSpace(resp.Refusal) != "" {
+		return fmt.Errorf("%w (model refusal, finish_reason %q)", ErrFilteredResponse, resp.FinishReason)
+	}
 	switch ClassifyFinishReason(resp.FinishReason) {
 	case FinishNormal:
 		return nil

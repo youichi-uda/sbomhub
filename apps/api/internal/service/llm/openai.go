@@ -123,22 +123,29 @@ type openaiRespFmt struct {
 }
 
 type openaiChatResponse struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Index   int `json:"index"`
-		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"message"`
-		FinishReason string `json:"finish_reason"`
-	} `json:"choices"`
-	Usage struct {
+	ID      string         `json:"id"`
+	Model   string         `json:"model"`
+	Choices []openaiChoice `json:"choices"`
+	Usage   struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
 	} `json:"usage"`
 	Error *openaiError `json:"error,omitempty"`
+}
+
+// openaiChoice is one entry of a chat completion's choices (OpenAI and
+// Azure OpenAI share the shape).
+type openaiChoice struct {
+	Index   int `json:"index"`
+	Message struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+		// Refusal is set (finish_reason still "stop") when the model
+		// declines under structured outputs (M75).
+		Refusal *string `json:"refusal"`
+	} `json:"message"`
+	FinishReason string `json:"finish_reason"`
 }
 
 type openaiError struct {
@@ -255,6 +262,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 		OutputTokens: parsed.Usage.CompletionTokens,
 		Model:        parsed.Model,
 		FinishReason: NormalizeFinishReason(choice.FinishReason),
+		Refusal:      openaiRefusal(choice.Message.Refusal),
 		// ※要確認: cost computation deferred to audit layer (it has the
 		// per-model price table). We leave CostUSD = 0 here.
 		CostUSD:     0,
@@ -406,4 +414,12 @@ func (p *OpenAIProvider) Capabilities() Capabilities {
 		c.EmbeddingDimensions = openAIEmbeddingDimensions(p.embeddingModel)
 		return c
 	}
+}
+
+// openaiRefusal returns message.refusal, "" when absent or null.
+func openaiRefusal(r *string) string {
+	if r == nil {
+		return ""
+	}
+	return *r
 }

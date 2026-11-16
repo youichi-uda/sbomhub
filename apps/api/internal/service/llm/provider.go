@@ -113,7 +113,12 @@ type CompleteResponse struct {
 	OutputTokens int
 	Model        string
 	FinishReason string
-	CostUSD      float64
+	// Refusal is the model's refusal text when the provider reports one
+	// outside the finish reason (OpenAI / Azure message.refusal, which
+	// comes with finish_reason "stop"). Non-empty means the answer was
+	// withheld; CheckFinish treats it like a content-filter stop (M75).
+	Refusal string
+	CostUSD float64
 	// RawResponse is the raw HTTP body, retained for audit hashing.
 	// Callers should hash this before persisting (see audit layer).
 	RawResponse []byte
