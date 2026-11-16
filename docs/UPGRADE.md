@@ -2579,3 +2579,52 @@ field `skipped_sources`, MCP payload field `skipped_sources`.
 - Settled states are re-read once a minute, and when the tab becomes visible again, so a rescan or a new upload (e.g. from CI) is picked up. A failed vulnerability list load is shown as an error, not as an empty list.
 - **Project page errors:** Retry now reloads every project query (components, vulnerabilities, VEX, …), not only the project itself.
 - New UI strings: `ScanStatus.*`.
+
+## 31. Scan coverage: `checked_sources`, wider `skipped_sources`, `skipped_sources` in the scan 202
+
+**Who must act:** anyone who reads `completed` as "every source was checked" (CI gates, the MCP tools, scripts); operators of more than one API replica (read §31.3).
+
+### 31.1 scan-status says which sources were checked
+
+`completed` never proved coverage: with `SBOMHUB_OFFLINE=true` the NVD, JVN and distro steps make no request and still succeed, and `POST /api/v1/projects/:id/scan?sources=nvd` runs a subset. For a `completed` or `failed` scan, `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` now names each source (`nvd`, `jvn`, `distro`) as exactly one of:
+
+- `checked_sources` (new): the step ran against the live source and finished without a failure. Lookups answered from the NVD / distro cache (24h), and a step with nothing to look up for the SBOM, count as checked. Present whenever the scan reported its coverage — then always, as `[]` when nothing was checked (offline). Absent while `running` / `unknown`, for a scan recorded by an older replica, after a failure that names no source (`scan: scan failed (interrupted)`), and after the shared status of a running scan was lost (Redis eviction, `FLUSHDB`, a Redis restart without its data) until the next scan of the SBOM. Absent means unknown, never "none".
+- `skipped_sources` (widened): the step made no request because of configuration or the request — `SBOMHUB_OFFLINE=true` (every source), `SBOMHUB_JVN=off`, not in `?sources=`, the scheduled scan (`jvn`, with JVN on or off), or no scanner configured. Presence rule unchanged: absent when nothing was skipped. A scheduled scan's status now reads `skipped_sources: ["jvn"]`. A manual `?sources=jvn` scan now also reports `nvd` as skipped.
+- neither: the step failed in some run of the scan (`error` / `reasons`). `scheduled: scan failed (...)` takes out `nvd` and `distro`; `scan: scan failed (...)` (no scan slot) takes out every source.
+
+Both lists are ordered `nvd`, `jvn`, `distro` and never overlap. For overlapping scans of one SBOM, `skipped_sources` is the union of their skips and `checked_sources` the sources every run that reported coverage checked. Only a `completed` scan with `checked_sources: ["nvd","jvn","distro"]` and no `skipped_sources` checked every source.
+
+### 31.2 The scan 202 names the planned skips
+
+`POST /api/v1/projects/:id/scan` adds `skipped_sources` to its `202` body (same rules and order, absent when none): the sources this run will skip. scan-status reports them again once the scan is terminal, with those of any overlapping run. The SBOM upload response does not carry them.
+
+### 31.3 Several replicas
+
+An older replica records no coverage, and its runs report only the `SBOMHUB_JVN=off` skip, not offline, `?sources=` or scheduled-scan skips. While older replicas share the Redis, a scan they finished has no `checked_sources`, and one that overlapped an older replica's subset or scheduled run shows what this version's run checked. Rely on `checked_sources` (for example in CI) only once every replica runs this version. The coverage lives inside the existing `outcomes` entry, so older replicas' group resets clear it.
+
+### 31.4 Clients
+
+- `sbomhub` CLI (sbomhub-cli `555c11b` on): prints `照会済みソース: ...` below the result box; a zero count reads `なし ✅` only for full coverage (`なし (一部ソースのみ照会 ⚠️)` otherwise); warns on stderr when no source completed successfully; `--json` gains `checked_sources` and `coverage` (`full` / `partial`), both omitted for older servers. Exit codes and `--fail-on` are unchanged.
+- MCP tools: report `checked_sources` next to `skipped_sources` (`null` when the server did not report it, or when the second status read failed).
+
+API changes are additive only: scan-status field `checked_sources`, wider `skipped_sources`, scan 202 field `skipped_sources`, MCP payload field `checked_sources`, CLI JSON fields `checked_sources` / `coverage`.
+
+## 32. CVSS version in notifications, reports and CRA drafts; incomplete Ollama answers; Action scan coverage
+
+- Notifications: Slack, Discord and email now name the CVSS version of the score in the label (`CVSS v3.1: 9.8 (CRITICAL)`, Discord field name `CVSS v3.1`, email `CVSS v3.1 Score`). When the version is unknown, the label is the plain `CVSS` used before. Only the stored values `3.1`, `3.0`, `4.0` and `2.0` are ever printed. Anything that matches the old `*CVSS:*` / `CVSS Score` text exactly should also accept the versioned label.
+- Reports: the PDF Top Risks lines read `CVSS v3.1: 9.1` (or `CVSS: 9.1` when the version is unknown). The Excel Top Risks sheet has a new last column F, `CVSS バージョン` / `CVSS version`, which is empty when the version is unknown. Columns A–E are unchanged.
+- CRA drafts: when a CVSS score is printed, the six templates add `(CVSS v3.1)` after it for a known version. The CRA runner does not fill in a score yet, so generated drafts do not change today.
+- Ollama: an answer that ends without the final `done:true` message (`done` false, missing or null) now fails the triage, CRA or diff-summary run and saves no draft. Its `llm_calls` row records the partial response, `finish_reason = 'incomplete'` and an error message. Before, such an answer was accepted as a successful call with `finish_reason` NULL. `incomplete` is set by SBOMHub, not by the provider. Answers whose connection drops mid-body were already errors and still are. For code calling `llm.Provider.Complete` directly: a non-nil response can now come back together with an error (`llm.ErrIncompleteResponse`); check the error first.
+- GitHub Action (draft): when the scan JSON has `skipped_sources`, the action prints a "SBOMHub scan coverage" warning and adds a job-summary note. New outputs `skipped-sources` and `checked-sources` are JSON arrays, `[]` when absent. The job result is unchanged.
+
+## 33. Web: tab load errors, hoverable tooltips, translated compliance page, contrast, 320px login header
+
+**Who must act:** nobody. The API is unchanged.
+
+- **Project page tabs:** Components, VEX, License and API keys show "Failed to load …" with a Retry button when their own request fails, instead of their empty state ("No components found", …). The tab counter reads "load failed" (or "n · refresh failed" when an earlier answer is kept, "…" while loading), never "(0)". The Notifications tab no longer shows a form of default values over a failed load — saving it would have overwritten the real settings — and a failed notification history is shown.
+- **Tooltips (WCAG 1.4.13):** the pointer can move from a badge onto its tooltip to read it; Escape closes an open tooltip wherever keyboard focus is; nothing closes it on a timer. The role="tooltip" element now has a transparent padding around the painted panel.
+- **Compliance page:** translated on /en, including the category and check labels and details the API returns in Japanese only (recognised by id and wording; unrecognised text is shown as sent). The checklist and visualization options use the API's English labels on /en. The back link keeps the current locale.
+- **Dashboard:** counts use plural forms ("1 project", "2 vulnerabilities", "30 days ago"); severity cards and the EOL empty state are translated.
+- **Contrast (WCAG 1.4.3):** yellow, green and amber text is now the -700 shade (≥4.5:1); white-on-green badges use green-700, yellow badges black text.
+- **Narrow screens:** the audit log header and pager, analytics severity rows, the API key list and the diff-webhook actions wrap at 320px. In login (Clerk) mode the header truncates the organization name and shows Logout as an icon below 640px.
+- New UI strings: `ProjectDetail.componentsLoadFailed` / `vexLoadFailed` / `licensePoliciesLoadFailed` / `notificationSettingsLoadFailed` / `notificationLogsLoadFailed` / `tabCountLoadFailed` / `tabCountRefreshFailed`, `Compliance.*`, `Dashboard.projectCount` / `componentCount` / `daysAgoCount` / `noComponentData`. Removed: `Dashboard.projects` / `components` / `daysAgo`; `Dashboard.countSuffix` is now a plural.
