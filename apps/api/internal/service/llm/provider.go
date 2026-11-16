@@ -168,6 +168,20 @@ const MaxFinishReasonLen = 30
 // short plain token (see NormalizeFinishReason). No provider uses it.
 const FinishReasonUnrecognized = "unrecognized"
 
+// FinishReasonIncomplete marks an answer the provider did not finish: it
+// came back without the provider's end-of-answer signal (Ollama: no
+// done:true). It is returned together with an error wrapping
+// ErrIncompleteResponse, never on a successful call, so callers that check
+// the error first never consume the partial answer as a draft; the response
+// is still returned so the llm_calls row records what came back (M74).
+// Truncation the provider itself reports keeps the provider's own value
+// ("length", "max_tokens", "MAX_TOKENS").
+const FinishReasonIncomplete = "incomplete"
+
+// ErrIncompleteResponse is wrapped by Complete when the provider's answer
+// ended before its end-of-answer signal (see FinishReasonIncomplete).
+var ErrIncompleteResponse = errors.New("llm: incomplete response")
+
 // NormalizeFinishReason bounds a provider-reported finish reason before it
 // reaches CompleteResponse.FinishReason, and from there llm_calls (M71).
 //

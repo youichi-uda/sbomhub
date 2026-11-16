@@ -26,18 +26,13 @@ func TestOllama_Complete_DoneReason(t *testing.T) {
 		{"load", `{"model":"m","message":{"role":"assistant","content":""},"done":true,"done_reason":"load"}`, "load"},
 		{"padded", `{"model":"m","message":{"role":"assistant","content":"x"},"done":true,"done_reason":" length "}`, "length"},
 		{"absent, done (older Ollama)", `{"model":"m","message":{"role":"assistant","content":"x"},"done":true}`, "stop"},
-		{"absent, not done", `{"model":"m","message":{"role":"assistant","content":"x"},"done":false}`, ""},
 		{"null, done (treated as absent)", `{"model":"m","message":{"role":"assistant","content":"x"},"done":true,"done_reason":null}`, "stop"},
 		// Present but empty is a reason the server chose not to give, not an
 		// old server: it is not upgraded to "stop" (stored as NULL).
 		{"present but empty", `{"model":"m","message":{"role":"assistant","content":"x"},"done":true,"done_reason":""}`, ""},
+		// done=false / absent cases: ollama_incomplete_test.go (M74).
 		{"over-long", `{"model":"m","message":{"role":"assistant","content":"x"},"done":true,"done_reason":"` + long + `"}`, FinishReasonUnrecognized},
 		{"NUL", `{"model":"m","message":{"role":"assistant","content":"x"},"done":true,"done_reason":"stop\u0000"}`, FinishReasonUnrecognized},
-		// done=false declares the answer incomplete; a done_reason beside it
-		// is contradictory and is not recorded as a terminal reason
-		// (Codex R1 Low).
-		{"reason with done=false", `{"model":"m","message":{"role":"assistant","content":"x"},"done":false,"done_reason":"length"}`, ""},
-		{"wrong type with done=false", `{"model":"m","message":{"role":"assistant","content":"x"},"done":false,"done_reason":3}`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

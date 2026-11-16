@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -71,7 +72,7 @@ func TestOllama_Complete_Success(t *testing.T) {
 		return http.StatusOK, ollamaChatResponse{
 			Model:           req.Model,
 			Message:         ollamaMessage{Role: RoleAssistant, Content: "hi from ollama"},
-			Done:            true,
+			Done:            ollamaBool(true),
 			PromptEvalCount: 12,
 			EvalCount:       7,
 		}
@@ -114,7 +115,7 @@ func TestOllama_Complete_JSONMode(t *testing.T) {
 		return http.StatusOK, ollamaChatResponse{
 			Model:   req.Model,
 			Message: ollamaMessage{Role: RoleAssistant, Content: `{"ok":true}`},
-			Done:    true,
+			Done:    ollamaBool(true),
 		}
 	})
 	defer srv.Close()
@@ -141,7 +142,7 @@ func TestOllama_Complete_DefaultMaxTokens(t *testing.T) {
 		return http.StatusOK, ollamaChatResponse{
 			Model:   req.Model,
 			Message: ollamaMessage{Role: RoleAssistant, Content: "x"},
-			Done:    true,
+			Done:    ollamaBool(true),
 		}
 	})
 	defer srv.Close()
@@ -224,12 +225,15 @@ func TestOllama_Complete_TransportErrorRedacted(t *testing.T) {
 	}
 }
 
-func TestOllama_Complete_DoneFalseHasNoFinishReason(t *testing.T) {
+// M74: done=false is an incomplete answer — an error wrapping
+// ErrIncompleteResponse plus the partial response marked
+// FinishReasonIncomplete (before: success with an empty finish reason).
+func TestOllama_Complete_DoneFalseIsIncomplete(t *testing.T) {
 	srv := fakeOllamaServer(t, func(_ *testing.T, req ollamaChatRequest) (int, ollamaChatResponse) {
 		return http.StatusOK, ollamaChatResponse{
 			Model:   req.Model,
 			Message: ollamaMessage{Role: RoleAssistant, Content: "partial"},
-			Done:    false,
+			Done:    ollamaBool(false),
 		}
 	})
 	defer srv.Close()
@@ -238,13 +242,15 @@ func TestOllama_Complete_DoneFalseHasNoFinishReason(t *testing.T) {
 	out, err := p.Complete(context.Background(), CompleteRequest{
 		Messages: []Message{{Role: RoleUser, Content: "x"}},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrIncompleteResponse) {
+		t.Fatalf("err = %v, want ErrIncompleteResponse", err)
 	}
-	if out.FinishReason != "" {
-		t.Errorf("FinishReason = %q, want empty when done=false", out.FinishReason)
+	if out == nil || out.FinishReason != FinishReasonIncomplete {
+		t.Errorf("response = %+v, want FinishReason %q", out, FinishReasonIncomplete)
 	}
 }
+
+func ollamaBool(b bool) *bool { return &b }
 
 func TestOllama_Complete_200WithErrorField(t *testing.T) {
 	// A 200 OK envelope can still carry a non-empty error field if the
@@ -302,7 +308,7 @@ func TestOllama_Complete_RoleNormalization(t *testing.T) {
 		return http.StatusOK, ollamaChatResponse{
 			Model:   req.Model,
 			Message: ollamaMessage{Role: RoleAssistant, Content: "ok"},
-			Done:    true,
+			Done:    ollamaBool(true),
 		}
 	})
 	defer srv.Close()

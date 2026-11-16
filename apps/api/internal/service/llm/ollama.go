@@ -173,11 +173,14 @@ type ollamaChatRequest struct {
 // eval_duration nanoseconds that we ignore — audit cost accounting
 // for Ollama is zero by definition (no upstream API charges).
 type ollamaChatResponse struct {
-	Model           string        `json:"model"`
-	Message         ollamaMessage `json:"message"`
-	Done            bool          `json:"done"`
-	PromptEvalCount int           `json:"prompt_eval_count"`
-	EvalCount       int           `json:"eval_count"`
+	Model   string        `json:"model"`
+	Message ollamaMessage `json:"message"`
+	// Done is true only on the final message of an answer. A pointer so
+	// that an envelope without the field (an answer cut before its final
+	// message) is told apart; nil and false are both incomplete (M74).
+	Done            *bool `json:"done"`
+	PromptEvalCount int   `json:"prompt_eval_count"`
+	EvalCount       int   `json:"eval_count"`
 	// DoneReason is why generation ended (api.ChatResponse.DoneReason,
 	// `json:"done_reason,omitempty"`): "stop" (end of sequence or a stop
 	// sequence), "length" (num_predict or the context window ran out),
@@ -327,20 +330,27 @@ func (p *OllamaProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 		return nil, fmt.Errorf("ollama: model error: %s", parsed.Error)
 	}
 
-	finish := ollamaFinishReason(parsed.Done, parsed.DoneReason)
-
-	return &CompleteResponse{
+	done := parsed.Done != nil && *parsed.Done
+	out := &CompleteResponse{
 		Content:      parsed.Message.Content,
 		InputTokens:  parsed.PromptEvalCount,
 		OutputTokens: parsed.EvalCount,
 		Model:        parsed.Model,
-		FinishReason: finish,
+		FinishReason: ollamaFinishReason(done, parsed.DoneReason),
 		// Local LLM has zero per-call upstream cost. The audit layer
 		// may still surface compute / GPU amortised cost, but that is
 		// out of scope for the provider itself.
 		CostUSD:     0,
 		RawResponse: rawBody,
-	}, nil
+	}
+	if !done {
+		// No final done:true message: the answer was cut before Ollama
+		// finished it (M74). Fail the call so no caller saves the partial
+		// answer as a draft, but hand back the response so the llm_calls
+		// row records the partial content and FinishReasonIncomplete.
+		return out, fmt.Errorf("ollama: %w: answer ended without done:true", ErrIncompleteResponse)
+	}
+	return out, nil
 }
 
 // ollamaFinishReason derives CompleteResponse.FinishReason from the chat
@@ -358,13 +368,14 @@ func (p *OllamaProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 // done_reason — does done=true fall back to "stop", the value this provider
 // recorded for every completed answer before the field was read.
 //
-// done=false declares the answer incomplete, and Ollama sends done_reason
-// only on the final (done=true) message, so an incomplete answer has no
-// terminal reason: it stays empty even if a contradictory done_reason rides
-// along (Codex R1 Low).
+// Without done=true (false, or the field missing) the answer is incomplete:
+// Ollama sends done_reason only on the final message, so any done_reason
+// riding along is not a terminal reason, and the value is
+// FinishReasonIncomplete (Complete also returns ErrIncompleteResponse; M74 —
+// before, this was an empty value stored as NULL beside a successful call).
 func ollamaFinishReason(done bool, raw json.RawMessage) string {
 	if !done {
-		return ""
+		return FinishReasonIncomplete
 	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
