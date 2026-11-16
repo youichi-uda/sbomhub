@@ -1,12 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import en from '../messages/en.json';
-import {
-  API_BASE_URL,
-  createVulnerableProject,
-  deleteProject,
-  reportFullScanCoverage,
-  type VulnerableProject,
-} from './fixtures/vuln-project';
+import { API_BASE_URL, createVulnerableProject, deleteProject, type VulnerableProject } from './fixtures/vuln-project';
 
 // At a 320px viewport (the narrowest phone width WCAG 1.4.10 reflow asks
 // for) no page may scroll sideways. The dashboard shell had a fixed 256px
@@ -147,9 +141,12 @@ test.describe(`no horizontal page scroll at ${WIDTH}px`, () => {
         data: { vulnerability_id: project.vuln('CVE-2021-44228').id, status: 'under_investigation' },
       });
       expect(vex.status(), `VEX create: ${await vex.text()}`).toBe(201);
-      await reportFullScanCoverage(page); // the bare tab counts below (offline stack: UPGRADE §31)
       await page.goto(`/en/projects/${project.projectId}`);
       await expect(page.getByRole('heading', { level: 1, name: project.projectName })).toBeVisible();
+      // The real offline answer (UPGRADE §31: nothing checked) — the widest
+      // vulnerability view: the coverage notice and a qualified count
+      // ("4 · partial") are part of what must fit (Codex webcov R4).
+      await expect(page.getByTestId('scan-coverage-notice')).toBeVisible();
       const tabs = [
         en.Projects.upload,
         en.Components.title,
@@ -160,7 +157,7 @@ test.describe(`no horizontal page scroll at ${WIDTH}px`, () => {
         en.ProjectDetail.apiKeys,
       ];
       for (const name of tabs) {
-        await page.getByRole('button', { name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}( \\(\\d+\\))?$`) }).click();
+        await page.getByRole('button', { name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}( \\([^)]*\\))?$`) }).click();
         if (name === en.Vulnerabilities.title) {
           await expect(page.getByTestId('vuln-entry')).toHaveCount(4, { timeout: 15_000 });
         }
