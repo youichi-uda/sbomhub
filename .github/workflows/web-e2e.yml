@@ -22,6 +22,10 @@
 #     auto-create-on-first-request path in apps/api/internal/repository
 #     /tenant.go::GetOrCreateDefault picks up the deterministic seed
 #     UUID instead of minting a random one.
+#     It also builds and starts a second, Clerk-mode ("login mode") web
+#     on :3001 with a fake publishable key, for e2e/clerk-header.spec.ts
+#     (fake Clerk: e2e/fixtures/fake-clerk.ts); CI_REQUIRE_CLERK=1 makes
+#     those specs fail rather than skip if it goes missing.
 #
 # Stack pattern is lifted from golden-path-e2e.yml — same per-run
 # ENCRYPTION_KEY / role bootstrap discipline, same local image build to
@@ -369,6 +373,29 @@ jobs:
             --build-arg NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY= \
             .
 
+      - name: Build Clerk-mode web image (login-mode header specs)
+        # e2e/clerk-header.spec.ts drives the login-mode ("Clerk") dashboard
+        # header, which only renders when the web is BUILT with a Clerk
+        # publishable key (inlined at build time). This is a second image of
+        # the same source with the FAKE key from e2e/fixtures/fake-clerk.ts
+        # (pk_live_ + base64("clerk.sbomhub-e2e.test$")): no Clerk account,
+        # no secret, no egress. The spec serves the JWKS the server-side
+        # middleware verifies against and stubs clerk-js in the browser.
+        # The deps stage is shared with the build above (same lockfile), so
+        # only the `next build` stage reruns.
+        #
+        # It runs inside this job rather than a separate one so the specs are
+        # collected by the same `e2e/*.spec.ts` run, under CI_REQUIRE_CLERK=1
+        # (see the run step): a lost Clerk web FAILS this required check
+        # instead of reporting "3 skipped" on a green job.
+        run: |
+          docker build \
+            -t sbomhub-web-clerk:e2e \
+            -f apps/web/Dockerfile \
+            --build-arg NEXT_PUBLIC_API_URL=http://localhost:8080 \
+            --build-arg NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_Y2xlcmsuc2JvbWh1Yi1lMmUudGVzdCQ= \
+            .
+
       - name: Start postgres + redis
         run: |
           docker compose up -d --wait postgres redis
@@ -465,6 +492,38 @@ jobs:
           docker compose logs --tail=200 web || true
           exit 1
 
+      - name: Start Clerk-mode web (:3001, fake Clerk Backend API on :13522)
+        # --network host: the server-side middleware fetches the JWKS from
+        # CLERK_API_URL, which the Playwright process serves on the runner's
+        # 127.0.0.1:13522 (e2e/fixtures/fake-clerk.ts, FAKE_CLERK_BAPI_PORT),
+        # and the browser reaches the api on localhost:8080 as in the main
+        # web. The secret is a placeholder: nothing calls Clerk with it.
+        # HOSTNAME=0.0.0.0, not 127.0.0.1: Next's standalone server routes
+        # its proxy (middleware) through `localhost`, which answered
+        # ECONNRESET when the server listened on 127.0.0.1 only (measured).
+        run: |
+          docker run -d --name sbomhub-web-clerk --network host \
+            -e PORT=3001 \
+            -e HOSTNAME=0.0.0.0 \
+            -e CLERK_SECRET_KEY=sk_live_e2e_placeholder \
+            -e CLERK_API_URL=http://127.0.0.1:13522 \
+            sbomhub-web-clerk:e2e
+
+      - name: Wait for Clerk-mode web reachability
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:3001/en >/dev/null 2>&1; then
+              echo "Clerk-mode web reachable after $((i*2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Clerk-mode web did not become reachable within ~120s"
+          docker logs --tail=200 sbomhub-web-clerk || true
+          exit 1
+
       - name: Install Playwright browser (chromium)
         run: |
           cd apps/web
@@ -494,10 +553,16 @@ jobs:
         # PLAYWRIGHT_SKIP_WEB_SERVER=1 disables the bundled
         # `npm run dev:test` launcher (see playwright.config.ts) so we
         # target the docker compose web container directly.
+        #
+        # PLAYWRIGHT_CLERK_BASE_URL is the Clerk-mode web started above, for
+        # e2e/clerk-header.spec.ts. CI_REQUIRE_CLERK=1 makes those tests FAIL
+        # when it is missing; without it they skip (local runs).
         env:
           PLAYWRIGHT_BASE_URL: http://localhost:3000
           PLAYWRIGHT_API_URL: http://localhost:8080
           PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+          PLAYWRIGHT_CLERK_BASE_URL: http://localhost:3001
+          CI_REQUIRE_CLERK: '1'
         run: |
           cd apps/web
           pnpm exec playwright test --project=chromium e2e/*.spec.ts
@@ -524,7 +589,11 @@ jobs:
           docker compose logs --tail=200 postgres || true
           echo "--- redis ---"
           docker compose logs --tail=100 redis || true
+          echo "--- web (Clerk mode) ---"
+          docker logs --tail=500 sbomhub-web-clerk || true
 
       - name: Tear down docker compose stack
         if: always()
-        run: docker compose down -v
+        run: |
+          docker rm -f sbomhub-web-clerk || true
+          docker compose down -v

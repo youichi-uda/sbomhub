@@ -20,13 +20,24 @@ import {
 //
 // Needs a web app BUILT in Clerk mode with the fake key and pointed at the
 // fake Backend API — see e2e/fixtures/fake-clerk.ts — and its URL in
-// PLAYWRIGHT_CLERK_BASE_URL. The regular CI stack is built without a Clerk
-// key, so there the tests skip at test level (never at collection, see
-// skip-reachability.spec.ts), each naming what it needs.
+// PLAYWRIGHT_CLERK_BASE_URL. Without it the tests skip at test level (never
+// at collection, see skip-reachability.spec.ts), each naming what it needs —
+// unless CI_REQUIRE_CLERK is set: the Web E2E full-suite job builds and starts
+// a Clerk-mode web and sets it, so a lost PLAYWRIGHT_CLERK_BASE_URL there
+// FAILS instead of turning these tests into a silent "skipped".
 
 const WIDTH = 320;
 const ORG: FakeOrg = { id: 'org_e2e_fake', name: 'Acme Precision Manufacturing Co., Ltd.', slug: 'acme-precision' };
 const NEEDS = 'PLAYWRIGHT_CLERK_BASE_URL: a Clerk-mode build (see e2e/fixtures/fake-clerk.ts)';
+// Any value but '' / '0' requires the Clerk-mode web (a 'true' must not read
+// as "not required").
+const REQUIRE_CLERK = !['', '0'].includes(process.env.CI_REQUIRE_CLERK ?? '');
+
+/** Skips without a Clerk-mode web, or fails when CI_REQUIRE_CLERK demands one. */
+function needsClerkWeb() {
+  test.skip(!CLERK_BASE_URL && !REQUIRE_CLERK, NEEDS);
+  if (!CLERK_BASE_URL) throw new Error(`CI_REQUIRE_CLERK is set but ${NEEDS} is not`);
+}
 
 // One worker owns the fake Backend API port and the signing key.
 test.describe.configure({ mode: 'serial' });
@@ -74,7 +85,7 @@ async function headerLayout(page: Page) {
 
 for (const locale of ['en', 'ja'] as const) {
   test(`${locale}: the signed-in header fits ${WIDTH}px with the organization switcher and Logout`, async ({ page }) => {
-    test.skip(!CLERK_BASE_URL, NEEDS);
+    needsClerkWeb();
     await page.setViewportSize({ width: WIDTH, height: 800 });
     await openSignedIn(page, `/${locale}/dashboard`);
     const logout = page.getByRole('button', { name: locale === 'en' ? 'Logout' : 'ログアウト' });
@@ -86,7 +97,7 @@ for (const locale of ['en', 'ja'] as const) {
 }
 
 test('the organization name is still there at full width', async ({ page }) => {
-  test.skip(!CLERK_BASE_URL, NEEDS);
+  needsClerkWeb();
   await page.setViewportSize({ width: 1280, height: 800 });
   const switcher = await openSignedIn(page, '/en/dashboard');
   // Not truncated when there is room.
