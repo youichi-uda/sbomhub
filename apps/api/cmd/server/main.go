@@ -886,7 +886,10 @@ func main() {
 		ProviderResolver: triageProviderResolver,
 		LLMCalls:         llmCallsRepo,
 		Audit:            auditRepo,
-		LLMTimeout:       triageLLMTimeout,
+		// M75: failed-summary llm_calls / audit rows commit in their own
+		// tx; the route's TenantTx rolls back on the 500 it answers.
+		FailureTx:  triageTxManager,
+		LLMTimeout: triageLLMTimeout,
 	})
 	slog.Info("Diff AI summary service initialised",
 		"default_provider", triageDefaultProvider.Name(),

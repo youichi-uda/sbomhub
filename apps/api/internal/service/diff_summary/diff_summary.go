@@ -44,6 +44,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -102,6 +103,13 @@ type LLMCallWriter interface {
 	Insert(ctx context.Context, call *repository.LLMCall) error
 }
 
+// TxRunner runs fn in its own committed transaction bound to tenantID.
+// Satisfied by *triage.DBTxManager (the caller passes a ctx stripped of the
+// request transaction, so DBTxManager opens a new one).
+type TxRunner interface {
+	RunWrite(ctx context.Context, tenantID uuid.UUID, fn func(ctx context.Context) error) error
+}
+
 // AuditLogWriter is satisfied by *repository.AuditRepository.Log.
 type AuditLogWriter interface {
 	Log(ctx context.Context, input *model.CreateAuditLogInput) error
@@ -115,6 +123,7 @@ type Service struct {
 	providerResolver ProviderResolver
 	llmCalls         LLMCallWriter
 	audit            AuditLogWriter
+	failureTx        TxRunner
 
 	llmTimeout time.Duration
 	clock      func() time.Time
@@ -127,8 +136,15 @@ type Config struct {
 	ProviderResolver ProviderResolver // per-tenant BYOK resolver (may be nil)
 	LLMCalls         LLMCallWriter
 	Audit            AuditLogWriter
-	LLMTimeout       time.Duration // zero -> triage.LLMTimeoutFromEnv()
-	Clock            func() time.Time
+	// FailureTx, when set, writes the llm_calls + ai_failed audit rows of
+	// a FAILED summary in their own transaction (M75). The route runs
+	// under TenantTx, which rolls the request transaction back on the
+	// 500 a failed summary answers, so without it those rows are lost.
+	// nil: failure rows use ctx as is (unit tests, callers without
+	// TenantTx).
+	FailureTx  TxRunner
+	LLMTimeout time.Duration // zero -> triage.LLMTimeoutFromEnv()
+	Clock      func() time.Time
 }
 
 // NewService constructs the service. Required fields (Diff, Provider,
@@ -161,6 +177,7 @@ func NewService(cfg Config) *Service {
 		providerResolver: cfg.ProviderResolver,
 		llmCalls:         cfg.LLMCalls,
 		audit:            cfg.Audit,
+		failureTx:        cfg.FailureTx,
 		llmTimeout:       timeout,
 		clock:            clock,
 	}
@@ -335,21 +352,24 @@ func (s *Service) Generate(ctx context.Context, req Request) (*Response, error) 
 	if cerr != nil {
 		redactedErr := llm.RedactProviderError(cerr)
 		redacted := redactedErr.Error()
-		var callID uuid.UUID
-		var llmErr error
-		if cresp != nil {
-			// An error that comes with a response (llm.ErrIncompleteResponse:
-			// the partial answer, FinishReason "incomplete") still fails the
-			// summary, but the row keeps what came back (M74).
-			callID, llmErr = s.writeLLMCallFailedParse(ctx, req, provider, promptHash, promptPreview, cresp, redacted, duration, now)
-		} else {
-			callID, llmErr = s.writeFailedLLMCall(ctx, req, provider, promptHash, promptPreview, redacted, duration, now)
-		}
-		if llmErr != nil {
-			return nil, llmErr
-		}
-		if auditErr := s.writeFailedAudit(ctx, req, callID, diffResp, redacted); auditErr != nil {
-			return nil, auditErr
+		if perr := s.persistFailure(ctx, req.TenantID, func(ctx context.Context) error {
+			var callID uuid.UUID
+			var llmErr error
+			if cresp != nil {
+				// An error that comes with a response (llm.ErrIncompleteResponse
+				// and, M75, ErrTruncatedResponse / ErrFilteredResponse: the
+				// partial answer and the provider's finish reason) still fails
+				// the summary, but the row keeps what came back (M74).
+				callID, llmErr = s.writeLLMCallFailedParse(ctx, req, provider, promptHash, promptPreview, cresp, redacted, duration, now)
+			} else {
+				callID, llmErr = s.writeFailedLLMCall(ctx, req, provider, promptHash, promptPreview, redacted, duration, now)
+			}
+			if llmErr != nil {
+				return llmErr
+			}
+			return s.writeFailedAudit(ctx, req, callID, diffResp, redacted)
+		}); perr != nil {
+			return nil, perr
 		}
 		// %w keeps llm.ErrIncompleteResponse / ErrTruncatedResponse /
 		// ErrFilteredResponse visible to errors.Is (the redacted error
@@ -364,12 +384,14 @@ func (s *Service) Generate(ctx context.Context, req Request) (*Response, error) 
 		// has a trail to debug from. The returned error carries the
 		// parse reason but no upstream secrets.
 		redacted := fmt.Sprintf("parse: %s", parseErr.Error())
-		callID, llmErr := s.writeLLMCallFailedParse(ctx, req, provider, promptHash, promptPreview, cresp, redacted, duration, now)
-		if llmErr != nil {
-			return nil, llmErr
-		}
-		if auditErr := s.writeFailedAudit(ctx, req, callID, diffResp, redacted); auditErr != nil {
-			return nil, auditErr
+		if perr := s.persistFailure(ctx, req.TenantID, func(ctx context.Context) error {
+			callID, llmErr := s.writeLLMCallFailedParse(ctx, req, provider, promptHash, promptPreview, cresp, redacted, duration, now)
+			if llmErr != nil {
+				return llmErr
+			}
+			return s.writeFailedAudit(ctx, req, callID, diffResp, redacted)
+		}); perr != nil {
+			return nil, perr
 		}
 		return nil, fmt.Errorf("llm response parse: %w", parseErr)
 	}
@@ -618,6 +640,17 @@ func disabledPlaceholder(lang string, d *diff.Response) *llmFields {
 
 // ---------- persistence helpers ----------
 
+// persistFailure runs the failure-row writes. With FailureTx it strips the
+// request transaction from ctx and commits the rows in their own
+// transaction, so the TenantTx rollback of the failed request does not take
+// them along; llm_calls and the audit row still commit together.
+func (s *Service) persistFailure(ctx context.Context, tenantID uuid.UUID, fn func(ctx context.Context) error) error {
+	if s.failureTx == nil {
+		return fn(ctx)
+	}
+	return s.failureTx.RunWrite(database.WithoutTx(ctx), tenantID, fn)
+}
+
 func (s *Service) writeSuccessLLMCall(
 	ctx context.Context, req Request, provider llm.Provider,
 	promptHash, promptPreview string, cresp *llm.CompleteResponse,
@@ -691,13 +724,15 @@ func (s *Service) writeLLMCallFailedParse(
 		PromptPreview:   promptPreview,
 		ResponseHash:    respHash,
 		ResponsePreview: respPreview,
-		InputTokens:     cresp.InputTokens,
-		OutputTokens:    cresp.OutputTokens,
-		CostUSD:         cresp.CostUSD,
-		DurationMs:      int(duration / time.Millisecond),
-		FinishReason:    cresp.FinishReason,
-		ErrorMessage:    errorMsg,
-		CreatedAt:       now,
+		// The whole rejected answer, for diagnosis (M75).
+		ResponseBody: cresp.Content,
+		InputTokens:  cresp.InputTokens,
+		OutputTokens: cresp.OutputTokens,
+		CostUSD:      cresp.CostUSD,
+		DurationMs:   int(duration / time.Millisecond),
+		FinishReason: cresp.FinishReason,
+		ErrorMessage: errorMsg,
+		CreatedAt:    now,
 	}
 	if err := s.llmCalls.Insert(ctx, call); err != nil {
 		return uuid.Nil, fmt.Errorf("insert llm_calls (parse-fail): %w", err)
