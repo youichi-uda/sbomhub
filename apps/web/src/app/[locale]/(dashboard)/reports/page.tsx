@@ -110,7 +110,7 @@ export default function ReportsPage() {
         switch (status) {
             case 'completed':
             case 'emailed':
-                return <CheckCircle2 className="w-5 h-5 text-green-500" />;
+                return <CheckCircle2 className="w-5 h-5 text-green-700" />;
             case 'failed':
                 return <AlertTriangle className="w-5 h-5 text-red-500" />;
             case 'generating':

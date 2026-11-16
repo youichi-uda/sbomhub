@@ -81,3 +81,52 @@ test.describe('Dashboard', () => {
     await expect(page.locator('button').filter({ hasText: 'EN' })).toBeVisible({ timeout: 5000 });
   });
 });
+
+// Counts on the dashboard were built by concatenation: "1 projects",
+// "1 components", a trend tooltip of "{count} items" (no noun) and
+// "30 days ago" assembled from "30" + "days ago". They are ICU plurals now.
+// The summary is the real API answer with the counts replaced, so singular
+// and plural are both on screen whatever the database holds.
+test.describe('Dashboard counts', () => {
+  async function stubSummary(page: import('@playwright/test').Page) {
+    await page.route(
+      (url) => url.pathname === '/api/v1/dashboard/summary',
+      async (route) => {
+        const res = await route.fetch();
+        const body = await res.json();
+        body.total_projects = 1;
+        body.total_components = 2;
+        const days = body.trend as Array<{ date: string; critical: number; high: number; medium: number; low: number }>;
+        expect(days.length, 'the API returns a trend').toBeGreaterThan(1);
+        for (const [i, d] of days.entries()) Object.assign(d, { critical: 0, high: 0, medium: 0, low: i === 0 ? 1 : 2 });
+        await route.fulfill({ response: res, json: body });
+      },
+    );
+  }
+
+  test('en: singular and plural nouns, a noun in the trend tooltip', async ({ page }) => {
+    await stubSummary(page);
+    await page.goto('/en/dashboard');
+    await expect(page.getByRole('heading', { level: 1, name: 'Dashboard' })).toBeVisible({ timeout: 15000 });
+    const main = page.locator('main');
+    await expect(main.getByText('1 project', { exact: true })).toBeVisible();
+    await expect(main.getByText('2 components', { exact: true })).toBeVisible();
+    await expect(main.getByText('30 days ago', { exact: true })).toBeVisible();
+    const titles = await main.locator('[title]').evaluateAll((els) => els.map((e) => e.getAttribute('title')));
+    expect(titles.length).toBeGreaterThan(1);
+    expect(titles[0]).toMatch(/: 1 vulnerability$/);
+    expect(titles[1]).toMatch(/: 2 vulnerabilities$/);
+  });
+
+  test('ja: counts read naturally', async ({ page }) => {
+    await stubSummary(page);
+    await page.goto('/ja/dashboard');
+    await expect(page.getByRole('heading', { level: 1, name: 'ダッシュボード' })).toBeVisible({ timeout: 15000 });
+    const main = page.locator('main');
+    await expect(main.getByText('1 プロジェクト', { exact: true })).toBeVisible();
+    await expect(main.getByText('2 コンポーネント', { exact: true })).toBeVisible();
+    await expect(main.getByText('30日前', { exact: true })).toBeVisible();
+    const titles = await main.locator('[title]').evaluateAll((els) => els.map((e) => e.getAttribute('title')));
+    expect(titles[1]).toMatch(/: 2件の脆弱性$/);
+  });
+});

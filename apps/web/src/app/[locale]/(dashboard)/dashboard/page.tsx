@@ -33,10 +33,10 @@ function SeverityBadge({ severity }: { severity: string }) {
     critical: "bg-red-500 hover:bg-red-600",
     HIGH: "bg-orange-500 hover:bg-orange-600",
     high: "bg-orange-500 hover:bg-orange-600",
-    MEDIUM: "bg-yellow-500 hover:bg-yellow-600",
-    medium: "bg-yellow-500 hover:bg-yellow-600",
-    LOW: "bg-green-500 hover:bg-green-600",
-    low: "bg-green-500 hover:bg-green-600",
+    MEDIUM: "bg-yellow-500 text-black hover:bg-yellow-600",
+    medium: "bg-yellow-500 text-black hover:bg-yellow-600",
+    LOW: "bg-green-700 hover:bg-green-800",
+    low: "bg-green-700 hover:bg-green-800",
     none: "bg-gray-500 hover:bg-gray-600",
   };
   return (
@@ -146,8 +146,8 @@ function ProjectScoresList({ scores, noDataMessage, locale }: { scores: ProjectS
           <div className="flex gap-4 text-xs text-muted-foreground">
             <span className="text-red-500">{tv("critical")}: {score.critical}</span>
             <span className="text-orange-500">{tv("high")}: {score.high}</span>
-            <span className="text-yellow-600">{tv("medium")}: {score.medium}</span>
-            <span className="text-green-500">{tv("low")}: {score.low}</span>
+            <span className="text-yellow-700">{tv("medium")}: {score.medium}</span>
+            <span className="text-green-700">{tv("low")}: {score.low}</span>
           </div>
         </div>
       ))}
@@ -160,19 +160,21 @@ function EOLSummaryCard({
   eos,
   eol,
   unknown,
-  labels
+  labels,
+  noDataMessage,
 }: {
   active: number;
   eos: number;
   eol: number;
   unknown: number;
   labels: { active: string; eos: string; eol: string; unknown: string };
+  noDataMessage: string;
 }) {
   const total = active + eos + eol + unknown;
   if (total === 0) {
     return (
       <div className="text-center py-4 text-muted-foreground text-sm">
-        No component data
+        {noDataMessage}
       </div>
     );
   }
@@ -180,7 +182,7 @@ function EOLSummaryCard({
   return (
     <div className="grid grid-cols-4 gap-4 text-center">
       <div className="space-y-1">
-        <div className="flex items-center justify-center gap-1 text-green-500">
+        <div className="flex items-center justify-center gap-1 text-green-700">
           <CheckCircle className="h-4 w-4" />
           <span className="text-2xl font-bold">{active}</span>
         </div>
@@ -211,11 +213,11 @@ function EOLSummaryCard({
   );
 }
 
-function TrendChart({ trend, noDataMessage, locale, countLabel }: { trend: TrendPoint[]; noDataMessage?: string; locale: string; countLabel: string }) {
+function TrendChart({ trend, noDataMessage, locale, countLabel }: { trend: TrendPoint[]; noDataMessage: string; locale: string; countLabel: (count: number) => string }) {
   if (trend.length === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground">
-        {noDataMessage || "No trend data"}
+        {noDataMessage}
       </div>
     );
   }
@@ -241,7 +243,7 @@ function TrendChart({ trend, noDataMessage, locale, countLabel }: { trend: Trend
           <div
             key={index}
             className="flex-1 flex flex-col justify-end"
-            title={`${formatDate(point.date)}: ${countLabel.replace('{count}', String(total))}`}
+            title={`${formatDate(point.date)}: ${countLabel(total)}`}
           >
             <div
               className="bg-linear-to-t from-red-500 via-orange-400 to-yellow-300 rounded-t"
@@ -387,11 +389,11 @@ export default function DashboardPage() {
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
           <div className="flex items-center gap-1">
             <FolderOpen className="h-4 w-4" />
-            <span>{summary.total_projects} {t("projects")}</span>
+            <span>{t("projectCount", { count: summary.total_projects })}</span>
           </div>
           <div className="flex items-center gap-1">
             <Package className="h-4 w-4" />
-            <span>{summary.total_components} {t("components")}</span>
+            <span>{t("componentCount", { count: summary.total_components })}</span>
           </div>
         </div>
       </div>
@@ -399,24 +401,24 @@ export default function DashboardPage() {
       {/* Vulnerability Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <VulnerabilityCard
-          label="Critical"
+          label={tv("critical")}
           count={summary.vulnerabilities.critical}
           color="text-red-500"
         />
         <VulnerabilityCard
-          label="High"
+          label={tv("high")}
           count={summary.vulnerabilities.high}
           color="text-orange-500"
         />
         <VulnerabilityCard
-          label="Medium"
+          label={tv("medium")}
           count={summary.vulnerabilities.medium}
-          color="text-yellow-600"
+          color="text-yellow-700"
         />
         <VulnerabilityCard
-          label="Low"
+          label={tv("low")}
           count={summary.vulnerabilities.low}
-          color="text-green-500"
+          color="text-green-700"
         />
       </div>
 
@@ -438,6 +440,7 @@ export default function DashboardPage() {
               eos={aggregatedEol.eos}
               eol={aggregatedEol.eol}
               unknown={aggregatedEol.unknown}
+              noDataMessage={t("noComponentData")}
               labels={{
                 active: teol("active"),
                 eos: teol("eos"),
@@ -521,9 +524,9 @@ export default function DashboardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <TrendChart trend={summary.trend} noDataMessage={t("noTrendData")} locale={locale} countLabel={t("countSuffix")} />
+            <TrendChart trend={summary.trend} noDataMessage={t("noTrendData")} locale={locale} countLabel={(count) => t("countSuffix", { count })} />
             <div className="flex justify-between text-xs text-muted-foreground mt-2">
-              <span>30 {t("daysAgo")}</span>
+              <span>{t("daysAgoCount", { count: 30 })}</span>
               <span>{t("today")}</span>
             </div>
           </CardContent>

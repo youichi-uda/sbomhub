@@ -114,7 +114,7 @@ export default function ScanSettingsPage() {
     const getStatusIcon = (status: ScanLog['status']) => {
         switch (status) {
             case 'completed':
-                return <Check className="w-4 h-4 text-green-500" />;
+                return <Check className="w-4 h-4 text-green-700" />;
             case 'failed':
                 return <AlertTriangle className="w-4 h-4 text-red-500" />;
             case 'running':
@@ -143,7 +143,7 @@ export default function ScanSettingsPage() {
             )}
 
             {success && (
-                <div className="mb-6 p-4 bg-green-500/10 border border-green-500/20 rounded-lg text-green-600 dark:text-green-400">
+                <div className="mb-6 p-4 bg-green-500/10 border border-green-500/20 rounded-lg text-green-700 dark:text-green-400">
                     {t('saveSuccess')}
                 </div>
             )}
@@ -243,8 +243,8 @@ export default function ScanSettingsPage() {
                         {[
                             { key: 'notify_critical' as const, label: 'Critical', color: 'text-red-500' },
                             { key: 'notify_high' as const, label: 'High', color: 'text-orange-500' },
-                            { key: 'notify_medium' as const, label: 'Medium', color: 'text-yellow-500' },
-                            { key: 'notify_low' as const, label: 'Low', color: 'text-green-500' },
+                            { key: 'notify_medium' as const, label: 'Medium', color: 'text-yellow-700' },
+                            { key: 'notify_low' as const, label: 'Low', color: 'text-green-700' },
                         ].map(({ key, label, color }) => (
                             <label key={key} className="flex items-center gap-3 cursor-pointer">
                                 <input

@@ -120,7 +120,7 @@ export default function ReportSettingsPage() {
             )}
 
             {success && (
-                <div className="mb-6 p-4 bg-green-500/10 border border-green-500/20 rounded-lg text-green-600 dark:text-green-400">
+                <div className="mb-6 p-4 bg-green-500/10 border border-green-500/20 rounded-lg text-green-700 dark:text-green-400">
                     {success}
                 </div>
             )}

@@ -36,8 +36,8 @@ function SeverityBadge({ severity }: { severity: string }) {
   const colors: Record<string, string> = {
     CRITICAL: "bg-red-500 hover:bg-red-600",
     HIGH: "bg-orange-500 hover:bg-orange-600",
-    MEDIUM: "bg-yellow-500 hover:bg-yellow-600",
-    LOW: "bg-green-500 hover:bg-green-600",
+    MEDIUM: "bg-yellow-500 text-black hover:bg-yellow-600",
+    LOW: "bg-green-700 hover:bg-green-800",
   };
   return (
     <Badge className={colors[severity] || "bg-gray-500"}>
@@ -116,7 +116,7 @@ function CVESearchResults({ result, locale }: { result: CVESearchResult; locale:
         <Card>
           <CardHeader>
             <CardTitle className="text-lg flex items-center gap-2">
-              <CheckCircle className="h-5 w-5 text-green-500" />
+              <CheckCircle className="h-5 w-5 text-green-700" />
               {t("unaffectedProjects")} ({result.unaffected_projects.length})
             </CardTitle>
           </CardHeader>
@@ -195,7 +195,7 @@ function ComponentSearchResults({ result, locale }: { result: ComponentSearchRes
                       )}
                     </div>
                   ) : (
-                    <span className="text-green-500">{t("none")}</span>
+                    <span className="text-green-700">{t("none")}</span>
                   )}
                 </TableCell>
               </TableRow>

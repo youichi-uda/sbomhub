@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import { useLocale, useTranslations } from "next-intl";
 import { useQuery } from "@tanstack/react-query";
 import { queryKeys } from "@/lib/query/keys";
+import { categoryLabelKey, checkLabelKey, detailMessage, localizedLabel } from "@/lib/compliance-labels";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -63,9 +65,9 @@ function ScoreCircle({ score, maxScore }: { score: number; maxScore: number }) {
   const circumference = 2 * Math.PI * 45;
   const strokeDashoffset = circumference - (percentage / 100) * circumference;
 
-  let color = "text-green-500";
+  let color = "text-green-700";
   if (percentage < 50) color = "text-red-500";
-  else if (percentage < 80) color = "text-yellow-500";
+  else if (percentage < 80) color = "text-yellow-700";
 
   return (
     <div className="relative w-32 h-32">
@@ -100,20 +102,23 @@ function ScoreCircle({ score, maxScore }: { score: number; maxScore: number }) {
 }
 
 function CheckItem({ check }: { check: ComplianceCheck }) {
+  const t = useTranslations("Compliance");
+  const labelKey = checkLabelKey(check.id);
+  const detail = check.details ? detailMessage(check.details) : null;
   return (
     <div className="flex items-start gap-3 py-2">
       {check.passed ? (
-        <CheckCircle className="h-5 w-5 text-green-500 mt-0.5 shrink-0" />
+        <CheckCircle className="h-5 w-5 text-green-700 mt-0.5 shrink-0" />
       ) : (
         <XCircle className="h-5 w-5 text-red-500 mt-0.5 shrink-0" />
       )}
       <div>
         <p className={check.passed ? "text-foreground" : "text-muted-foreground"}>
-          {check.label}
+          {labelKey ? t(labelKey) : check.label}
         </p>
         {check.details && (
           <p className="text-sm text-muted-foreground mt-1">
-            └─ {check.details}
+            └─ {detail ? t(detail.key, detail.values) : check.details}
           </p>
         )}
       </div>
@@ -122,6 +127,8 @@ function CheckItem({ check }: { check: ComplianceCheck }) {
 }
 
 function CategoryCard({ category }: { category: ComplianceCategory }) {
+  const t = useTranslations("Compliance");
+  const labelKey = categoryLabelKey(category.name);
   const percentage = category.max_score > 0
     ? Math.round((category.score / category.max_score) * 100)
     : 0;
@@ -129,11 +136,11 @@ function CategoryCard({ category }: { category: ComplianceCategory }) {
   let statusIcon;
   let statusColor;
   if (percentage === 100) {
-    statusIcon = <CheckCircle className="h-5 w-5 text-green-500" />;
-    statusColor = "text-green-500";
+    statusIcon = <CheckCircle className="h-5 w-5 text-green-700" />;
+    statusColor = "text-green-700";
   } else if (percentage >= 50) {
-    statusIcon = <AlertCircle className="h-5 w-5 text-yellow-500" />;
-    statusColor = "text-yellow-500";
+    statusIcon = <AlertCircle className="h-5 w-5 text-yellow-700" />;
+    statusColor = "text-yellow-700";
   } else {
     statusIcon = <XCircle className="h-5 w-5 text-red-500" />;
     statusColor = "text-red-500";
@@ -145,7 +152,7 @@ function CategoryCard({ category }: { category: ComplianceCategory }) {
         <div className="flex items-center justify-between w-full pr-4">
           <div className="flex items-center gap-3">
             {statusIcon}
-            <span className="font-medium">{category.label}</span>
+            <span className="font-medium">{labelKey ? t(labelKey) : category.label}</span>
           </div>
           <span className={`text-sm ${statusColor}`}>
             {category.score}/{category.max_score}
@@ -173,6 +180,8 @@ function ChecklistItemComponent({
   projectId: string;
   onUpdate: () => void;
 }) {
+  const t = useTranslations("Compliance");
+  const locale = useLocale();
   const [note, setNote] = useState(item.note || "");
   const [saving, setSaving] = useState(false);
   const [localResponse, setLocalResponse] = useState(item.response ?? false);
@@ -216,7 +225,7 @@ function ChecklistItemComponent({
           {item.auto_verify ? (
             // Auto-verified item
             item.auto_result ? (
-              <CheckCircle className="h-5 w-5 text-green-500 mt-0.5 shrink-0" />
+              <CheckCircle className="h-5 w-5 text-green-700 mt-0.5 shrink-0" />
             ) : (
               <XCircle className="h-5 w-5 text-red-500 mt-0.5 shrink-0" />
             )
@@ -231,35 +240,37 @@ function ChecklistItemComponent({
           )}
           <div className="flex-1">
             <div className="flex items-center gap-2">
-              <p className="font-medium">{item.label_ja}</p>
+              <p className="font-medium">{localizedLabel(item, locale)}</p>
               {item.auto_verify && (
                 <Badge variant="secondary" className="text-xs">
                   <Zap className="h-3 w-3 mr-1" />
-                  自動検証
+                  {t("autoVerified")}
                 </Badge>
               )}
             </div>
-            <p className="text-sm text-muted-foreground mt-1">{item.label}</p>
+            {/* /ja keeps the English original as a secondary line, as before. */}
+            {locale === "ja" && <p className="text-sm text-muted-foreground mt-1">{item.label}</p>}
           </div>
         </div>
         {item.passed ? (
-          <Badge variant="default" className="bg-green-500 hover:bg-green-600">
-            完了
+          <Badge variant="default" className="bg-green-700 hover:bg-green-800">
+            {t("done")}
           </Badge>
         ) : (
-          <Badge variant="outline">未完了</Badge>
+          <Badge variant="outline">{t("notDone")}</Badge>
         )}
       </div>
 
       {/* Note field for manual items */}
       {!item.auto_verify && (
         <div className="pl-8 space-y-2">
-          <Label className="text-sm text-muted-foreground">備考</Label>
+          <Label className="text-sm text-muted-foreground">{t("note")}</Label>
           <div className="flex gap-2">
             <Textarea
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              placeholder="対応状況や詳細を記入..."
+              placeholder={t("notePlaceholder")}
+              aria-label={t("note")}
               className="min-h-[60px] text-sm"
             />
             <Button
@@ -267,6 +278,7 @@ function ChecklistItemComponent({
               size="sm"
               onClick={handleSaveNote}
               disabled={saving}
+              aria-label={t("saveNote")}
             >
               {saving ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -291,6 +303,8 @@ function ChecklistPhaseCard({
   projectId: string;
   onUpdate: () => void;
 }) {
+  const t = useTranslations("Compliance");
+  const locale = useLocale();
   const percentage = phase.max_score > 0
     ? Math.round((phase.score / phase.max_score) * 100)
     : 0;
@@ -298,11 +312,11 @@ function ChecklistPhaseCard({
   let statusIcon;
   let statusColor;
   if (percentage === 100) {
-    statusIcon = <CheckCircle className="h-5 w-5 text-green-500" />;
-    statusColor = "text-green-500";
+    statusIcon = <CheckCircle className="h-5 w-5 text-green-700" />;
+    statusColor = "text-green-700";
   } else if (percentage >= 50) {
-    statusIcon = <AlertCircle className="h-5 w-5 text-yellow-500" />;
-    statusColor = "text-yellow-500";
+    statusIcon = <AlertCircle className="h-5 w-5 text-yellow-700" />;
+    statusColor = "text-yellow-700";
   } else {
     statusIcon = <XCircle className="h-5 w-5 text-red-500" />;
     statusColor = "text-red-500";
@@ -318,7 +332,7 @@ function ChecklistPhaseCard({
           <div className="flex items-center gap-3">
             {statusIcon}
             <span className="font-medium">
-              Phase {phaseNumber}: {phase.label_ja}
+              {t("phase", { number: String(phaseNumber), label: localizedLabel(phase, locale) })}
             </span>
           </div>
           <div className="flex items-center gap-3">
@@ -365,6 +379,8 @@ function VisualizationSettingsComponent({
       utilization_actor: "development",
     }
   );
+  const t = useTranslations("Compliance");
+  const locale = useLocale();
   const [saving, setSaving] = useState(false);
 
   const handleSave = async () => {
@@ -396,7 +412,7 @@ function VisualizationSettingsComponent({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* (a) SBOM作成主体 */}
         <div className="space-y-2">
-          <Label>(a) SBOM作成主体 (Who)</Label>
+          <Label>{t("authorScope")}</Label>
           <Select
             value={settings.sbom_author_scope}
             onValueChange={(v) =>
@@ -404,12 +420,12 @@ function VisualizationSettingsComponent({
             }
           >
             <SelectTrigger>
-              <SelectValue placeholder="選択してください" />
+              <SelectValue placeholder={t("selectPlaceholder")} />
             </SelectTrigger>
             <SelectContent>
               {framework.options.sbom_author_scope.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label_ja}
+                  {localizedLabel(opt, locale)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -418,7 +434,7 @@ function VisualizationSettingsComponent({
 
         {/* (b) 依存関係 */}
         <div className="space-y-2">
-          <Label>(b) 依存関係 (What, Where)</Label>
+          <Label>{t("dependencyScope")}</Label>
           <Select
             value={settings.dependency_scope}
             onValueChange={(v) =>
@@ -426,12 +442,12 @@ function VisualizationSettingsComponent({
             }
           >
             <SelectTrigger>
-              <SelectValue placeholder="選択してください" />
+              <SelectValue placeholder={t("selectPlaceholder")} />
             </SelectTrigger>
             <SelectContent>
               {framework.options.dependency_scope.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label_ja}
+                  {localizedLabel(opt, locale)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -440,7 +456,7 @@ function VisualizationSettingsComponent({
 
         {/* (c) 生成手段 */}
         <div className="space-y-2">
-          <Label>(c) 生成手段 (How)</Label>
+          <Label>{t("generationMethod")}</Label>
           <Select
             value={settings.generation_method}
             onValueChange={(v) =>
@@ -448,12 +464,12 @@ function VisualizationSettingsComponent({
             }
           >
             <SelectTrigger>
-              <SelectValue placeholder="選択してください" />
+              <SelectValue placeholder={t("selectPlaceholder")} />
             </SelectTrigger>
             <SelectContent>
               {framework.options.generation_method.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label_ja}
+                  {localizedLabel(opt, locale)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -462,18 +478,18 @@ function VisualizationSettingsComponent({
 
         {/* (d) データ様式 */}
         <div className="space-y-2">
-          <Label>(d) データ様式 (What)</Label>
+          <Label>{t("dataFormat")}</Label>
           <Select
             value={settings.data_format}
             onValueChange={(v) => setSettings({ ...settings, data_format: v })}
           >
             <SelectTrigger>
-              <SelectValue placeholder="選択してください" />
+              <SelectValue placeholder={t("selectPlaceholder")} />
             </SelectTrigger>
             <SelectContent>
               {framework.options.data_format.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label_ja}
+                  {localizedLabel(opt, locale)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -482,7 +498,7 @@ function VisualizationSettingsComponent({
 
         {/* (f) 活用主体 */}
         <div className="space-y-2">
-          <Label>(f) 活用主体 (Who)</Label>
+          <Label>{t("utilizationActor")}</Label>
           <Select
             value={settings.utilization_actor}
             onValueChange={(v) =>
@@ -490,12 +506,12 @@ function VisualizationSettingsComponent({
             }
           >
             <SelectTrigger>
-              <SelectValue placeholder="選択してください" />
+              <SelectValue placeholder={t("selectPlaceholder")} />
             </SelectTrigger>
             <SelectContent>
               {framework.options.utilization_actor.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label_ja}
+                  {localizedLabel(opt, locale)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -505,7 +521,7 @@ function VisualizationSettingsComponent({
 
       {/* (e) 活用範囲 - Multiple selection */}
       <div className="space-y-2">
-        <Label>(e) 活用範囲 (Why) - 複数選択可</Label>
+        <Label>{t("utilizationScope")}</Label>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
           {framework.options.utilization_scope.map((opt) => (
             <div key={opt.value} className="flex items-center space-x-2">
@@ -517,7 +533,7 @@ function VisualizationSettingsComponent({
                 }
               />
               <Label htmlFor={`util-${opt.value}`} className="text-sm">
-                {opt.label_ja}
+                {localizedLabel(opt, locale)}
               </Label>
             </div>
           ))}
@@ -528,12 +544,12 @@ function VisualizationSettingsComponent({
         {saving ? (
           <>
             <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            保存中...
+            {t("saving")}
           </>
         ) : (
           <>
             <Save className="h-4 w-4 mr-2" />
-            設定を保存
+            {t("saveSettings")}
           </>
         )}
       </Button>
@@ -545,6 +561,8 @@ export default function CompliancePage() {
   const params = useParams();
   const projectId = params.id as string;
   const [activeTab, setActiveTab] = useState("overview");
+  const t = useTranslations("Compliance");
+  const locale = useLocale();
 
   const complianceQuery = useQuery({
     queryKey: queryKeys.projects.compliance(projectId),
@@ -591,7 +609,9 @@ export default function CompliancePage() {
   const loading =
     complianceQuery.isPending ||
     (complianceQuery.isSuccess && (checklistQuery.isPending || visualizationQuery.isPending));
-  const error = complianceQuery.isError ? "コンプライアンスチェックの読み込みに失敗しました" : null;
+  const error = complianceQuery.isError ? t("loadFailed") : null;
+
+  const checklistItemCount = checklist ? checklist.phases.reduce((n, p) => n + p.items.length, 0) : 0;
 
   const reloadChecklist = async () => {
     await checklistQuery.refetch();
@@ -619,7 +639,7 @@ export default function CompliancePage() {
           <CardContent className="pt-6">
             <div className="flex items-center gap-2 text-red-500">
               <AlertCircle className="h-5 w-5" />
-              <span>{error || "データの読み込みに失敗しました"}</span>
+              <span>{error || t("loadFailed")}</span>
             </div>
           </CardContent>
         </Card>
@@ -630,18 +650,18 @@ export default function CompliancePage() {
   return (
     <div className="container mx-auto py-8 space-y-6">
       <div className="flex items-center gap-4">
-        <Link href={`/ja/projects/${projectId}`}>
-          <Button variant="ghost" size="icon">
+        <Link href={`/${locale}/projects/${projectId}`} aria-label={t("back")}>
+          <Button variant="ghost" size="icon" tabIndex={-1}>
             <ArrowLeft className="h-5 w-5" />
           </Button>
         </Link>
         <div>
           <h1 className="text-3xl font-bold flex items-center gap-2">
             <Shield className="h-8 w-8" />
-            コンプライアンス対応状況
+            {t("title")}
           </h1>
           <p className="text-muted-foreground">
-            経産省SBOMガイドライン自己評価
+            {t("subtitle")}
           </p>
         </div>
       </div>
@@ -650,15 +670,15 @@ export default function CompliancePage() {
         <TabsList>
           <TabsTrigger value="overview" className="flex items-center gap-2">
             <Shield className="h-4 w-4" />
-            概要
+            {t("tabOverview")}
           </TabsTrigger>
           <TabsTrigger value="checklist" className="flex items-center gap-2">
             <ClipboardCheck className="h-4 w-4" />
-            チェックリスト
+            {t("tabChecklist")}
           </TabsTrigger>
           <TabsTrigger value="visualization" className="flex items-center gap-2">
             <Settings2 className="h-4 w-4" />
-            可視化フレームワーク
+            {t("tabVisualization")}
           </TabsTrigger>
         </TabsList>
 
@@ -668,13 +688,13 @@ export default function CompliancePage() {
             {/* Score Card */}
             <Card className="lg:col-span-1">
               <CardHeader>
-                <CardTitle>総合スコア</CardTitle>
-                <CardDescription>経産省ガイドライン対応度</CardDescription>
+                <CardTitle>{t("totalScore")}</CardTitle>
+                <CardDescription>{t("totalScoreDescription")}</CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col items-center">
                 <ScoreCircle score={result.score} maxScore={result.max_score} />
                 <p className="mt-4 text-center text-sm text-muted-foreground">
-                  {result.score} / {result.max_score} ポイント
+                  {t("points", { score: String(result.score), max: String(result.max_score) })}
                 </p>
               </CardContent>
             </Card>
@@ -682,8 +702,8 @@ export default function CompliancePage() {
             {/* Categories */}
             <Card className="lg:col-span-2">
               <CardHeader>
-                <CardTitle>チェック項目</CardTitle>
-                <CardDescription>各カテゴリの対応状況</CardDescription>
+                <CardTitle>{t("checkItems")}</CardTitle>
+                <CardDescription>{t("checkItemsDescription")}</CardDescription>
               </CardHeader>
               <CardContent>
                 <Accordion type="multiple" className="space-y-2">
@@ -703,8 +723,8 @@ export default function CompliancePage() {
               <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
                 <Card className="lg:col-span-1">
                   <CardHeader>
-                    <CardTitle>チェックリスト進捗</CardTitle>
-                    <CardDescription>18項目の対応状況</CardDescription>
+                    <CardTitle>{t("checklistProgress")}</CardTitle>
+                    <CardDescription>{t("checklistProgressDescription", { count: String(checklistItemCount) })}</CardDescription>
                   </CardHeader>
                   <CardContent className="flex flex-col items-center">
                     <ScoreCircle
@@ -712,16 +732,19 @@ export default function CompliancePage() {
                       maxScore={checklist.max_score}
                     />
                     <p className="mt-4 text-center text-sm text-muted-foreground">
-                      {checklist.score} / {checklist.max_score} 項目完了
+                      {t("itemsDone", { score: String(checklist.score), max: String(checklist.max_score) })}
                     </p>
                   </CardContent>
                 </Card>
 
                 <Card className="lg:col-span-3">
                   <CardHeader>
-                    <CardTitle>経産省SBOMガイドライン チェックリスト</CardTitle>
+                    <CardTitle>{t("checklistTitle")}</CardTitle>
                     <CardDescription>
-                      3フェーズ・18項目の自己評価チェックリスト
+                      {t("checklistDescription", {
+                        phases: String(checklist.phases.length),
+                        count: String(checklistItemCount),
+                      })}
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
@@ -748,7 +771,7 @@ export default function CompliancePage() {
               <CardContent className="py-8">
                 <div className="text-center text-muted-foreground">
                   <ClipboardCheck className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                  <p>チェックリストを読み込めませんでした</p>
+                  <p>{t("checklistLoadFailed")}</p>
                 </div>
               </CardContent>
             </Card>
@@ -759,9 +782,9 @@ export default function CompliancePage() {
         <TabsContent value="visualization" className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle>SBOM可視化フレームワーク設定</CardTitle>
+              <CardTitle>{t("visualizationTitle")}</CardTitle>
               <CardDescription>
-                経産省ガイドラインに基づく5W1H観点での可視化設定
+                {t("visualizationDescription")}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -774,7 +797,7 @@ export default function CompliancePage() {
               ) : (
                 <div className="text-center text-muted-foreground py-8">
                   <Settings2 className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                  <p>可視化設定を読み込めませんでした</p>
+                  <p>{t("visualizationLoadFailed")}</p>
                 </div>
               )}
             </CardContent>
@@ -784,10 +807,7 @@ export default function CompliancePage() {
 
       {/* Disclaimer */}
       <div className="text-xs text-muted-foreground bg-muted/50 p-3 rounded-md">
-        <p>
-          ※本機能は経済産業省「ソフトウェア管理に向けたSBOM導入に関する手引ver2.0」に基づく
-          自己評価を支援するものであり、公式な準拠認定を行うものではありません。
-        </p>
+        <p>{t("disclaimer")}</p>
       </div>
 
       {/* Export Buttons */}
@@ -795,7 +815,7 @@ export default function CompliancePage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <FileText className="h-5 w-5" />
-            レポート出力
+            {t("exportTitle")}
           </CardTitle>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-4">

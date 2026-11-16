@@ -155,7 +155,7 @@ export function AiSummaryPanel({
           <>
             {summary.ai_disabled && (
               <div className="rounded-md border border-amber-200 bg-amber-50/60 p-3 flex items-start gap-2">
-                <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5" />
+                <AlertTriangle className="h-4 w-4 text-amber-700 mt-0.5" />
                 <div className="text-sm text-amber-800">
                   {t("disabledBanner")}
                 </div>

@@ -303,7 +303,7 @@ export default async function LandingPage({ params }: Props) {
                   return (
                     <Card key={index} className="border-2 hover:border-amber-300/60 transition-colors">
                       <CardHeader>
-                        <Icon className="h-10 w-10 text-amber-600 mb-2" />
+                        <Icon className="h-10 w-10 text-amber-700 mb-2" />
                         <CardTitle className="text-lg">{item.title}</CardTitle>
                       </CardHeader>
                       <CardContent>

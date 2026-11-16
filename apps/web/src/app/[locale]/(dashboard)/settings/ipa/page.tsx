@@ -19,7 +19,7 @@ import { parseIPASyncSettings } from "@/lib/ipa-settings";
 const SEVERITY_OPTIONS = [
   { value: "CRITICAL", label: "Critical", icon: AlertTriangle, color: "text-red-600" },
   { value: "HIGH", label: "High", icon: AlertCircle, color: "text-orange-600" },
-  { value: "MEDIUM", label: "Medium", icon: AlertCircle, color: "text-yellow-600" },
+  { value: "MEDIUM", label: "Medium", icon: AlertCircle, color: "text-yellow-700" },
   { value: "LOW", label: "Low", icon: Info, color: "text-blue-600" },
   { value: "INFO", label: "Info", icon: Info, color: "text-gray-600" },
 ];
@@ -284,7 +284,7 @@ export default function IPASettingsPage() {
                   </div>
 
                   <div className="flex items-start gap-4 p-4 rounded-lg border">
-                    <Shield className="h-8 w-8 text-green-600 shrink-0" />
+                    <Shield className="h-8 w-8 text-green-700 shrink-0" />
                     <div>
                       <h4 className="font-medium">{t('jvnVulnerabilityInfo')}</h4>
                       <p className="text-sm text-muted-foreground mt-1">

@@ -433,7 +433,7 @@ export default function IntegrationsPage() {
                       <CardTitle className="text-base flex items-center gap-2">
                         {conn.name}
                         {conn.is_active && (
-                          <Badge variant="outline" className="text-green-600 border-green-600">
+                          <Badge variant="outline" className="text-green-700 border-green-600">
                             <CheckCircle2 className="h-3 w-3 mr-1" />
                             {t("connected")}
                           </Badge>

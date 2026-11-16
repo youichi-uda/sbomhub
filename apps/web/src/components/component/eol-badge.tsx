@@ -26,7 +26,7 @@ const statusConfig = {
   active: {
     icon: CheckCircle,
     variant: "default" as const,
-    className: "bg-green-600 hover:bg-green-700",
+    className: "bg-green-700 hover:bg-green-800",
   },
   eol: {
     icon: AlertTriangle,
@@ -156,7 +156,7 @@ export function EOLIndicator({
   const Icon = config.icon;
 
   const colorClasses = {
-    active: "text-green-500",
+    active: "text-green-700",
     eol: "text-red-500",
     eos: "text-orange-500",
     unknown: "text-gray-500",
@@ -202,7 +202,7 @@ export function EOLSummaryCard({
   return (
     <div className="grid grid-cols-4 gap-4 text-center">
       <div className="space-y-1">
-        <div className="flex items-center justify-center gap-1 text-green-500">
+        <div className="flex items-center justify-center gap-1 text-green-700">
           <CheckCircle className="h-4 w-4" />
           <span className="text-2xl font-bold">{active}</span>
         </div>
