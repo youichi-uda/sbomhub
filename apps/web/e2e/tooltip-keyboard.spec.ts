@@ -156,6 +156,24 @@ test.describe('shared Tooltip from the keyboard', () => {
     await expect(tip).toBeVisible();
   });
 
+  // Codex R1 Low: with one tooltip open by focus and another by hover, the
+  // focused trigger's own Escape handler stopped the event before the
+  // document listener, so the hovered one stayed open.
+  test('Escape closes a hovered panel even while another trigger has focus', async ({ page }) => {
+    await openVulnerabilities(page, project!.projectId);
+    const a = page.locator(`[data-vuln-cve-id="${KEV_CVE}"]`).getByRole('button', { name: en.KEV.badge, exact: true });
+    const b = page.locator('[data-vuln-cve-id="CVE-2021-45046"]').getByRole('button', { name: en.KEV.badge, exact: true });
+    const tipA = await panelOf(page, a);
+    const tipB = await panelOf(page, b);
+    await a.focus();
+    await expect(tipA).toBeVisible();
+    await b.hover();
+    await expect(tipB).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(tipA).toBeHidden();
+    await expect(tipB).toBeHidden();
+  });
+
   test('a tap opens it, a second tap closes it, a tap elsewhere closes it', async ({ browser, baseURL }) => {
     const context = await browser.newContext({ baseURL, hasTouch: true, viewport: { width: 390, height: 800 } });
     const page = await context.newPage();

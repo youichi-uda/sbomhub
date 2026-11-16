@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import en from '../messages/en.json';
 import ja from '../messages/ja.json';
 import {
+  assertLocalTarget,
   CLERK_BASE_URL,
   routeFakeClerkJs,
   signIn,
@@ -93,4 +94,22 @@ test('the organization name is still there at full width', async ({ page }) => {
   expect(await name.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
   await expect(page.getByRole('button', { name: 'Logout' })).toContainText('Logout');
   expect(await headerLayout(page)).toEqual({ pageExtra: 0, headerOverrun: 0, outside: [] });
+});
+
+// Codex R1 Medium: the fixture mints an org:admin session; it must refuse to
+// aim it at anything but this machine. Hermetic: runs on every stack.
+test('the fake Clerk fixture refuses a non-local target', async ({ browser }) => {
+  for (const url of ['https://sbomhub.app', 'http://api.sbomhub.app:8080', 'http://192.168.1.10:3000']) {
+    expect(() => assertLocalTarget(url), url).toThrow(/loopback/);
+  }
+  for (const url of ['http://localhost:13523', 'http://127.0.0.1:3000', 'http://[::1]:3000']) {
+    expect(() => assertLocalTarget(url), url).not.toThrow();
+  }
+  const context = await browser.newContext();
+  try {
+    await expect(signIn(context, 'https://sbomhub.app', ORG)).rejects.toThrow(/loopback/);
+    expect(await context.cookies()).toEqual([]);
+  } finally {
+    await context.close();
+  }
 });

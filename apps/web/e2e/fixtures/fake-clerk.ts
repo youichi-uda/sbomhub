@@ -47,6 +47,7 @@ function keyPair() {
 
 /** Serves GET /v1/jwks with this run's public key. */
 export async function startFakeBackendApi(port = FAKE_CLERK_BAPI_PORT): Promise<Server> {
+  if (CLERK_BASE_URL) assertLocalTarget(CLERK_BASE_URL);
   const jwk = { ...keyPair().publicKey.export({ format: 'jwk' }), kid: KID, alg: 'RS256', use: 'sig' };
   const server = createServer((req, res) => {
     if (req.method === 'GET' && req.url?.split('?')[0] === '/v1/jwks') {
@@ -94,8 +95,21 @@ export function mintSessionToken(origin: string, org: FakeOrg, sub = 'user_e2e_f
   return { token: `${signingInput}.${b64url(signature)}`, iat };
 }
 
+/**
+ * The fixture mints an org:admin session: it only ever targets this machine
+ * (Codex R1 Medium). A deployment that verifies against real Clerk would
+ * reject the token anyway; this keeps it from being aimed elsewhere at all.
+ */
+export function assertLocalTarget(url: string): void {
+  const host = new URL(url).hostname;
+  if (!['localhost', '127.0.0.1', '[::1]', '::1'].includes(host)) {
+    throw new Error(`fake Clerk: refusing non-loopback target ${url}`);
+  }
+}
+
 /** Sets the cookies clerkMiddleware reads for a signed-in browser. */
 export async function signIn(context: BrowserContext, baseURL: string, org: FakeOrg): Promise<string> {
+  assertLocalTarget(baseURL);
   const { origin } = new URL(baseURL);
   const { token, iat } = mintSessionToken(origin, org);
   await context.addCookies([
