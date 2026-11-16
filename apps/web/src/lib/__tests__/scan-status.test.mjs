@@ -26,6 +26,7 @@ import {
   countQualifierKey,
   emptyStateKey,
   sameScanAnswer,
+  sameScanRun,
   parseScanStatus,
   pollIntervalMs,
   reasonItems,
@@ -368,5 +369,37 @@ describe("checked_sources (UPGRADE §31)", () => {
     const views = [done([], ALL), done([], null), done(["jvn"], ["nvd", "distro"]), done(ALL, []), done([], ["nvd", "jvn"])];
     assert.deepEqual(views.map((v) => countQualifierKey(v, FRESH)), [null, "tabCountCoverageUnknown", "tabCountPartial", "tabCountPartial", "tabCountPartial"]);
     assert.deepEqual(views.map((v) => emptyStateKey(v, true)), ["emptyCompleted", "emptyCoverageUnknown", "emptyPartial", "emptyPartial", "emptyPartial"]);
+  });
+});
+
+// scan_run (UPGRADE §37): an opaque identifier of the scan, compared between
+// the two status reads; absent = unknown.
+describe("scan_run", () => {
+  test("parsed as a non-empty string, otherwise null", () => {
+    const p = (extra, st = "completed") => parseScanStatus({ status: st, vulnerabilities: { total: 0 }, ...extra });
+    assert.equal(p({ scan_run: "00ff" }).run, "00ff");
+    assert.equal(p({ scan_run: "00ff" }, "running").run, "00ff");
+    assert.equal(p({ scan_run: "00ff" }, "failed").run, "00ff");
+    assert.equal(p({}).run, null);
+    assert.equal(p({ scan_run: "" }).run, null);
+    assert.equal(p({ scan_run: 7 }).run, null);
+    assert.equal(p({ scan_run: null }).run, null);
+    // unknown carries no scan (the API never sends one there)
+    assert.equal(p({ scan_run: "00ff" }, "unknown").run, null);
+  });
+  test("sameScanRun: equal, or unknown on either side", () => {
+    const a = parseScanStatus({ status: "completed", vulnerabilities: { total: 0 }, scan_run: "a" });
+    const b = parseScanStatus({ status: "completed", vulnerabilities: { total: 0 }, scan_run: "b" });
+    const none = parseScanStatus({ status: "completed", vulnerabilities: { total: 0 } });
+    assert.equal(sameScanRun(a, { ...a }), true);
+    assert.equal(sameScanRun(a, b), false);
+    assert.equal(sameScanRun(a, none), true);
+    assert.equal(sameScanRun(none, b), true);
+    assert.equal(sameScanRun(none, none), true);
+  });
+  test("sameScanAnswer is unchanged by scan_run (what the page shows)", () => {
+    const a = parseScanStatus({ status: "completed", vulnerabilities: { total: 0 }, scan_run: "a" });
+    const b = parseScanStatus({ status: "completed", vulnerabilities: { total: 0 }, scan_run: "b" });
+    assert.equal(sameScanAnswer(a, b), true);
   });
 });

@@ -18,7 +18,10 @@
 //                                               added, so the list was A's
 //   5. scan status of A again (settled s1)    must equal s1: no other scan
 //                                               of A changed what the page
-//                                               shows while the list was read
+//                                               shows while the list was read,
+//                                               and the scan_run (when both
+//                                               report one) is the same: no
+//                                               other scan of A began
 //
 // A settled s1 (completed / failed / unknown) is published by the API only
 // after the scan's findings committed (handler/sbom.go ScanStatus), and the
@@ -30,12 +33,14 @@
 // qualified), so a poll that finds the same SBOM still running keeps the
 // previous list and costs two requests (latest id, status).
 //
-// Residual (the API has no scan generation): a whole scan of the same SBOM
-// that starts AND ends between reads 2 and 5 without changing anything the
-// status shows (state, finding total, skipped / checked sources, reasons,
-// error) is not detectable.
+// A whole scan of the same SBOM that starts AND ends between reads 2 and 5
+// without changing anything the status shows (state, finding total, skipped /
+// checked sources, reasons, error) is detected through scan_run (UPGRADE.md
+// §37). Residual: when either read carries no scan_run (an older API, an older
+// replica wrote the status, an answer from one API process's memory) such a
+// rescan is still not detectable, as before.
 
-import { sameScanAnswer, type ScanStatus } from "./scan-status.ts";
+import { sameScanAnswer, sameScanRun, type ScanStatus } from "./scan-status.ts";
 
 export interface ListPage<T> {
   data: T[];
@@ -173,7 +178,7 @@ async function readOnce<T>(
       return { sbomId, status: null, statusFailed: true, list };
     }
     checkAbort(signal);
-    if (sameScanAnswer(s1, s2)) return { sbomId, status: s1, statusFailed: false, list };
+    if (sameScanAnswer(s1, s2) && sameScanRun(s1, s2)) return { sbomId, status: s1, statusFailed: false, list };
     // The state moved while the list was read: read again.
     last = { sbomId, status: { ...s2, status: "running" }, statusFailed: false, list };
   }

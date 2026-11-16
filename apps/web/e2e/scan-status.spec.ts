@@ -39,6 +39,7 @@ type ScanBody = {
     reasons?: string[];
     skipped_sources?: string[];
     checked_sources?: string[];
+    scan_run?: string;
     vulnerabilities?: { total: number };
 };
 
@@ -770,6 +771,73 @@ test.describe('project page: settled answers that move, uploads during a scan, t
         // The tab's own refresh must be over: only the settle may fetch the list.
         await page.waitForLoadState('networkidle');
         phase = 'settling';
+        await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length, { timeout: 15_000 });
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
+    });
+
+    // UPGRADE §37: a whole rescan of the same SBOM between the two settled
+    // status reads leaves every shown field equal (state, total, coverage);
+    // only scan_run tells. The list served in between belongs to neither
+    // settled answer and must not be shown as final.
+    test('a rescan between two settled reads with identical fields gets its own fresh list (scan_run)', async ({ page, request }) => {
+        const vp = await createVulnerableProject(request, 'Scan Status Rescan Same Fields');
+        projects.push(vp.projectId);
+        let phase: 'running' | 'settling' = 'running';
+        let staleListServed = false;
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${vp.projectId}/sboms/`) && url.pathname.endsWith('/scan-status'),
+            async (route) => {
+                const res = await route.fetch();
+                const real = await res.json();
+                if (phase === 'running') return route.fulfill({ response: res, json: withCoverage(real, { status: 'running' }) });
+                // Identical except scan_run: r1 until the stale list was served,
+                // r2 (the rescan's) from then on.
+                await route.fulfill({
+                    response: res,
+                    json: withCoverage(real, { status: 'completed', scan_run: staleListServed ? 'r2' : 'r1' }),
+                });
+            },
+        );
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${vp.projectId}/vulnerabilities`,
+            async (route) => {
+                if (phase === 'settling' && staleListServed) return route.fallback();
+                const res = await route.fetch();
+                // Mid-rescan: the list is momentarily empty.
+                await route.fulfill({ response: res, json: [], headers: { ...res.headers(), 'x-total-count': '0' } });
+                if (phase === 'settling') staleListServed = true;
+            },
+        );
+        await page.goto(`/en/projects/${vp.projectId}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveAttribute('data-empty-state', 'emptyRunning');
+        await page.waitForLoadState('networkidle');
+        phase = 'settling';
+        await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length, { timeout: 15_000 });
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
+        await expect(empty(page)).toHaveCount(0);
+    });
+
+    // Absent scan_run (an older API, or an answer it cannot vouch for) is
+    // unknown: the page decides on the other fields, as before.
+    test('scan_run present on one settled read only: shown as settled, as before', async ({ page, request }) => {
+        const vp = await createVulnerableProject(request, 'Scan Status Run Absent');
+        projects.push(vp.projectId);
+        let reads = 0;
+        await page.route(
+            (url) => url.pathname.startsWith(`/api/v1/projects/${vp.projectId}/sboms/`) && url.pathname.endsWith('/scan-status'),
+            async (route) => {
+                const res = await route.fetch();
+                const real = await res.json();
+                reads++;
+                await route.fulfill({
+                    response: res,
+                    json: withCoverage(real, { status: 'completed', scan_run: reads % 2 === 1 ? 'r1' : undefined }),
+                });
+            },
+        );
+        await page.goto(`/en/projects/${vp.projectId}`);
+        await vulnTab(page).click();
         await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length, { timeout: 15_000 });
         await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, null));
     });

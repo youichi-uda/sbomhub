@@ -124,6 +124,61 @@ describe("readSnapshot: races", () => {
     assert.equal(f.log.filter((x) => x === "list").length, 2);
   });
 
+  // scan_run (UPGRADE §37): a whole rescan of the same SBOM that started
+  // and ended while the list was read, leaving every shown field as it was.
+  test("a rescan between the two status reads with identical fields reads again (scan_run)", async () => {
+    const f = fake({
+      latest: ["A", "A", "A", "A"],
+      status: [
+        st("completed", 4, { run: "r1" }),
+        st("completed", 4, { run: "r2" }),
+        st("completed", 4, { run: "r2" }),
+        st("completed", 4, { run: "r2" }),
+      ],
+      list: [page(4), page(4)],
+    });
+    const s = await readSnapshot(f.deps, undefined);
+    assert.equal(s.status.status, "completed");
+    assert.equal(s.status.run, "r2");
+    assert.equal(f.log.filter((x) => x === "list").length, 2);
+  });
+
+  test("a scan_run that keeps changing is returned as running, not final", async () => {
+    const statuses = [];
+    for (let i = 0; i < SNAPSHOT_ATTEMPTS; i++) statuses.push(st("completed", 4, { run: `a${i}` }), st("completed", 4, { run: `b${i}` }));
+    const f = fake({
+      latest: Array(SNAPSHOT_ATTEMPTS * 2).fill("A"),
+      status: statuses,
+      list: Array.from({ length: SNAPSHOT_ATTEMPTS }, () => page(4)),
+    });
+    const s = await readSnapshot(f.deps, undefined);
+    assert.equal(s.status.status, "running");
+  });
+
+  test("scan_run absent on either read: decided on the other fields, as before", async () => {
+    for (const [r1, r2] of [["r1", null], [null, "r2"], [null, null]]) {
+      const f = fake({
+        latest: ["A", "A"],
+        status: [st("completed", 4, { run: r1 }), st("completed", 4, { run: r2 })],
+        list: [page(4)],
+      });
+      const s = await readSnapshot(f.deps, undefined);
+      assert.equal(s.status.status, "completed");
+      assert.equal(f.log.filter((x) => x === "list").length, 1);
+    }
+  });
+
+  test("the same scan_run on both reads: one pass", async () => {
+    const f = fake({
+      latest: ["A", "A"],
+      status: [st("completed", 4, { run: "r1" }), st("completed", 4, { run: "r1" })],
+      list: [page(4)],
+    });
+    const s = await readSnapshot(f.deps, undefined);
+    assert.equal(s.status.status, "completed");
+    assert.equal(f.log.filter((x) => x === "list").length, 1);
+  });
+
   test("a rescan that starts while the list is read (R8/R9): not returned as the earlier settled state", async () => {
     const f = fake({
       latest: ["A", "A", "A", "A"],

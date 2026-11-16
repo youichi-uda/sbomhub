@@ -41,6 +41,8 @@
 //     error?: string (failed only), reasons?: string[] (failed only),
 //     skipped_sources?: string[] (completed / failed only; absent = none),
 //     checked_sources?: string[] (completed / failed only; absent = unknown),
+//     scan_run?: string (opaque scan identifier, UPGRADE.md §37; absent =
+//                unknown),
 //     vulnerabilities: { critical, high, medium, low, unknown, kev, total } }
 
 export type ScanState = "running" | "completed" | "failed" | "unknown";
@@ -64,6 +66,14 @@ export interface ScanStatus {
    * X-Total-Count, which counts differently.
    */
   total: number | null;
+  /**
+   * scan_run (UPGRADE.md §37): an opaque identifier of the scan (one group of
+   * overlapping runs of the SBOM). Two answers with the same value are about
+   * the same scan; a different value means another scan began in between.
+   * null = not reported (unknown), which proves nothing either way. Not
+   * shown; only compared (sameScanRun).
+   */
+  run: string | null;
 }
 
 const STATES: readonly ScanState[] = ["running", "completed", "failed", "unknown"];
@@ -91,7 +101,14 @@ export function parseScanStatus(raw: unknown): ScanStatus {
   // against the list (and could never be seen to settle): unknown, not
   // completed / failed (Codex R6). The API always sends it.
   if ((status === "completed" || status === "failed") && total === null) status = "unknown";
-  const out: ScanStatus = { status, reasons: [], skippedSources: [], checkedSources: null, total };
+  const out: ScanStatus = {
+    status,
+    reasons: [],
+    skippedSources: [],
+    checkedSources: null,
+    total,
+    run: status !== "unknown" && typeof o.scan_run === "string" && o.scan_run !== "" ? o.scan_run : null,
+  };
   if (status === "failed") {
     out.reasons = stringList(o.reasons);
     if (typeof o.error === "string" && o.error !== "") out.error = o.error;
@@ -337,6 +354,17 @@ export function sameScanAnswer(a: ScanStatus, b: ScanStatus): boolean {
     sameList(a.reasons, b.reasons) &&
     (a.error ?? "") === (b.error ?? "")
   );
+}
+
+/**
+ * Whether two scan-status answers can be about the same scan: their scan_run
+ * values are equal, or either is not reported (unknown — the comparison then
+ * rests on sameScanAnswer alone, as before scan_run existed). Different values
+ * catch a whole rescan of the SBOM between the two answers that left every
+ * shown field unchanged.
+ */
+export function sameScanRun(a: ScanStatus, b: ScanStatus): boolean {
+  return a.run == null || b.run == null || a.run === b.run;
 }
 
 /** "ScanStatus" message keys that qualify the vulnerability count. */
