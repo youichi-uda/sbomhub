@@ -1580,7 +1580,9 @@ export default function ProjectDetailPage() {
                 retrying={apiKeysQuery.isFetching}
               />
             )}
-            {apiKeysLoadFailed && apiKeys.length === 0 ? null : apiKeys.length === 0 && !showCreateApiKey && !apiKeyJustCreated ? (
+            {apiKeysLoadFailed && apiKeys.length === 0 ? null : apiKeysQuery.isPending ? (
+              <p className="text-center text-muted-foreground py-8">{tc("loading")}</p>
+            ) : apiKeys.length === 0 && !showCreateApiKey && !apiKeyJustCreated ? (
               <p className="text-center text-muted-foreground py-8">
                 {tp("noApiKeys")}
               </p>

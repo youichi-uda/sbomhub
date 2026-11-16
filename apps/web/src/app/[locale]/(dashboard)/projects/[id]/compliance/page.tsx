@@ -650,11 +650,11 @@ export default function CompliancePage() {
   return (
     <div className="container mx-auto py-8 space-y-6">
       <div className="flex items-center gap-4">
-        <Link href={`/${locale}/projects/${projectId}`} aria-label={t("back")}>
-          <Button variant="ghost" size="icon" tabIndex={-1}>
+        <Button variant="ghost" size="icon" asChild>
+          <Link href={`/${locale}/projects/${projectId}`} aria-label={t("back")}>
             <ArrowLeft className="h-5 w-5" />
-          </Button>
-        </Link>
+          </Link>
+        </Button>
         <div>
           <h1 className="text-3xl font-bold flex items-center gap-2">
             <Shield className="h-8 w-8" />

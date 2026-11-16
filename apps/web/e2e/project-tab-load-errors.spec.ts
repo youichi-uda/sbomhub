@@ -140,6 +140,31 @@ test.describe('project page: one tab’s own load fails', () => {
     await expect(tab).toHaveText(new RegExp(`\\(${en.ProjectDetail.tabCountRefreshFailed.replace('{count}', '2')}\\)$`));
   });
 
+  // Codex R3 Low: while the API key list was still loading, the tab body
+  // said "No API keys" (the counter already said "…").
+  test('API keys: a slow load shows loading, not "no API keys"', async ({ page }) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(
+      (url) => url.pathname === `/api/v1/projects/${project!.projectId}/apikeys`,
+      async (route) => {
+        if (route.request().method() !== 'GET') return route.fallback();
+        await held;
+        return route.fallback();
+      },
+    );
+    await page.goto(`/en/projects/${project!.projectId}`);
+    await expect(page.getByRole('heading', { level: 1, name: project!.projectName })).toBeVisible();
+    const tab = tabButton(page, T.apiKeys);
+    await expect(tab).toHaveText(/\(…\)$/);
+    await tab.click();
+    await expect(page.getByText(en.Common.loading, { exact: true })).toBeVisible();
+    await expect(page.getByText(T.noApiKeys, { exact: true })).toHaveCount(0);
+    release();
+    await expect(page.getByText(T.noApiKeys, { exact: true })).toBeVisible();
+    await expect(tab).toHaveText(/\(0\)$/);
+  });
+
   test('notifications: a failed settings load is an error, not a form of defaults that Save would write', async ({ page }) => {
     const state = { fail: true };
     const path = `/api/v1/projects/${project!.projectId}/notifications`;

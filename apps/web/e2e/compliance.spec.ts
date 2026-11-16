@@ -130,6 +130,9 @@ test.describe('Compliance Dashboard', () => {
         const backLink = page.getByRole('link', { name: C.back });
         await expect(backLink).toHaveCount(1);
         await expect(backLink).toHaveAttribute('href', `/en/projects/${projectId}`);
+        // One interactive element, not a link wrapping an unnamed <button>
+        // (Codex R3 Medium).
+        await expect(backLink.locator('button')).toHaveCount(0);
         await backLink.click();
         await expect(page).toHaveURL(new RegExp(`/en/projects/${projectId}$`));
         await expect(page.getByRole('heading', { level: 1, name: C.title })).toHaveCount(0);
