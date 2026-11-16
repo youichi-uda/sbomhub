@@ -156,7 +156,7 @@ func TestM75CRARunner_TruncatedAnswerRecordedInLLMCalls(t *testing.T) {
 		if finish.String != "max_tokens" || !strings.Contains(errMsg.String, "token limit") || out != 4096 {
 			t.Errorf("llm_calls finish=%q error=%q output_tokens=%d", finish.String, errMsg.String, out)
 		}
-		if body.Valid && body.String != content {
+		if !body.Valid || body.String != content {
 			t.Errorf("response_body = %q, want the partial answer", body.String)
 		}
 	})

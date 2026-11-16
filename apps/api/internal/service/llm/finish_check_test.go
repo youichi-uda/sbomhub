@@ -17,7 +17,7 @@ func TestClassifyFinishReason(t *testing.T) {
 		want   FinishKind
 	}{
 		// Normal ends, every provider's spelling.
-		{"", FinishNormal}, // provider did not say: unchanged behaviour
+		{"", FinishUnfinished}, // provider did not say (Gemini: not stopped): fail closed (Codex R2 High)
 		{"stop", FinishNormal},
 		{"STOP", FinishNormal},              // Gemini
 		{"end_turn", FinishNormal},          // Anthropic
@@ -63,6 +63,9 @@ func TestClassifyFinishReason(t *testing.T) {
 func TestCheckFinish(t *testing.T) {
 	if err := CheckFinish(nil); err != nil {
 		t.Errorf("CheckFinish(nil) = %v", err)
+	}
+	if err := CheckFinish(&CompleteResponse{FinishReason: ""}); !errors.Is(err, ErrIncompleteResponse) {
+		t.Errorf("empty finish reason: err = %v, want ErrIncompleteResponse", err)
 	}
 	if err := CheckFinish(&CompleteResponse{FinishReason: "stop"}); err != nil {
 		t.Errorf("stop: %v", err)

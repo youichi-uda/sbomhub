@@ -48,8 +48,13 @@ func TestAzureContentFilter400IsFiltered(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	p := NewAzureOpenAI("k", srv.URL, "dep", "2024-10-21", "gpt-4o")
-	_, err := Complete(context.Background(), p, CompleteRequest{Messages: []Message{{Role: RoleUser, Content: "x"}}})
+	resp, err := Complete(context.Background(), p, CompleteRequest{Messages: []Message{{Role: RoleUser, Content: "x"}}})
 	if !errors.Is(err, ErrFilteredResponse) || !strings.Contains(err.Error(), "filtered") {
 		t.Fatalf("err = %v, want ErrFilteredResponse", err)
+	}
+	// Codex R2 Medium: the llm_calls row records the filter as the
+	// finish reason, with the provider's error body.
+	if resp == nil || resp.FinishReason != "content_filter" || len(resp.RawResponse) == 0 {
+		t.Errorf("resp = %+v, want FinishReason content_filter and the raw body", resp)
 	}
 }

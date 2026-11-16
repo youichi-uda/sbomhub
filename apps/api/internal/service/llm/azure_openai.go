@@ -327,8 +327,13 @@ func (p *AzureOpenAIProvider) Complete(ctx context.Context, req CompleteRequest)
 			if errResp.Error.Code == "content_filter" {
 				// M75: Azure's content filter refused the prompt (or
 				// the whole answer). Typed so callers see a filter
-				// stop, not a transport failure.
-				return nil, fmt.Errorf("azure_openai: %s: %w: %s", resp.Status, ErrFilteredResponse, errResp.Error.Message)
+				// stop, not a transport failure, and returned with a
+				// response so llm_calls records the reason.
+				return &CompleteResponse{
+					Model:        p.modelName,
+					FinishReason: "content_filter",
+					RawResponse:  errBody,
+				}, fmt.Errorf("azure_openai: %s: %w: %s", resp.Status, ErrFilteredResponse, errResp.Error.Message)
 			}
 			return nil, fmt.Errorf("azure_openai: %s: %s", resp.Status, errResp.Error.Message)
 		}

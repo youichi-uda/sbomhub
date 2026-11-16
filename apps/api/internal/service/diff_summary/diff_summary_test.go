@@ -112,6 +112,13 @@ func (p *fakeProvider) Complete(_ context.Context, r llm.CompleteRequest) (*llm.
 	if p.err != nil {
 		return nil, p.err
 	}
+	// M75: llm.Complete rejects an empty finish reason; a canned answer
+	// without one is a normal "stop" answer unless the test says otherwise.
+	if p.resp != nil && p.resp.FinishReason == "" {
+		r := *p.resp
+		r.FinishReason = "stop"
+		return &r, nil
+	}
 	return p.resp, nil
 }
 func (p *fakeProvider) Embed(_ context.Context, _ llm.EmbedRequest) (*llm.EmbedResponse, error) {

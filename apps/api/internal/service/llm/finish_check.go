@@ -11,7 +11,7 @@ import (
 type FinishKind int
 
 const (
-	// FinishNormal: the provider ended the answer itself (or did not say).
+	// FinishNormal: the provider ended the answer itself.
 	FinishNormal FinishKind = iota
 	// FinishTruncated: the provider cut the answer at a token / context
 	// limit.
@@ -20,7 +20,8 @@ const (
 	// content-filter, safety, recitation or refusal reason.
 	FinishFiltered
 	// FinishUnfinished: any other value — SBOMHub's own "incomplete",
-	// "unrecognized", or a provider value not known to be a normal end.
+	// "unrecognized", an empty reason, or a provider value not known to be
+	// a normal end.
 	FinishUnfinished
 )
 
@@ -83,15 +84,14 @@ var (
 )
 
 // ClassifyFinishReason says whether a finish reason is a normal end of the
-// answer. Only the values listed above as normal (and the empty string: the
-// provider did not say, accepted as before M75) are FinishNormal; every
-// unknown value is FinishUnfinished, so a reason a provider adds later fails
-// closed rather than letting a cut answer through.
+// answer. Only the values listed above as normal are FinishNormal; every
+// other value is FinishUnfinished, so a reason a provider adds later fails
+// closed rather than letting a cut answer through. That includes the empty
+// string: every supported non-streaming API states a terminal reason, Gemini
+// documents an empty finishReason as "not stopped yet", and Ollama's
+// done:true without done_reason is already mapped to "stop".
 func ClassifyFinishReason(reason string) FinishKind {
 	r := strings.ToLower(strings.TrimSpace(reason))
-	if r == "" {
-		return FinishNormal
-	}
 	if _, ok := normalFinishReasons[r]; ok {
 		return FinishNormal
 	}
@@ -110,8 +110,8 @@ func IsTruncated(reason string) bool { return ClassifyFinishReason(reason) == Fi
 
 // CheckFinish returns an error when resp's finish reason is not a normal end
 // of the answer: ErrTruncatedResponse, ErrFilteredResponse, or (any other
-// value) ErrIncompleteResponse, each naming the reason. It returns nil for a
-// nil response or a normal end.
+// value, including none) ErrIncompleteResponse, each naming the reason. It
+// returns nil for a nil response or a normal end.
 func CheckFinish(resp *CompleteResponse) error {
 	if resp == nil {
 		return nil

@@ -73,8 +73,17 @@ func (f *fakeProvider) Complete(_ context.Context, req llm.CompleteRequest) (*ll
 		InputTokens:  f.inputTokens,
 		OutputTokens: f.outputTokens,
 		Model:        f.model,
-		FinishReason: f.finishReason,
+		FinishReason: finishOrStop(f.finishReason),
 	}, nil
+}
+
+// finishOrStop: llm.Complete rejects an empty finish reason (M75), so a
+// fake answer without one is a normal "stop" answer.
+func finishOrStop(r string) string {
+	if r == "" {
+		return "stop"
+	}
+	return r
 }
 
 // TestParseFlags exercises the flag surface, including the required
