@@ -808,12 +808,10 @@ private async probeScanState(
 
   const after = await this.readScanState(projectId, signal);
   const skipped_sources = skippedUnion(before.skipped, after.skipped);
-  // Both readings must say a source was checked (an unreadable second
-  // reading says nothing, so the first one's claim is all there is).
-  const checked_sources =
-    after.state === SCAN_STATE_UNAVAILABLE
-      ? checkedIntersection(skipped_sources, before.checked)
-      : checkedIntersection(skipped_sources, before.checked, after.checked);
+  // Both readings must say a source was checked. An unreadable second
+  // reading says nothing (checked null), so the coverage is unknown (null):
+  // the first reading alone cannot vouch for a scan that may have moved.
+  const checked_sources = checkedIntersection(skipped_sources, before.checked, after.checked);
   if (after.state === SCAN_STATE_UNAVAILABLE) {
     // The walk began on a finished scan, but whether it still is cannot be
     // read — which is not evidence that it is.

@@ -215,8 +215,13 @@ local function checked_list()
 end
 -- add_checked intersects the group's checked sources with a finish's (the
 -- first report sets them). cs is nil when the finish reports nothing.
-local function add_checked(cs)
+-- may_set: the finish is known to be a member of the current group. A
+-- finish that is not (a late write after an eviction or a long partition)
+-- may narrow the group's checked sources but never set them: it may belong
+-- to an earlier group (Codex coverage R1 High-2).
+local function add_checked(cs, may_set)
   if type(cs) ~= 'table' then return end
+  if not may_set and type(checked_list()) ~= 'table' then return end
   local o = load_outcomes()
   local entry = nil
   for _, e in ipairs(o) do
@@ -482,7 +487,7 @@ local okS, ss = pcall(cjson.decode, ARGV[5] or '[]')
 if okS then add_skipped(ss) end
 if ARGV[6] and ARGV[6] ~= '' then
   local okC, cs = pcall(cjson.decode, ARGV[6])
-  if okC then add_checked(cs) end
+  if okC then add_checked(cs, active or wasLost) end
 end
 publish(now)
 expire(ARGV[2])
@@ -490,8 +495,8 @@ if active or wasLost then return 1 end
 return 2`
 
 // ARGV: JSON {"b": [gen...], "f": [gen...], "x": [[marker, [reason...]]...],
-// "s": [skipped source...], "c": [checked source...] (only when a folded
-// finish reported coverage)},
+// "s": [skipped source...], "c": [checked source...] and "cr": [gen of a
+// folded finish that reported coverage...] (both only when one did)},
 // lease ms, ttl ms. The coalesced writes of a queue that overflowed: runs
 // that began (joined to the current group, never a new one), runs that
 // finished, and the failures among them (Codex M72 R5 High-3).
@@ -504,9 +509,10 @@ sweep(now, nil)
 if type(m.b) == 'table' then
   for _, g in ipairs(m.b) do activate(g, now, ARGV[2]) end
 end
+local member = {}
 if type(m.f) == 'table' then
   for _, g in ipairs(m.f) do
-    redis.call('HDEL', K, 'r:' .. g, 'l:' .. g, 'p:' .. g)
+    if redis.call('HDEL', K, 'r:' .. g, 'l:' .. g, 'p:' .. g) > 0 then member[g] = true end
   end
 end
 if type(m.x) == 'table' then
@@ -519,7 +525,15 @@ if type(m.x) == 'table' then
   end
 end
 add_skipped(m.s)
-add_checked(m.c)
+-- The folded checked sources (an intersection, so a subset of every folded
+-- reporter's) may set the group's only when a reporter was a member.
+local reporter_member = false
+if type(m.cr) == 'table' then
+  for _, g in ipairs(m.cr) do
+    if member[g] then reporter_member = true end
+  end
+end
+add_checked(m.c, reporter_member)
 publish(now)
 expire(ARGV[3])
 return 1`
@@ -827,11 +841,27 @@ type mergeSet struct {
 	skipped      []string
 	checked      []string
 	checkedKnown bool
+	// reporters: the folded finishes that reported coverage.
+	reporters map[uint64]bool
 }
 
 // addSkipped folds a finish's skipped sources.
 func (m *mergeSet) addSkipped(skipped []string) {
 	m.addCoverage(ScanCoverage{Skipped: skipped})
+}
+
+// addFinishCoverage folds the coverage of run gen's finish (folded with
+// finish). A run that reported coverage is remembered, so the merge script
+// sets a group's checked sources only when one of them was a member of it
+// (Codex coverage R1 High-2).
+func (m *mergeSet) addFinishCoverage(gen uint64, c ScanCoverage) {
+	if c.Reported {
+		if m.reporters == nil {
+			m.reporters = map[uint64]bool{}
+		}
+		m.reporters[gen] = true
+	}
+	m.addCoverage(c)
 }
 
 // addCoverage folds a finish's coverage (groupCoverage's rule).
@@ -922,6 +952,7 @@ func (m *mergeSet) json() string {
 			c = []string{}
 		}
 		body["c"] = c
+		body["cr"] = gens(m.reporters)
 	}
 	b, err := json.Marshal(body)
 	if err != nil {

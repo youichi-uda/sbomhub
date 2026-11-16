@@ -132,3 +132,28 @@ func TestScanCoverage_CleanupNeverReplaysChecked(t *testing.T) {
 		t.Fatalf("cleanup = %+v", ev.cov)
 	}
 }
+
+// Codex coverage R1 Medium-1: a local answer that stands in for the shared
+// state (Redis unreadable, or this process's writes still pending) cannot
+// know another replica's overlapping run, so it states no checked sources.
+func TestScanCoverage_LocalFallbackStatesNoCheckedSources(t *testing.T) {
+	store := newMemStore()
+	tr := trackerOn(store, time.Hour)
+	id := uuid.New()
+	store.setDown(true)
+	tr.FinishCoverage(id, tr.Begin(id), []string{ScanReasonFetchFailed}, "jvn: scan failed (fetch_failed)",
+		ScanCoverage{Checked: []string{"nvd", "distro"}, Reported: true})
+	st := tr.GetStatus(id)
+	if st.State != ScanStateFailed {
+		t.Fatalf("state %+v", st)
+	}
+	if st.CheckedKnown || st.Checked != nil {
+		t.Fatalf("a local fallback answer claimed checked sources: %+v", st)
+	}
+	// Without a shared store the process is the only writer: it answers.
+	solo := NewScanTracker()
+	solo.FinishCoverage(id, solo.Begin(id), nil, "", full())
+	if st := solo.GetStatus(id); !st.CheckedKnown {
+		t.Fatalf("in-memory-only tracker dropped its coverage: %+v", st)
+	}
+}

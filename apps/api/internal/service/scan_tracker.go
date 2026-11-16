@@ -489,7 +489,17 @@ func (t *ScanTracker) localPending(sbomID uuid.UUID) ScanStatusDetail {
 	if d.State == ScanStateCompleted {
 		return ScanStatusDetail{State: ScanStateRunning, Version: d.Version}
 	}
+	withoutSharedCoverage(&d)
 	return d
+}
+
+// withoutSharedCoverage drops the checked sources of a local answer that
+// stands in for the shared state (Redis unreadable, or this process's writes
+// still pending): another replica's overlapping run, which could narrow them,
+// is only in Redis (Codex coverage R1 Medium-1). The skipped sources are
+// kept, as before: they can only under-state, never over-state, a skip.
+func withoutSharedCoverage(d *ScanStatusDetail) {
+	d.Checked, d.CheckedKnown = nil, false
 }
 
 // localVersioned is this process's answer with its entry revision as the
@@ -502,6 +512,9 @@ func (t *ScanTracker) localVersioned(sbomID uuid.UUID, withoutShared bool) ScanS
 	d := t.getDetailLocked(sbomID)
 	if withoutShared && d.State == ScanStateCompleted {
 		d = ScanStatusDetail{State: ScanStateUnknown}
+	}
+	if withoutShared {
+		withoutSharedCoverage(&d)
 	}
 	d.Version = "l" + strconv.FormatUint(t.entries[sbomID].rev, 10)
 	return d

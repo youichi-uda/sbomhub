@@ -72,11 +72,13 @@ func TestCoverageRedis_UnreportedFinishNeitherAddsNorNarrows(t *testing.T) {
 	store := a.shared.(*redisScanStatusStore)
 	ctx := context.Background()
 	id := uuid.New()
+	for g := uint64(1); g <= 3; g++ {
+		if err := store.begin(ctx, id, g); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := store.finish(ctx, id, 1, "", nil, ScanCoverage{}); err != nil {
 		t.Fatal(err)
-	}
-	if v, _ := store.get(ctx, id); v.checkedKnown {
-		t.Fatalf("unreported finish made checked known: %+v", v)
 	}
 	if _, err := store.finish(ctx, id, 2, "", nil, ScanCoverage{Checked: []string{"nvd"}, Reported: true}); err != nil {
 		t.Fatal(err)
@@ -85,15 +87,107 @@ func TestCoverageRedis_UnreportedFinishNeitherAddsNorNarrows(t *testing.T) {
 		t.Fatal(err)
 	}
 	v, _ := store.get(ctx, id)
-	if !v.checkedKnown || !slices.Equal(v.checked, []string{"nvd"}) || !slices.Equal(v.skipped, []string{"jvn"}) {
+	if v.state != ScanStateCompleted || !v.checkedKnown || !slices.Equal(v.checked, []string{"nvd"}) || !slices.Equal(v.skipped, []string{"jvn"}) {
 		t.Fatalf("view %+v", v)
 	}
-	// Reported empty narrows to [] (still known).
-	if _, err := store.finish(ctx, id, 4, "", nil, ScanCoverage{Checked: []string{}, Reported: true}); err != nil {
+	// Reported empty is known and empty.
+	id2 := uuid.New()
+	if err := store.begin(ctx, id2, 1); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := store.get(ctx, id); !v.checkedKnown || len(v.checked) != 0 || v.checked == nil {
+	if _, err := store.finish(ctx, id2, 1, "", nil, ScanCoverage{Checked: []string{}, Reported: true}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id2); !v.checkedKnown || len(v.checked) != 0 || v.checked == nil {
 		t.Fatalf("after an empty report: %+v", v)
+	}
+}
+
+// Codex coverage R1 High-2: a finish Redis does not know (no active run, no
+// tombstone: a late write after an eviction or a long partition) may narrow
+// the current group's checked sources but never SET them — it may belong to
+// an earlier group, and setting would claim its checks for this one.
+func TestCoverageRedis_UnknownFinishNeverSetsChecked(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	store := a.shared.(*redisScanStatusStore)
+	ctx := context.Background()
+
+	fresh := uuid.New()
+	if known, err := store.finish(ctx, fresh, 42, "", nil, full()); err != nil || known {
+		t.Fatalf("known=%t err=%v", known, err)
+	}
+	if v, _ := store.get(ctx, fresh); v.checkedKnown {
+		t.Fatalf("an unknown finish set the checked sources: %+v", v)
+	}
+
+	// A current group whose only run reports nothing (an older replica):
+	// a late unknown finish must not give it checked sources.
+	id := uuid.New()
+	if err := store.begin(ctx, id, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id, 99, "", nil, full()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id, 1, "", nil, ScanCoverage{}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); v.checkedKnown {
+		t.Fatalf("a late unknown finish gave the group checked sources: %+v", v)
+	}
+
+	// It still narrows a group that has them (the conservative direction).
+	id2 := uuid.New()
+	for g := uint64(1); g <= 2; g++ {
+		if err := store.begin(ctx, id2, g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.finish(ctx, id2, 1, "", nil, full()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id2, 77, "", nil, ScanCoverage{Checked: []string{"nvd"}, Reported: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id2, 2, "", nil, ScanCoverage{}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id2); !slices.Equal(v.checked, []string{"nvd"}) {
+		t.Fatalf("an unknown finish did not narrow: %+v", v)
+	}
+}
+
+// The merge path: folded coverage sets the group's checked sources only when
+// a folded finish that reported coverage was a member of the group.
+func TestCoverageRedis_MergeOfUnknownRunsNeverSetsChecked(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	store := a.shared.(*redisScanStatusStore)
+	ctx := context.Background()
+	id := uuid.New()
+	m := newMergeSet()
+	m.finish(5) // never begun in Redis
+	m.addFinishCoverage(5, full())
+	if err := store.merge(ctx, id, m); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); v.checkedKnown {
+		t.Fatalf("a merge of unknown runs set the checked sources: %+v", v)
+	}
+	// A member reporter sets them.
+	id2 := uuid.New()
+	if err := store.begin(ctx, id2, 6); err != nil {
+		t.Fatal(err)
+	}
+	m2 := newMergeSet()
+	m2.finish(6)
+	m2.addFinishCoverage(6, ScanCoverage{Checked: []string{"nvd", "distro"}, Reported: true})
+	if err := store.merge(ctx, id2, m2); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id2); !v.checkedKnown || !slices.Equal(v.checked, []string{"nvd", "distro"}) {
+		t.Fatalf("member merge: %+v", v)
 	}
 }
 
@@ -108,7 +202,7 @@ func TestCoverageRedis_MergeCarriesCoverage(t *testing.T) {
 	}
 	m := newMergeSet()
 	m.finish(7)
-	m.addCoverage(ScanCoverage{Checked: []string{"nvd", "distro"}, Skipped: []string{"jvn"}, Reported: true})
+	m.addFinishCoverage(7, ScanCoverage{Checked: []string{"nvd", "distro"}, Skipped: []string{"jvn"}, Reported: true})
 	if err := store.merge(ctx, id, m); err != nil {
 		t.Fatal(err)
 	}
@@ -190,8 +284,14 @@ func TestCoverageRedis_OldReplicaReadsAndResets(t *testing.T) {
 	keys := scanStatusKeys(id)
 	ttl := int64(time.Hour / time.Millisecond)
 
+	if err := store.begin(ctx, id, 1); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.finish(ctx, id, 1, "", nil, ScanCoverage{Checked: []string{"nvd", "jvn", "distro"}, Reported: true}); err != nil {
 		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); !v.checkedKnown {
+		t.Fatalf("precondition: %+v", v)
 	}
 	ov, err := oldGet.Run(ctx, rdb, keys).StringSlice()
 	if err != nil || len(ov) != 5 || ov[0] != "completed" || ov[4] != "[]" || ov[1] != "" {
@@ -216,10 +316,15 @@ func TestCoverageRedis_CoverageEntryIsNotAFailure(t *testing.T) {
 	store := a.shared.(*redisScanStatusStore)
 	ctx := context.Background()
 	id := uuid.New()
+	for g := uint64(1); g <= 2; g++ {
+		if err := store.begin(ctx, id, g); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := store.finish(ctx, id, 1, "", nil, ScanCoverage{Checked: []string{}, Reported: true}); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := store.get(ctx, id); v.state != ScanStateCompleted || v.errMsg != "" {
+	if v, _ := store.get(ctx, id); v.state != ScanStateRunning || v.errMsg != "" {
 		t.Fatalf("coverage alone published %+v", v)
 	}
 	if _, err := store.finish(ctx, id, 2, "jvn: scan failed (fetch_failed, source_unavailable)",

@@ -15,7 +15,9 @@ import (
 //   - checked_sources: its step ran against the live data source (online,
 //     switched on, requested) and finished without a failure. A step that had
 //     nothing to look up for this SBOM (no components, no distro packages)
-//     counts as checked: there was nothing it could have missed.
+//     counts as checked: there was nothing it could have missed. So does a
+//     lookup answered from the NVD / distro cache (24h): it is that
+//     source's answer, and the findings have always been built from it.
 //   - skipped_sources: its step made no request because of configuration or
 //     the request — offline mode, SBOMHUB_JVN=off, not in `?sources=`, the
 //     scheduled scan (NVD and distro only), or no scanner configured.

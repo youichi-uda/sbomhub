@@ -700,6 +700,34 @@ export const CONTRACT_CASES = [
 
   {
     tool: "sbomhub_get_vulnerabilities",
+    title: "an unreadable second probe makes the coverage unknown (null), not the first probe's list",
+    args: { project_id: PROJECT_ID },
+    routes: (() => {
+      let reads = 0;
+      return {
+        [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+        [K.latestSbom]: ok(SBOMS[0]),
+        [K.scanStatus]: () => {
+          reads += 1;
+          if (reads === 1) {
+            return ok(scanStatusBody("completed", {
+              total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"],
+            }));
+          }
+          return { status: 500, body: { error: "boom" } };
+        },
+      };
+    })(),
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "unavailable");
+      assert.equal(payload.counts_final, false);
+      assert.equal(payload.checked_sources, null);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
     title: "completed scan that skipped JVN (SBOMHUB_JVN=off) says so next to counts_final",
     args: { project_id: PROJECT_ID },
     routes: {

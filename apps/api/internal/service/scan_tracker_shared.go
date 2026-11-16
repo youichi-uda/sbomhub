@@ -174,7 +174,7 @@ func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedE
 		if ev.msg != "" {
 			m.addFailure(ev.msg, ev.reasons)
 		}
-		m.addCoverage(ev.cov)
+		m.addFinishCoverage(ev.gen, ev.cov)
 	case evMark:
 		if ev.state == ScanStateFailed && ev.msg != "" {
 			m.addFailure(ev.msg, ev.reasons)
