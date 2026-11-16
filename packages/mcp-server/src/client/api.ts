@@ -75,6 +75,12 @@ const ScanStatusSchema = z.looseObject({
   // a scan recorded by an older replica, and from older backends — absent
   // means "not known", never "none".
   checked_sources: z.array(z.string()).optional(),
+  // apps/api (additive, 2026-11): an opaque identifier of the scan (one group
+  // of overlapping runs of the SBOM). It changes whenever activity starts on
+  // the SBOM while none was active and never repeats, so two readings with
+  // the same value are about the same scan. Absent when unknown and from
+  // older backends; compared for equality only.
+  scan_run: z.string().optional(),
 });
 
 export type SbomSummary = z.infer<typeof SbomSummarySchema>;
@@ -150,6 +156,11 @@ type ScanProbe = {
    * was absent) or the state could not be read.
    */
   checked: string[] | null;
+  /**
+   * The reading's `scan_run`; null when absent (unknown) or the state could
+   * not be read.
+   */
+  run: string | null;
 };
 
 /**
@@ -639,6 +650,7 @@ private async readScanState(
     counts: null,
     skipped: [],
     checked: null,
+    run: null,
   };
 
   try {
@@ -678,6 +690,10 @@ private async readScanState(
               skippedUnion(status.skipped_sources ?? []),
               status.checked_sources
             ),
+      run:
+        status.scan_run === undefined || status.scan_run === ""
+          ? null
+          : status.scan_run,
     };
   } catch {
     return unreadable;
@@ -777,7 +793,11 @@ private async readScanState(
  *
  *   - the untracked-rescan window described above;
  *   - a REPLACEMENT that keeps the whole summary the same — including a
- *     rescan whose result happens to be summary-identical. The per-page
+ *     rescan whose result happens to be summary-identical, unless the backend
+ *     reports `scan_run` on both readings (apps/api 2026-11): a rescan that
+ *     began between them then reads as a change. Without it (older backends,
+ *     an older replica, an answer from one API process's memory) the rest of
+ *     this bullet applies. The per-page
  *     X-Total-Count guard fires only when the count MOVES, and the
  *     row-identity guard only when a row is seen twice, so an interleaving
  *     that swaps one row for another can slip past both: read rows 0-499,
@@ -828,13 +848,19 @@ private async probeScanState(
 
   // The skipped and checked sources are compared too: the same summary from
   // a scan that covered a different set of sources is a different scan's
-  // answer.
+  // answer. So is the scan run (apps/api `scan_run`): different values mean
+  // another scan of the SBOM began between the readings — a rescan that
+  // started and ended during the walk, with every other field unchanged.
+  // Absent on either side is unknown and decides nothing, as before.
+  const sameRun =
+    before.run === null || after.run === null || before.run === after.run;
   const settled =
     after.state === SCAN_STATE_FINAL &&
     after.sbomId === before.sbomId &&
     after.counts === before.counts &&
     after.skipped.join(",") === before.skipped.join(",") &&
-    JSON.stringify(after.checked) === JSON.stringify(before.checked);
+    JSON.stringify(after.checked) === JSON.stringify(before.checked) &&
+    sameRun;
 
   if (!settled) {
     return {

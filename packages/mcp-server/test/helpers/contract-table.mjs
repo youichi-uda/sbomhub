@@ -174,7 +174,7 @@ const ok = (body, headers) => ({ status: 200, body, headers });
 // client compares across the walk to notice a scan that moved.
 export const scanStatusBody = (
   status,
-  { total = 0, sbomId = SBOM_NEWEST, buckets = {}, skipped = [], checked } = {}
+  { total = 0, sbomId = SBOM_NEWEST, buckets = {}, skipped = [], checked, run } = {}
 ) => ({
   status,
   sbom_id: sbomId,
@@ -187,6 +187,10 @@ export const scanStatusBody = (
   // status that reported coverage (possibly []), absent otherwise and from
   // older backends. `checked` undefined -> absent.
   ...(checked !== undefined ? { checked_sources: checked } : {}),
+  // apps/api scan-status `scan_run` (2026-11): the opaque identifier of the
+  // scan (group of overlapping runs); absent when unknown and from older
+  // backends. `run` undefined -> absent.
+  ...(run !== undefined ? { scan_run: run } : {}),
   // The client compares this WHOLE object across the walk, not just `total`: a
   // vulnerability relabelled LOW -> CRITICAL mid-walk leaves the total untouched
   // while making by_severity and any severity filter stale (Codex R4, High).
@@ -266,6 +270,7 @@ export const scanProbeChanging = (first, second) => {
           buckets: which.buckets ?? {},
           skipped: which.skipped ?? [],
           checked: which.checked,
+          run: which.run,
         })
       );
     },
@@ -676,6 +681,62 @@ export const CONTRACT_CASES = [
       assert.equal(payload.scan_state, "changed");
       assert.equal(payload.counts_final, false);
       assert.deepEqual(payload.checked_sources, ["distro", "nvd"]);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "a rescan between the probes that changes nothing else is a change (scan_run differs)",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      // Every field equal, only the scan moved: a whole rescan of the same
+      // SBOM started and ended while the pages were read.
+      ...scanProbeChanging(
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"], run: "0000000000000001" },
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"], run: "0000000000000002" }
+      ),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "changed");
+      assert.equal(payload.counts_final, false);
+      assert.equal(payload.scanned_sbom_id, SBOM_NEWEST);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "the same scan_run on both probes is still final",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("completed", { total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"], run: "00000000000000aa" }),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "completed");
+      assert.equal(payload.counts_final, true);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "scan_run absent on one probe: decided on the other fields, as before",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      // absent = unknown (an older replica wrote, an answer from one
+      // process's memory): it proves nothing either way.
+      ...scanProbeChanging(
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"], run: "00000000000000aa" },
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"] }
+      ),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "completed");
+      assert.equal(payload.counts_final, true);
     },
   },
 
