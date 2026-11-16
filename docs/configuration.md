@@ -87,7 +87,7 @@ Both lists name each source once, ordered `nvd`, `jvn`, `distro` (a name this ve
 
 `POST /api/v1/projects/:id/scan` adds `skipped_sources` to its `202` body: the sources this run will skip, by the same rules and ordering (absent when none). scan-status reports them again once the scan is terminal (together with those of any overlapping run).
 
-During a rolling upgrade, a scan finished by an older replica reports no coverage; if every run of the scan was on older replicas, `checked_sources` is absent. The `sbomhub` CLI shows the checked sources and warns about a scan that checked nothing; the MCP tools report `checked_sources` next to `skipped_sources` (`null` when not reported).
+During a rolling upgrade, a scan finished by an older replica reports no coverage; if every run of the scan was on older replicas, `checked_sources` is absent. It is absent too when the shared status of a running scan was lost (Redis evicted the key, or after a `FLUSHDB` or a Redis restart without its data) and the scan's run rejoined, until the next scan of the SBOM: the reports of its earlier runs, and their skips, are gone. The `sbomhub` CLI shows the checked sources and warns about a scan that checked nothing; the MCP tools report `checked_sources` next to `skipped_sources` (`null` when not reported).
 
 ### OSV (Distro-Aware Matching)
 

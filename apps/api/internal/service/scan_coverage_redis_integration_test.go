@@ -336,3 +336,68 @@ func TestCoverageRedis_CoverageEntryIsNotAFailure(t *testing.T) {
 		t.Fatalf("view %+v", v)
 	}
 }
+
+// Codex coverage R2 High-1: when the key is lost (eviction, FLUSHDB) and a
+// live run rejoins a fresh key, the group's earlier finishes — and their
+// skips — are gone; that run's own report must not then read as the group's
+// coverage. Coverage stays unknown until a new group begins.
+func TestCoverageRedis_RejoinAfterKeyLossMakesCoverageUnknown(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	store := a.shared.(*redisScanStatusStore)
+	ctx := context.Background()
+	id := uuid.New()
+	for g := uint64(1); g <= 2; g++ {
+		if err := store.begin(ctx, id, g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.finish(ctx, id, 1, "", nil, ScanCoverage{Checked: []string{"nvd", "distro"}, Skipped: []string{"jvn"}, Reported: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Del(ctx, scanStatusKeys(id)...).Err(); err != nil { // evicted
+		t.Fatal(err)
+	}
+	if err := store.rejoin(ctx, id, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id, 2, "", nil, full()); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); v.checkedKnown {
+		t.Fatalf("after a key loss the surviving run's report reads as the group's coverage: %+v", v)
+	}
+	// A new group starts over.
+	if err := store.begin(ctx, id, 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finish(ctx, id, 3, "", nil, full()); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); !v.checkedKnown || !slices.Equal(v.checked, []string{"nvd", "jvn", "distro"}) {
+		t.Fatalf("new group: %+v", v)
+	}
+}
+
+// Codex coverage R2 Medium-2: a legacy Mark* folded into an overflow merge
+// ends the group's known coverage, as the mark script does.
+func TestCoverageRedis_MergeWithFoldedMarkMakesCoverageUnknown(t *testing.T) {
+	rdb := m72Redis(t)
+	a := process(rdb, 0, time.Hour)
+	store := a.shared.(*redisScanStatusStore)
+	ctx := context.Background()
+	id := uuid.New()
+	if err := store.begin(ctx, id, 1); err != nil {
+		t.Fatal(err)
+	}
+	m := newMergeSet()
+	m.finish(1)
+	m.addFinishCoverage(1, full())
+	m.addMark()
+	if err := store.merge(ctx, id, m); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := store.get(ctx, id); v.checkedKnown {
+		t.Fatalf("a folded mark kept the coverage: %+v", v)
+	}
+}

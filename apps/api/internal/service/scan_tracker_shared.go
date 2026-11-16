@@ -169,6 +169,9 @@ func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedE
 	switch ev.kind {
 	case evBegin, evRejoin:
 		m.begin(ev.gen, ev.kind == evBegin)
+		if ev.kind == evRejoin {
+			m.addRejoin()
+		}
 	case evFinish:
 		m.finish(ev.gen)
 		if ev.msg != "" {
@@ -179,6 +182,7 @@ func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedE
 		if ev.state == ScanStateFailed && ev.msg != "" {
 			m.addFailure(ev.msg, ev.reasons)
 		}
+		m.addMark()
 	}
 	// ev itself is never queued: a Begin waiting on it waits on the merge.
 	ev.at = tail.at

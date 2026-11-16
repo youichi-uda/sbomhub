@@ -208,10 +208,34 @@ end
 -- The group's checked sources: c of the marker-less entry; nil while no
 -- finish of the group reported coverage.
 local function checked_list()
+  local c = nil
   for _, e in ipairs(load_outcomes()) do
-    if e.m == '' and type(e.c) == 'table' then return e.c end
+    if e.m == '' then
+      -- u: the group's coverage became unknown (see coverage_unknown).
+      if e.u then return nil end
+      if c == nil and type(e.c) == 'table' then c = e.c end
+    end
   end
-  return nil
+  return c
+end
+-- coverage_unknown: the group lost what its earlier finishes reported (a
+-- live run rejoined after its identity, or the whole key, was lost; or a
+-- legacy Mark* was folded into a merge), so no report may stand for the
+-- group's coverage until a new group begins (Codex coverage R2 High-1 /
+-- Medium-2). Kept in the marker-less entry, so every reset clears it.
+local function coverage_unknown()
+  local o = load_outcomes()
+  local entry = nil
+  for _, e in ipairs(o) do
+    if e.m == '' and type(e.s) == 'table' then entry = e; break end
+  end
+  if not entry then
+    entry = {m = '', s = {}}
+    table.insert(o, entry)
+  end
+  entry.u = true
+  entry.c = nil
+  save_outcomes(o)
 end
 -- add_checked intersects the group's checked sources with a finish's (the
 -- first report sets them). cs is nil when the finish reports nothing.
@@ -221,7 +245,12 @@ end
 -- to an earlier group (Codex coverage R1 High-2).
 local function add_checked(cs, may_set)
   if type(cs) ~= 'table' then return end
-  if not may_set and type(checked_list()) ~= 'table' then return end
+  if type(checked_list()) ~= 'table' then
+    if not may_set then return end
+    for _, e in ipairs(load_outcomes()) do
+      if e.m == '' and e.u then return end
+    end
+  end
   local o = load_outcomes()
   local entry = nil
   for _, e in ipairs(o) do
@@ -496,7 +525,8 @@ return 2`
 
 // ARGV: JSON {"b": [gen...], "f": [gen...], "x": [[marker, [reason...]]...],
 // "s": [skipped source...], "c": [checked source...] and "cr": [gen of a
-// folded finish that reported coverage...] (both only when one did)},
+// folded finish that reported coverage...] (both only when one did),
+// "cu": true when a folded rejoin or Mark* made the coverage unknown},
 // lease ms, ttl ms. The coalesced writes of a queue that overflowed: runs
 // that began (joined to the current group, never a new one), runs that
 // finished, and the failures among them (Codex M72 R5 High-3).
@@ -534,6 +564,7 @@ if type(m.cr) == 'table' then
   end
 end
 add_checked(m.c, reporter_member)
+if m.cu then coverage_unknown() end
 publish(now)
 expire(ARGV[3])
 return 1`
@@ -570,6 +601,9 @@ const scanStatusRejoinLua = `
 local now = nowms()
 ensure_born()
 sweep(now, ARGV[1])
+-- A run that is not active here lost its identity (or the key was lost):
+-- what the group's earlier finishes reported may be gone with it.
+if redis.call('HEXISTS', K, 'r:' .. ARGV[1]) == 0 then coverage_unknown() end
 activate(ARGV[1], now, ARGV[2])
 publish(now)
 expire(ARGV[3])
@@ -843,6 +877,9 @@ type mergeSet struct {
 	checkedKnown bool
 	// reporters: the folded finishes that reported coverage.
 	reporters map[uint64]bool
+	// coverageLost: a folded rejoin or Mark* makes the group's coverage
+	// unknown ("cu").
+	coverageLost bool
 }
 
 // addSkipped folds a finish's skipped sources.
@@ -863,6 +900,17 @@ func (m *mergeSet) addFinishCoverage(gen uint64, c ScanCoverage) {
 	}
 	m.addCoverage(c)
 }
+
+// addMark folds a legacy MarkCompleted / MarkFailed: it ends the group's
+// known coverage, as the mark script does (Codex coverage R2 Medium-2).
+func (m *mergeSet) addMark() {
+	m.checked, m.checkedKnown, m.reporters = nil, false, nil
+	m.coverageLost = true
+}
+
+// addRejoin folds a rejoin: the run lost its identity in Redis, so the
+// group's coverage becomes unknown (Codex coverage R2 High-1).
+func (m *mergeSet) addRejoin() { m.coverageLost = true }
 
 // addCoverage folds a finish's coverage (groupCoverage's rule).
 func (m *mergeSet) addCoverage(c ScanCoverage) {
@@ -953,6 +1001,9 @@ func (m *mergeSet) json() string {
 		}
 		body["c"] = c
 		body["cr"] = gens(m.reporters)
+	}
+	if m.coverageLost {
+		body["cu"] = true
 	}
 	b, err := json.Marshal(body)
 	if err != nil {
