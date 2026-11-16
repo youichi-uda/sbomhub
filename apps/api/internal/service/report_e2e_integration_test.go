@@ -103,6 +103,19 @@ func TestReportGeneration_E2E_RealPG_XLSXAndPDF(t *testing.T) {
 	tenantID := seedTenantVS(t, migDB, "RPT")
 	userID := seedUserRPT(t, migDB)
 
+	// M74: one Top Risk with a known CVSS version, so the stored workbook
+	// proves cvss_version flows DB -> GetTopRisksByTenant -> Excel column F.
+	projectID := uuid.New()
+	seedProjectVS(t, migDB, tenantID, projectID, "rpt-cvss-version")
+	sbomID := seedSbomVS(t, migDB, tenantID, projectID)
+	compID := seedComponentVS(t, migDB, tenantID, sbomID, "rpt-lib", "1.0.0", "pkg:golang/rpt-lib@1.0.0")
+	cveID := "CVE-RPT-M74-" + tenantID.String()[:8]
+	vulnID := seedVulnVS(t, migDB, cveID)
+	if _, err := migDB.Exec(`UPDATE vulnerabilities SET cvss_version = '3.1' WHERE id = $1`, vulnID); err != nil {
+		t.Fatalf("set cvss_version: %v", err)
+	}
+	linkCompVulnVS(t, migDB, compID, vulnID)
+
 	svc := NewReportService(
 		repository.NewReportRepository(appDB),
 		repository.NewDashboardRepository(appDB),
@@ -131,6 +144,16 @@ func TestReportGeneration_E2E_RealPG_XLSXAndPDF(t *testing.T) {
 			tr := GetTranslations("ja")
 			if v, err := f.GetCellValue(tr.SheetSummary, "A1"); err != nil || v != tr.TitleExecutive {
 				t.Fatalf("summary title = %q err = %v, want %q", v, err, tr.TitleExecutive)
+			}
+			// M74: the seeded Top Risk carries its CVSS version in column F.
+			if v, _ := f.GetCellValue(tr.SheetTopRisks, "A2"); v != cveID {
+				t.Fatalf("Top Risks A2 = %q, want %q", v, cveID)
+			}
+			if v, _ := f.GetCellValue(tr.SheetTopRisks, "F1"); v != tr.CVSSVersion {
+				t.Errorf("Top Risks F1 = %q, want %q", v, tr.CVSSVersion)
+			}
+			if d, fv := mustCell(t, f, tr.SheetTopRisks, "D2"), mustCell(t, f, tr.SheetTopRisks, "F2"); d != "7.5" || fv != "3.1" {
+				t.Errorf("Top Risks D2/F2 = %q/%q, want 7.5/3.1", d, fv)
 			}
 		}},
 		{model.ReportFormatPDF, func(t *testing.T, content []byte) {
@@ -188,4 +211,13 @@ func TestReportGeneration_E2E_RealPG_XLSXAndPDF(t *testing.T) {
 			tc.verify(t, content)
 		})
 	}
+}
+
+func mustCell(t *testing.T, f *excelize.File, sheet, cell string) string {
+	t.Helper()
+	v, err := f.GetCellValue(sheet, cell)
+	if err != nil {
+		t.Fatalf("%s!%s: %v", sheet, cell, err)
+	}
+	return v
 }
