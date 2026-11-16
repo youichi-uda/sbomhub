@@ -367,7 +367,7 @@ export default function BillingPage() {
               return (
                 <Card
                   key={plan.id}
-                  className={`relative ${isCurrent ? "border-primary border-2" : "opacity-80"}`}
+                  className={`relative ${isCurrent ? "border-primary border-2" : ""}`}
                 >
                   {isCurrent && (
                     <Badge className="absolute -top-3 left-1/2 -translate-x-1/2">

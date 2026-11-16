@@ -241,7 +241,7 @@ export default function ScanSettingsPage() {
                     </p>
                     <div className="space-y-2">
                         {[
-                            { key: 'notify_critical' as const, label: 'Critical', color: 'text-red-700' },
+                            { key: 'notify_critical' as const, label: 'Critical', color: 'text-red-800' },
                             { key: 'notify_high' as const, label: 'High', color: 'text-orange-700' },
                             { key: 'notify_medium' as const, label: 'Medium', color: 'text-yellow-700' },
                             { key: 'notify_low' as const, label: 'Low', color: 'text-green-700' },

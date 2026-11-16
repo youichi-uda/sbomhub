@@ -144,7 +144,7 @@ function ProjectScoresList({ scores, noDataMessage, locale }: { scores: ProjectS
           </div>
           <Progress value={score.risk_score} className="h-2" />
           <div className="flex gap-4 text-xs text-muted-foreground">
-            <span className="text-red-700">{tv("critical")}: {score.critical}</span>
+            <span className="text-red-800">{tv("critical")}: {score.critical}</span>
             <span className="text-orange-700">{tv("high")}: {score.high}</span>
             <span className="text-yellow-700">{tv("medium")}: {score.medium}</span>
             <span className="text-green-700">{tv("low")}: {score.low}</span>
@@ -403,7 +403,7 @@ export default function DashboardPage() {
         <VulnerabilityCard
           label={tv("critical")}
           count={summary.vulnerabilities.critical}
-          color="text-red-700"
+          color="text-red-800"
         />
         <VulnerabilityCard
           label={tv("high")}

@@ -120,12 +120,14 @@
   /*
     v3 parity (Tailwind v4 upgrade guide, "Preflight changes"):
     v4 renders placeholders in the current text colour at 50% opacity and
-    gives <button> the default cursor. Keep the v3 look (gray-400
-    placeholders, pointer cursor on enabled buttons).
+    gives <button> the default cursor. Keep the v3 look for the cursor
+    (pointer on enabled buttons). Placeholders were the v3 gray-400, 2.5:1
+    on white (WCAG 1.4.3 applies to placeholder text): gray-500 is 4.8:1.
+    The shadcn Input / Textarea override this with text-muted-foreground.
   */
   input::placeholder,
   textarea::placeholder {
-    color: var(--color-gray-400);
+    color: var(--color-gray-500);
   }
 
   button:not(:disabled),

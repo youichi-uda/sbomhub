@@ -44,6 +44,7 @@ test.describe('text meets WCAG AA contrast', () => {
     '/en/audit',
     '/en/reports',
     '/en/search',
+    '/en/billing',
     '/en/settings/apikeys',
     '/en/settings/diff-webhook',
     '/en/settings/integrations',
@@ -111,6 +112,40 @@ test.describe('text meets WCAG AA contrast', () => {
     });
   }
 
+  // The fixture project only has CRITICAL and HIGH CVEs. Relabel them as the
+  // other stored severities (MEDIUM / LOW / NONE / UNKNOWN) so their badges
+  // and remediation chips are measured too (Codex R1: the gray UNKNOWN chip
+  // was 4.28:1).
+  test('vulnerabilities tab with every other severity', async ({ page }) => {
+    const relabel = ['MEDIUM', 'LOW', 'NONE', 'UNKNOWN'];
+    await page.route(`**/api/v1/projects/${project!.projectId}/vulnerabilities*`, async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      const list = Array.isArray(body) ? body : body.data;
+      expect(list.length, 'fixture vulnerabilities').toBeGreaterThanOrEqual(relabel.length);
+      list.forEach((v: { severity: string }, i: number) => (v.severity = relabel[i % relabel.length]));
+      await route.fulfill({ response: res, json: body });
+    });
+    await page.goto(`/en/projects/${project!.projectId}`);
+    await expect(page.getByRole('heading', { level: 1, name: project!.projectName })).toBeVisible();
+    await page.getByRole('button', { name: new RegExp(`^${en.Vulnerabilities.title} \\(`) }).click();
+    await expect(page.getByTestId('vuln-entry')).toHaveCount(4, { timeout: 15_000 });
+    for (const sev of relabel) await expect(page.getByText(sev, { exact: true }).first()).toBeVisible();
+    await expectReadable(page, 'vulnerabilities tab, MEDIUM / LOW / NONE / UNKNOWN');
+  });
+
+  test('analytics with an unexpected severity row', async ({ page }) => {
+    await page.route('**/api/v1/analytics/summary*', async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      body.mttr.push({ severity: 'UNKNOWN', mttr_hours: 10, count: 1, target_hours: 100, on_target: true });
+      await route.fulfill({ response: res, json: body });
+    });
+    await openPage(page, '/en/analytics');
+    await expect(page.getByText('UNKNOWN', { exact: true }).first()).toBeVisible();
+    await expectReadable(page, 'analytics, UNKNOWN row');
+  });
+
   test('CVE search results (severity badges)', async ({ page }) => {
     await page.goto('/en/search');
     await page.getByPlaceholder(en.Search.cvePlaceholder).fill('CVE-2021-23337');
@@ -134,7 +169,15 @@ test.describe('the contrast measurement', () => {
       <p id="faded" style="color:#111827;opacity:0.3">faded</p>
       <p style="background-image:linear-gradient(#000,#fff);color:#777">over a gradient</p>
       <p id="big" style="color:#ef4444;font-size:24px">large red-500 3.76</p>
-    </div>`;
+      <div style="background:#fff;opacity:0.8"><span style="color:#64748b">slate-500 in a faded card</span></div>
+      <input placeholder="pale placeholder" style="background:#fff" class="pale">
+      <input value="pale value" style="color:#d1d5db;background:#fff">
+      <input placeholder="dark placeholder" style="background:#fff" class="dark-ph">
+      <input type="checkbox" checked>
+      <select style="color:#d1d5db;background:#fff"><option>pale option</option></select>
+      <input disabled value="disabled input" style="color:#d1d5db">
+    </div>
+    <style>.pale::placeholder{color:#d1d5db} .dark-ph::placeholder{color:#374151}</style>`;
 
   test('reports what fails, with its ratio, and only that', async ({ page }) => {
     await page.setContent(CASES);
@@ -146,7 +189,13 @@ test.describe('the contrast measurement', () => {
       'red-500 on red/10 3.3': 3.3,
       'slate-500 on slate-900/80': expect.any(Number),
       faded: expect.any(Number),
+      'slate-500 in a faded card': expect.any(Number),
+      'placeholder: pale placeholder': expect.any(Number),
+      'pale value': expect.any(Number),
+      'pale option': expect.any(Number),
     });
+    // slate-500 is 4.76:1 on white; opacity 0.8 on the card fades it to ~3.6.
+    expect(byText['slate-500 in a faded card']).toBeLessThan(4);
     expect(byText['slate-500 on slate-900/80']).toBeLessThan(4.5);
     expect(byText.faded).toBeLessThan(4.5);
   });
