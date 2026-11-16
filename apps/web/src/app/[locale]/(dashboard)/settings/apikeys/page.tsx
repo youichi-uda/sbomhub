@@ -318,19 +318,21 @@ export default function APIKeysPage() {
           {keys.map((key) => (
             <Card key={key.id}>
               <CardHeader className="pb-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 rounded-lg bg-muted">
+                {/* min-w-0 / wrap: a long key name pushed the delete button
+                    past a 320px card. */}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className="shrink-0 p-2 rounded-lg bg-muted">
                       <Key className="h-5 w-5" />
                     </div>
-                    <div>
-                      <CardTitle className="text-base flex items-center gap-2">
+                    <div className="min-w-0">
+                      <CardTitle className="text-base flex flex-wrap items-center gap-2 wrap-anywhere">
                         {key.name}
                         {isExpired(key.expires_at) && (
                           <Badge variant="destructive">{t("expired")}</Badge>
                         )}
                       </CardTitle>
-                      <CardDescription className="flex items-center gap-2 mt-1">
+                      <CardDescription className="flex flex-wrap items-center gap-2 mt-1">
                         <code className="text-xs bg-muted px-2 py-0.5 rounded">
                           {key.key_prefix}...
                         </code>

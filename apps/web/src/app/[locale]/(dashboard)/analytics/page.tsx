@@ -188,11 +188,12 @@ export default function AnalyticsPage() {
                                 // for a severity nobody has ever remediated.
                                 const measured = m.mttr_hours !== null && m.mttr_hours !== undefined;
                                 return (
-                                    <div key={m.severity} className="flex items-center gap-4">
+                                    <div key={m.severity} className="flex flex-wrap items-center gap-x-4 gap-y-1">
                                         <div className={`w-20 shrink-0 px-2 py-1 rounded text-center text-sm font-medium ${getSeverityBgColor(m.severity)} ${getSeverityColor(m.severity)}`}>
                                             {m.severity}
                                         </div>
-                                        <div className="min-w-0 flex-1">
+                                        {/* Below the badge when there is no room beside it (320px). */}
+                                        <div className="min-w-40 flex-1">
                                             <div className="flex flex-wrap items-center justify-between gap-x-2 mb-1">
                                                 <span className={`text-sm${measured ? '' : ' text-muted-foreground'}`}>
                                                     {formatMetricHours(m.mttr_hours)}
@@ -244,11 +245,12 @@ export default function AnalyticsPage() {
                                 const pct = slo.achievement_pct;
                                 const measured = pct !== null && pct !== undefined;
                                 return (
-                                    <div key={slo.severity} className="flex items-center gap-4">
+                                    <div key={slo.severity} className="flex flex-wrap items-center gap-x-4 gap-y-1">
                                         <div className={`w-20 shrink-0 px-2 py-1 rounded text-center text-sm font-medium ${getSeverityBgColor(slo.severity)} ${getSeverityColor(slo.severity)}`}>
                                             {slo.severity}
                                         </div>
-                                        <div className="min-w-0 flex-1">
+                                        {/* Below the badge when there is no room beside it (320px). */}
+                                        <div className="min-w-40 flex-1">
                                             <div className="flex flex-wrap items-center justify-between gap-x-2 mb-1">
                                                 <span className={`text-sm font-medium${measured ? '' : ' text-muted-foreground'}`}>
                                                     {formatMetricPct(pct)}

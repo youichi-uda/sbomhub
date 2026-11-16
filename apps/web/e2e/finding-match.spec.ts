@@ -245,8 +245,12 @@ test.describe('M60 NVD / JVN confidence labels', () => {
     const tip = page.locator(`[id="${await kev.getAttribute('aria-describedby')}"]`);
     await expect(tip).toBeVisible();
     await expect(tip).toContainText(en.KEV.title);
-    const bg = await tip.evaluate((el) => getComputedStyle(el).backgroundColor);
-    expect(bg).toBe('rgb(255, 255, 255)');
+    // The role="tooltip" box is transparent around the painted panel: its
+    // padding is the hoverable gap to the badge (WCAG 1.4.13). The panel
+    // inside it carries the popover background.
+    const panel = tip.locator(':scope > div');
+    await expect(panel).toHaveCount(1);
+    expect(await panel.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe('rgb(255, 255, 255)');
     await tip.screenshot({ path: test.info().outputPath('kev-tooltip.png') });
   });
 });
