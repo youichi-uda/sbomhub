@@ -329,9 +329,10 @@ describe("checked_sources (UPGRADE §31)", () => {
       assert.equal(s.checkedSources, null, JSON.stringify(skipped_sources));
       assert.notDeepEqual(scanCoverage(s.skippedSources, s.checkedSources), { kind: "full" });
     }
-    // absent / null skipped_sources is "none skipped" (the API omits it)
+    // absent skipped_sources is "none skipped" (the API omits an empty one);
+    // null is not something the API sends (Codex webcov R2): not reported
     assert.deepEqual(p({ checked_sources: ["nvd", "jvn", "distro"] }).checkedSources, ["nvd", "jvn", "distro"]);
-    assert.deepEqual(p({ checked_sources: ["nvd", "jvn", "distro"], skipped_sources: null }).checkedSources, ["nvd", "jvn", "distro"]);
+    assert.equal(p({ checked_sources: ["nvd", "jvn", "distro"], skipped_sources: null }).checkedSources, null);
   });
   test("coverage: full only with all three checked and nothing skipped", () => {
     assert.deepEqual(scanCoverage([], ALL), { kind: "full" });

@@ -100,9 +100,10 @@ export function parseScanStatus(raw: unknown): ScanStatus {
     out.skippedSources = stringList(o.skipped_sources);
     // Coverage fails closed (§31; Codex webcov R1): checked_sources counts as
     // reported only as a whole valid list — anything else is "not reported",
-    // never "none" — and a malformed skipped_sources (absent / null means
-    // none skipped) leaves what was skipped unknown, so it cannot be full.
-    const skippedValid = o.skipped_sources === undefined || o.skipped_sources === null || isSourceList(o.skipped_sources);
+    // never "none" — and a skipped_sources that is neither absent (none
+    // skipped; the API omits an empty list) nor a valid list, null included,
+    // leaves what was skipped unknown, so it cannot be full (Codex webcov R2).
+    const skippedValid = o.skipped_sources === undefined || isSourceList(o.skipped_sources);
     out.checkedSources = skippedValid && isSourceList(o.checked_sources) ? [...o.checked_sources] : null;
   }
   return out;
