@@ -51,6 +51,11 @@ type VulnerabilityNotification struct {
 	// Slack/Discord/email alert saying "CVSS 0.0" presents an un-triaged
 	// finding as harmless. Renderers print 未採点 for nil (M46 wave 4).
 	CVSSScore *float64 `json:"cvss_score,omitempty"`
+	// CVSSVersion is the CVSS version CVSSScore / Severity were taken from
+	// (vulnerabilities.cvss_version: "3.1", "3.0", "4.0", "2.0"; M67). nil
+	// when unknown. Renderers name it in the CVSS label ("CVSS v3.1") and
+	// print the bare "CVSS" label when it is nil or unrecognised (M74).
+	CVSSVersion *string `json:"cvss_version,omitempty"`
 	// EPSSScore is nil when FIRST.org has no score for this CVE. Same
 	// no-0-sentinel contract as CVSSScore above: an alert reading
 	// "EPSS 0.0%" next to an un-triaged CRITICAL presents an unknown

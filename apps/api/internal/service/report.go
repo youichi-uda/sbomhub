@@ -23,6 +23,7 @@ import (
 	"github.com/johnfercher/maroto/v2/pkg/fontrepository"
 	"github.com/johnfercher/maroto/v2/pkg/props"
 	"github.com/sbomhub/sbomhub/internal/assets"
+	"github.com/sbomhub/sbomhub/internal/cvss"
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -804,6 +805,32 @@ func reportCVSSText(score *float64, t *ReportTranslations) string {
 	return fmt.Sprintf("%.1f", *score)
 }
 
+// reportCVSSLabel is the label printed in front of a Top Risk's CVSS in the
+// PDF body: "CVSS v3.1" when the version of the assessment is known, else
+// the bare "CVSS" (M74; same rule as the notifications' notifCVSSLabel).
+func reportCVSSLabel(version *string) string {
+	return cvssVersionLabel(version)
+}
+
+// reportCVSSVersionCell is the Excel Top Risks "CVSS version" cell: the
+// canonical version, or "" when unknown — never a guessed version (M74).
+func reportCVSSVersionCell(version *string) string {
+	if version == nil {
+		return ""
+	}
+	return string(cvss.ParseVersion(*version))
+}
+
+// executiveTopRiskText is the value of one executive-report Top Risks line.
+func executiveTopRiskText(risk model.TopRisk, t *ReportTranslations) string {
+	return fmt.Sprintf("%s - %s: %s", risk.ProjectName, reportCVSSLabel(risk.CVSSVersion), reportCVSSText(risk.CVSSScore, t))
+}
+
+// technicalTopRiskText is the value of one technical-report Top Risks line.
+func technicalTopRiskText(risk model.TopRisk, t *ReportTranslations) string {
+	return fmt.Sprintf("%s: %s, EPSS: %s", reportCVSSLabel(risk.CVSSVersion), reportCVSSText(risk.CVSSScore, t), reportEPSSText(risk.EPSSScore, t))
+}
+
 // reportEPSSText renders a Top Risk's EPSS for the PDF / Excel report body.
 // nil means FIRST.org has no score for this CVE and renders as the locale's
 // Unscored label — NEVER "0.00%": epss_score is DECIMAL(5,4), so a stored
@@ -902,7 +929,7 @@ func (s *ReportService) buildExecutivePDFContent(m core.Maroto, data *model.Exec
 			}
 			m.AddRows(s.buildPDFKeyValue(
 				fmt.Sprintf("%d. %s", i+1, risk.CVEID),
-				fmt.Sprintf("%s - CVSS: %s", risk.ProjectName, reportCVSSText(risk.CVSSScore, t)),
+				executiveTopRiskText(risk, t),
 			))
 		}
 	}
@@ -938,7 +965,7 @@ func (s *ReportService) buildTechnicalPDFContent(m core.Maroto, data *model.Exec
 			}
 			m.AddRows(s.buildPDFKeyValue(
 				fmt.Sprintf("%d. %s", i+1, risk.CVEID),
-				fmt.Sprintf("CVSS: %s, EPSS: %s", reportCVSSText(risk.CVSSScore, t), reportEPSSText(risk.EPSSScore, t)),
+				technicalTopRiskText(risk, t),
 			))
 			m.AddRows(s.buildPDFKeyValue(
 				fmt.Sprintf("   %s", t.Project),
@@ -1239,6 +1266,7 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportTyp
 		ec.collect(f.SetColWidth(riskSheet, "C", "C", 15))
 		ec.collect(f.SetColWidth(riskSheet, "D", "D", 12))
 		ec.collect(f.SetColWidth(riskSheet, "E", "E", 12))
+		ec.collect(f.SetColWidth(riskSheet, "F", "F", 16))
 
 		// Headers
 		ec.collect(f.SetCellValue(riskSheet, "A1", t.CVEID))
@@ -1246,6 +1274,9 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportTyp
 		ec.collect(f.SetCellValue(riskSheet, "C1", t.Component))
 		ec.collect(f.SetCellValue(riskSheet, "D1", t.CVSS))
 		ec.collect(f.SetCellValue(riskSheet, "E1", t.EPSS))
+		// M74: the CVSS version is a NEW trailing column so A-E keep their
+		// positions for anything that reads the sheet by column.
+		ec.collect(f.SetCellValue(riskSheet, "F1", t.CVSSVersion))
 
 		for i, risk := range data.TopRisks {
 			row := i + 2
@@ -1261,6 +1292,9 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportTyp
 				ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("D%d", row), t.Unscored))
 			}
 			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("E%d", row), reportEPSSText(risk.EPSSScore, t)))
+			if v := reportCVSSVersionCell(risk.CVSSVersion); v != "" {
+				ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("F%d", row), v))
+			}
 		}
 	}
 

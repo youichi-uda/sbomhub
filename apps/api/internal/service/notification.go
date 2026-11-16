@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/config"
+	"github.com/sbomhub/sbomhub/internal/cvss"
 	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -183,9 +184,11 @@ func (s *NotificationService) SendTestNotification(ctx context.Context, projectI
 
 	testCVSS := 9.8
 	testEPSS := 0.95
+	testCVSSVersion := "3.1"
 	testNotif := model.VulnerabilityNotification{
 		CVEID:            "CVE-0000-0000",
 		CVSSScore:        &testCVSS,
+		CVSSVersion:      &testCVSSVersion,
 		EPSSScore:        &testEPSS,
 		Severity:         "CRITICAL",
 		ProjectID:        projectID.String(),
@@ -294,6 +297,28 @@ func notifCVSSText(score *float64) string {
 	return fmt.Sprintf("%.1f", *score)
 }
 
+// notifCVSSLabel is the label printed in front of a notification's CVSS
+// value: "CVSS v3.1" when the version of the assessment the score (and
+// severity) came from is known, else the bare "CVSS" the notifications have
+// always printed (M74). Only a canonical version (cvss.ParseVersion) is
+// printed, so a stray value never reaches a Slack mrkdwn / HTML body and an
+// unknown version is never guessed.
+func notifCVSSLabel(version *string) string {
+	return cvssVersionLabel(version)
+}
+
+// cvssVersionLabel is shared by the notification and report renderers.
+func cvssVersionLabel(version *string) string {
+	if version == nil {
+		return "CVSS"
+	}
+	v := cvss.ParseVersion(*version)
+	if v == "" {
+		return "CVSS"
+	}
+	return "CVSS v" + string(v)
+}
+
 // notifEPSSText renders a notification's EPSS for Slack / Discord / email.
 // nil means FIRST.org has no score for this CVE — render 未採点, never
 // "0.0%": epss_score is DECIMAL(5,4), so a stored 0.0000 is a real
@@ -337,7 +362,7 @@ func buildSlackVulnerabilityPayload(notif model.VulnerabilityNotification) map[s
 				"type": "section",
 				"fields": []map[string]interface{}{
 					{"type": "mrkdwn", "text": fmt.Sprintf("*CVE ID:*\n%s", notif.CVEID)},
-					{"type": "mrkdwn", "text": fmt.Sprintf("*CVSS:*\n%s (%s)", notifCVSSText(notif.CVSSScore), notif.Severity)},
+					{"type": "mrkdwn", "text": fmt.Sprintf("*%s:*\n%s (%s)", notifCVSSLabel(notif.CVSSVersion), notifCVSSText(notif.CVSSScore), notif.Severity)},
 					{"type": "mrkdwn", "text": fmt.Sprintf("*EPSS:*\n%s", notifEPSSText(notif.EPSSScore))},
 					{"type": "mrkdwn", "text": fmt.Sprintf("*Project:*\n%s", notif.ProjectName)},
 					{"type": "mrkdwn", "text": fmt.Sprintf("*Component:*\n%s@%s", notif.ComponentName, notif.ComponentVersion)},
@@ -389,7 +414,7 @@ func buildDiscordVulnerabilityPayload(notif model.VulnerabilityNotification) map
 				"color":       color,
 				"fields": []map[string]interface{}{
 					{"name": "CVE ID", "value": notif.CVEID, "inline": true},
-					{"name": "CVSS", "value": notifCVSSText(notif.CVSSScore), "inline": true},
+					{"name": notifCVSSLabel(notif.CVSSVersion), "value": notifCVSSText(notif.CVSSScore), "inline": true},
 					{"name": "EPSS", "value": notifEPSSText(notif.EPSSScore), "inline": true},
 					{"name": "Project", "value": notif.ProjectName, "inline": true},
 					{"name": "Component", "value": fmt.Sprintf("%s@%s", notif.ComponentName, notif.ComponentVersion), "inline": true},
@@ -577,7 +602,7 @@ func (s *NotificationService) generateEmailHTML(notif model.VulnerabilityNotific
           <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">%s</td>
         </tr>
         <tr>
-          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>CVSS Score</strong></td>
+          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>%s Score</strong></td>
           <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">%s (%s)</td>
         </tr>
         <tr>
@@ -606,6 +631,7 @@ func (s *NotificationService) generateEmailHTML(notif model.VulnerabilityNotific
 		color,
 		notif.Severity,
 		notif.CVEID,
+		notifCVSSLabel(notif.CVSSVersion),
 		notifCVSSText(notif.CVSSScore),
 		notif.Severity,
 		notifEPSSText(notif.EPSSScore),
@@ -623,7 +649,7 @@ func (s *NotificationService) generateEmailText(notif model.VulnerabilityNotific
 	text := fmt.Sprintf(`[SBOMHub] 新規%s脆弱性検出
 
 CVE ID: %s
-CVSS Score: %s (%s)
+%s Score: %s (%s)
 EPSS Score: %s
 Project: %s
 Component: %s@%s
@@ -635,6 +661,7 @@ Component: %s@%s
 `,
 		notif.Severity,
 		notif.CVEID,
+		notifCVSSLabel(notif.CVSSVersion),
 		notifCVSSText(notif.CVSSScore),
 		notif.Severity,
 		notifEPSSText(notif.EPSSScore),

@@ -72,10 +72,13 @@ type ReportTranslations struct {
 	SheetVisualization string
 
 	// Table headers
-	CVEID       string
-	Project     string
-	Component   string
-	CVSS        string
+	CVEID     string
+	Project   string
+	Component string
+	CVSS      string
+	// CVSSVersion heads the Excel Top Risks column naming the CVSS version
+	// of each score (M74).
+	CVSSVersion string
 	EPSS        string
 	Date        string
 	Total       string
@@ -172,6 +175,7 @@ var translationsJa = ReportTranslations{
 	Project:     "プロジェクト",
 	Component:   "コンポーネント",
 	CVSS:        "CVSS",
+	CVSSVersion: "CVSS バージョン",
 	EPSS:        "EPSS",
 	Unscored:    "未採点",
 	NotMeasured: "未計測",
@@ -258,6 +262,7 @@ var translationsEn = ReportTranslations{
 	Project:     "Project",
 	Component:   "Component",
 	CVSS:        "CVSS",
+	CVSSVersion: "CVSS version",
 	EPSS:        "EPSS",
 	Unscored:    "Unscored",
 	NotMeasured: "Not measured",
