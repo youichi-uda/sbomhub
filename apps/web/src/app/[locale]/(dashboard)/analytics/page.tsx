@@ -51,8 +51,8 @@ export default function AnalyticsPage() {
 
     const getSeverityColor = (severity: string) => {
         switch (severity.toUpperCase()) {
-            case 'CRITICAL': return 'text-red-500';
-            case 'HIGH': return 'text-orange-500';
+            case 'CRITICAL': return 'text-red-700';
+            case 'HIGH': return 'text-orange-700';
             case 'MEDIUM': return 'text-yellow-700';
             case 'LOW': return 'text-green-700';
             default: return 'text-gray-500';

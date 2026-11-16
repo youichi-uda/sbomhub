@@ -29,10 +29,10 @@ import { AlertCircle, Shield, Package, FolderOpen, TrendingUp, Clock, CheckCircl
 
 function SeverityBadge({ severity }: { severity: string }) {
   const colors: Record<string, string> = {
-    CRITICAL: "bg-red-500 hover:bg-red-600",
-    critical: "bg-red-500 hover:bg-red-600",
-    HIGH: "bg-orange-500 hover:bg-orange-600",
-    high: "bg-orange-500 hover:bg-orange-600",
+    CRITICAL: "bg-red-600 hover:bg-red-700",
+    critical: "bg-red-600 hover:bg-red-700",
+    HIGH: "bg-orange-500 text-black hover:bg-orange-600",
+    high: "bg-orange-500 text-black hover:bg-orange-600",
     MEDIUM: "bg-yellow-500 text-black hover:bg-yellow-600",
     medium: "bg-yellow-500 text-black hover:bg-yellow-600",
     LOW: "bg-green-700 hover:bg-green-800",
@@ -91,7 +91,7 @@ function TopRisksTable({ risks, noDataMessage, locale }: { risks: TopRisk[]; noD
                   render "—", never 0.0% (that would read as a measured
                   near-zero exploitation probability). */}
               {risk.epss_score != null ? (
-                <span className={risk.epss_score > 0.5 ? "text-red-500 font-bold" : ""}>
+                <span className={risk.epss_score > 0.5 ? "text-red-700 font-bold" : ""}>
                   {(risk.epss_score * 100).toFixed(1)}%
                 </span>
               ) : (
@@ -105,7 +105,7 @@ function TopRisksTable({ risks, noDataMessage, locale }: { risks: TopRisk[]; noD
               <span className="ml-2">{risk.cvss_score != null ? risk.cvss_score.toFixed(1) : "—"}</span>
             </TableCell>
             <TableCell>
-              <Link href={`/${locale}/projects/${risk.project_id}`} className="text-blue-500 hover:underline">
+              <Link href={`/${locale}/projects/${risk.project_id}`} className="text-blue-600 hover:underline">
                 {risk.project_name}
               </Link>
             </TableCell>
@@ -144,8 +144,8 @@ function ProjectScoresList({ scores, noDataMessage, locale }: { scores: ProjectS
           </div>
           <Progress value={score.risk_score} className="h-2" />
           <div className="flex gap-4 text-xs text-muted-foreground">
-            <span className="text-red-500">{tv("critical")}: {score.critical}</span>
-            <span className="text-orange-500">{tv("high")}: {score.high}</span>
+            <span className="text-red-700">{tv("critical")}: {score.critical}</span>
+            <span className="text-orange-700">{tv("high")}: {score.high}</span>
             <span className="text-yellow-700">{tv("medium")}: {score.medium}</span>
             <span className="text-green-700">{tv("low")}: {score.low}</span>
           </div>
@@ -189,14 +189,14 @@ function EOLSummaryCard({
         <p className="text-xs text-muted-foreground">{labels.active}</p>
       </div>
       <div className="space-y-1">
-        <div className="flex items-center justify-center gap-1 text-orange-500">
+        <div className="flex items-center justify-center gap-1 text-orange-700">
           <Clock className="h-4 w-4" />
           <span className="text-2xl font-bold">{eos}</span>
         </div>
         <p className="text-xs text-muted-foreground">{labels.eos}</p>
       </div>
       <div className="space-y-1">
-        <div className="flex items-center justify-center gap-1 text-red-500">
+        <div className="flex items-center justify-center gap-1 text-red-700">
           <AlertTriangle className="h-4 w-4" />
           <span className="text-2xl font-bold">{eol}</span>
         </div>
@@ -372,7 +372,7 @@ export default function DashboardPage() {
       <div className="container mx-auto py-8">
         <Card>
           <CardContent className="pt-6">
-            <div className="flex items-center gap-2 text-red-500">
+            <div className="flex items-center gap-2 text-red-700">
               <AlertCircle className="h-5 w-5" />
               <span>{error || tc("error")}</span>
             </div>
@@ -403,12 +403,12 @@ export default function DashboardPage() {
         <VulnerabilityCard
           label={tv("critical")}
           count={summary.vulnerabilities.critical}
-          color="text-red-500"
+          color="text-red-700"
         />
         <VulnerabilityCard
           label={tv("high")}
           count={summary.vulnerabilities.high}
-          color="text-orange-500"
+          color="text-orange-700"
         />
         <VulnerabilityCard
           label={tv("medium")}

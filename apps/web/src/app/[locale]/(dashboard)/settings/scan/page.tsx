@@ -241,8 +241,8 @@ export default function ScanSettingsPage() {
                     </p>
                     <div className="space-y-2">
                         {[
-                            { key: 'notify_critical' as const, label: 'Critical', color: 'text-red-500' },
-                            { key: 'notify_high' as const, label: 'High', color: 'text-orange-500' },
+                            { key: 'notify_critical' as const, label: 'Critical', color: 'text-red-700' },
+                            { key: 'notify_high' as const, label: 'High', color: 'text-orange-700' },
                             { key: 'notify_medium' as const, label: 'Medium', color: 'text-yellow-700' },
                             { key: 'notify_low' as const, label: 'Low', color: 'text-green-700' },
                         ].map(({ key, label, color }) => (
@@ -315,7 +315,7 @@ export default function ScanSettingsPage() {
                                         </td>
                                         <td className="px-4 py-3 text-sm">
                                             {log.new_vulnerabilities > 0 ? (
-                                                <span className="text-orange-500 font-medium">
+                                                <span className="text-orange-700 font-medium">
                                                     {log.new_vulnerabilities}
                                                 </span>
                                             ) : (

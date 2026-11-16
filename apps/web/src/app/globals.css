@@ -160,10 +160,20 @@
     --secondary: 210 40% 96.1%;
     --secondary-foreground: 222.2 47.4% 11.2%;
     --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    /*
+      WCAG 1.4.3: the shadcn default (46.9%, #64748b) is 4.34:1 on --muted
+      (inactive tabs, key chips) and 4.32:1 on gray-100. 44% is 4.8:1 on
+      both and 5.3:1 on white. e2e/contrast.spec.ts measures it.
+    */
+    --muted-foreground: 215.4 16.3% 44%;
     --accent: 210 40% 96.1%;
     --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
+    /*
+      WCAG 1.4.3: was red-500 (0 84.2% 60.2%): 3.6:1 under
+      --destructive-foreground, and text-destructive on bg-destructive/10
+      (the error boxes) 3.3:1. Now red-700 (#b91c1c): 6.2:1 and 5.6:1.
+    */
+    --destructive: 0 73.7% 41.8%;
     --destructive-foreground: 210 40% 98%;
     --border: 214.3 31.8% 91.4%;
     --input: 214.3 31.8% 91.4%;

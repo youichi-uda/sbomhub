@@ -224,7 +224,7 @@ function DialogPanel({
             type="button"
             onClick={onClose}
             aria-label={closeLabel}
-            className="absolute right-4 top-4 text-gray-400 hover:text-gray-600"
+            className="absolute right-4 top-4 text-gray-500 hover:text-gray-700"
           >
             <X className="h-4 w-4" />
           </button>

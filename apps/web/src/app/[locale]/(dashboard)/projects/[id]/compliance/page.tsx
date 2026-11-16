@@ -66,7 +66,7 @@ function ScoreCircle({ score, maxScore }: { score: number; maxScore: number }) {
   const strokeDashoffset = circumference - (percentage / 100) * circumference;
 
   let color = "text-green-700";
-  if (percentage < 50) color = "text-red-500";
+  if (percentage < 50) color = "text-red-700";
   else if (percentage < 80) color = "text-yellow-700";
 
   return (
@@ -143,7 +143,7 @@ function CategoryCard({ category }: { category: ComplianceCategory }) {
     statusColor = "text-yellow-700";
   } else {
     statusIcon = <XCircle className="h-5 w-5 text-red-500" />;
-    statusColor = "text-red-500";
+    statusColor = "text-red-700";
   }
 
   return (
@@ -319,7 +319,7 @@ function ChecklistPhaseCard({
     statusColor = "text-yellow-700";
   } else {
     statusIcon = <XCircle className="h-5 w-5 text-red-500" />;
-    statusColor = "text-red-500";
+    statusColor = "text-red-700";
   }
 
   const phaseNumber =
@@ -637,7 +637,7 @@ export default function CompliancePage() {
       <div className="container mx-auto py-8">
         <Card>
           <CardContent className="pt-6">
-            <div className="flex items-center gap-2 text-red-500">
+            <div className="flex items-center gap-2 text-red-700">
               <AlertCircle className="h-5 w-5" />
               <span>{error || t("loadFailed")}</span>
             </div>

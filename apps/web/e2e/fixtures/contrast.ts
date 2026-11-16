@@ -1,0 +1,139 @@
+import type { Page } from '@playwright/test';
+
+// WCAG 1.4.3 (contrast, AA) measured on the rendered page.
+//
+// Every visible element with text of its own is checked: its computed colour
+// composited over its background against that background, needing 4.5:1
+// (3:1 from 24px, or 18.66px bold). The background is the first opaque one up
+// the tree, with translucent layers (bg-red-500/10) composited over it.
+//
+// Not checked, as WCAG 1.4.3 exempts them or the number would be a guess:
+//   - text of a disabled control (`:disabled`, inside a disabled fieldset,
+//     aria-disabled="true") — "part of an inactive user interface component";
+//   - text over a background image or gradient anywhere between it and its
+//     opaque background: no single background colour to measure against;
+//   - text inside an element with opacity < 1 below the opaque background is
+//     measured with that opacity folded into the text colour (the background
+//     is faded too, but toward what lies behind it, which the walk includes).
+
+export interface ContrastFailure {
+  text: string;
+  ratio: number;
+  need: number;
+  fg: string;
+  bg: string;
+  cls: string;
+}
+
+export async function lowContrast(page: Page): Promise<ContrastFailure[]> {
+  // A colour transition in flight (a tab button turning from filled to
+  // outline after the click) would be measured half-way. Wait for every
+  // finite animation / transition; spinners (infinite) are left running.
+  await page.evaluate(() =>
+    Promise.all(
+      document
+        .getAnimations()
+        .filter((a) => a.effect?.getComputedTiming().iterations !== Infinity)
+        .map((a) => a.finished.catch(() => undefined)),
+    ),
+  );
+  return page.evaluate(() => {
+    // Computed colours are rgb()/rgba() for the hex palette and hsl() tokens,
+    // but an opacity modifier on a colour with alpha (bg-slate-900/80) computes
+    // to oklab(). Anything that is not rgb() is converted by painting it on a
+    // canvas (sRGB), so no format can silently read as transparent.
+    const ctx = document.createElement('canvas').getContext('2d', { willReadFrequently: true })!;
+    const parse = (c: string): [number, number, number, number] => {
+      const m = c.match(/^rgba?\(([^)]+)\)$/);
+      if (m) {
+        const p = m[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+        return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1];
+      }
+      ctx.clearRect(0, 0, 1, 1);
+      ctx.fillStyle = '#000';
+      ctx.fillStyle = c;
+      if (ctx.fillStyle === '#000000' && !/^(#000|black|rgba?\(0,\s*0,\s*0)/.test(c)) {
+        throw new Error(`contrast: unparsed colour ${c}`);
+      }
+      ctx.fillRect(0, 0, 1, 1);
+      const d = ctx.getImageData(0, 0, 1, 1).data;
+      return [d[0], d[1], d[2], d[3] / 255];
+    };
+    const over = (top: number[], bottom: number[]) => {
+      const a = top[3];
+      return [0, 1, 2].map((i) => top[i] * a + bottom[i] * (1 - a)).concat(1);
+    };
+    const lum = (c: number[]) => {
+      const [r, g, b] = c.slice(0, 3).map((v) => {
+        const s = v / 255;
+        return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    // null: a background image / gradient is in the way.
+    const background = (el: Element): { bg: number[]; opacity: number; painter: Element | null } | null => {
+      const layers: number[][] = [];
+      let opacity = 1;
+      let painter: Element | null = null;
+      for (let a: Element | null = el; a; a = a.parentElement) {
+        const cs = getComputedStyle(a);
+        if (cs.backgroundImage && cs.backgroundImage !== 'none') return null;
+        const c = parse(cs.backgroundColor);
+        if (c[3] > 0) layers.push(c);
+        if (c[3] >= 1) {
+          painter = a;
+          break;
+        }
+        opacity *= Number(cs.opacity);
+      }
+      let bg = [255, 255, 255, 1];
+      for (const l of layers.reverse()) bg = over(l, bg);
+      return { bg, opacity, painter };
+    };
+    const classes = (el: Element, painter: Element | null): string => {
+      const out: string[] = [];
+      for (let a: Element | null = el; a; a = a.parentElement) {
+        const cls = typeof a.className === 'string' ? a.className : '';
+        if (/(?:^|\s)(?:text|bg)-/.test(cls)) out.push(cls);
+        if (a === painter) break;
+      }
+      return out.join(' | ');
+    };
+    const out: ContrastFailure[] = [];
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>('body *'))) {
+      const own = Array.from(el.childNodes)
+        .filter((n) => n.nodeType === Node.TEXT_NODE)
+        .map((n) => n.textContent ?? '')
+        .join('')
+        .trim();
+      if (!own) continue;
+      if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'OPTION'].includes(el.tagName)) continue;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height || el.closest('[hidden], .sr-only')) continue;
+      if (el.closest(':disabled, [aria-disabled="true"]')) continue;
+      const cs = getComputedStyle(el);
+      if (cs.visibility === 'hidden' || Number(cs.opacity) === 0) continue;
+      const found = background(el);
+      if (!found) continue;
+      const { bg, opacity, painter } = found;
+      const c = parse(cs.color);
+      const fg = over([c[0], c[1], c[2], c[3] * opacity], bg);
+      const [l1, l2] = [lum(fg), lum(bg)].sort((a, b) => b - a);
+      const ratio = (l1 + 0.05) / (l2 + 0.05);
+      const size = parseFloat(cs.fontSize);
+      const bold = Number(cs.fontWeight) >= 700;
+      const need = size >= 24 || (bold && size >= 18.66) ? 3 : 4.5;
+      if (ratio < need) {
+        out.push({
+          text: own.slice(0, 40),
+          ratio: Math.round(ratio * 100) / 100,
+          need,
+          fg: cs.color,
+          bg: `rgb(${bg.slice(0, 3).map(Math.round).join(', ')})`,
+          cls: classes(el, painter).slice(0, 160),
+        });
+      }
+    }
+    return out;
+  });
+}

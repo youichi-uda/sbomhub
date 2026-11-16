@@ -36,7 +36,7 @@ const statusConfig = {
   eos: {
     icon: Clock,
     variant: "secondary" as const,
-    className: "bg-orange-500 hover:bg-orange-600 text-white",
+    className: "bg-orange-500 hover:bg-orange-600 text-black",
   },
   unknown: {
     icon: HelpCircle,
@@ -108,7 +108,7 @@ export function EOLBadge({
               </div>
             )}
             {lts && (
-              <div className="flex items-center gap-1 text-sm text-blue-400">
+              <div className="flex items-center gap-1 text-sm text-blue-700">
                 <Shield className="h-3 w-3" />
                 {t("lts")}
               </div>
@@ -116,7 +116,7 @@ export function EOLBadge({
             {eolDateFormatted && (
               <div className="flex items-center gap-1 text-sm">
                 <Calendar className="h-3 w-3" />
-                <span className={isEolPast ? "text-red-400" : ""}>
+                <span className={isEolPast ? "text-red-700" : ""}>
                   {t("eolDate")}: {eolDateFormatted}
                   {isEolPast && ` (${t("past")})`}
                 </span>
@@ -125,7 +125,7 @@ export function EOLBadge({
             {eosDateFormatted && eosDate !== eolDate && (
               <div className="flex items-center gap-1 text-sm">
                 <Clock className="h-3 w-3" />
-                <span className={isEosPast ? "text-orange-400" : ""}>
+                <span className={isEosPast ? "text-orange-700" : ""}>
                   {t("eosDate")}: {eosDateFormatted}
                   {isEosPast && ` (${t("past")})`}
                 </span>
@@ -157,8 +157,8 @@ export function EOLIndicator({
 
   const colorClasses = {
     active: "text-green-700",
-    eol: "text-red-500",
-    eos: "text-orange-500",
+    eol: "text-red-700",
+    eos: "text-orange-700",
     unknown: "text-gray-500",
   };
 
@@ -173,7 +173,7 @@ export function EOLIndicator({
         </TooltipTrigger>
         <TooltipContent>
           <p>{t(`description.${status}`)}</p>
-          {lts && <p className="text-blue-400">{t("lts")}</p>}
+          {lts && <p className="text-blue-700">{t("lts")}</p>}
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -209,14 +209,14 @@ export function EOLSummaryCard({
         <p className="text-xs text-muted-foreground">{t("active")}</p>
       </div>
       <div className="space-y-1">
-        <div className="flex items-center justify-center gap-1 text-orange-500">
+        <div className="flex items-center justify-center gap-1 text-orange-700">
           <Clock className="h-4 w-4" />
           <span className="text-2xl font-bold">{eos}</span>
         </div>
         <p className="text-xs text-muted-foreground">{t("eos")}</p>
       </div>
       <div className="space-y-1">
-        <div className="flex items-center justify-center gap-1 text-red-500">
+        <div className="flex items-center justify-center gap-1 text-red-700">
           <AlertTriangle className="h-4 w-4" />
           <span className="text-2xl font-bold">{eol}</span>
         </div>

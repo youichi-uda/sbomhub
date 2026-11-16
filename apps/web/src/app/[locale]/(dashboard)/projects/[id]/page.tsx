@@ -1057,7 +1057,7 @@ export default function ProjectDetailPage() {
                           {vuln.epss_score != null ? (
                             <span
                               className={
-                                vuln.epss_score > 0.5 ? "text-red-500 font-bold" : ""
+                                vuln.epss_score > 0.5 ? "text-red-700 font-bold" : ""
                               }
                             >
                               {(vuln.epss_score * 100).toFixed(1)}%
@@ -1171,7 +1171,7 @@ export default function ProjectDetailPage() {
                       <Button
                         size="sm"
                         variant="ghost"
-                        className="text-red-500 hover:text-red-700"
+                        className="text-red-700 hover:text-red-800"
                         onClick={async () => {
                           if (confirm(tp("deleteVexConfirm"))) {
                             await api.projects.deleteVEXStatement(projectId, vex.id);
@@ -1305,7 +1305,7 @@ export default function ProjectDetailPage() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          className="text-red-500 hover:text-red-700"
+                          className="text-red-700 hover:text-red-800"
                           onClick={async () => {
                             if (confirm(tp("deleteLicenseConfirm"))) {
                               await api.projects.deleteLicensePolicy(projectId, policy.id);
@@ -1568,7 +1568,7 @@ export default function ProjectDetailPage() {
             )}
 
             {/* Key list — `.border.rounded-lg.p-3` per-row class and
-                an inline `Delete` button with `text-red-500` are pinned
+                an inline `Delete` button are pinned
                 in api-keys.spec.ts L139/L176. */}
             {apiKeysLoadFailed && (
               <LoadError
@@ -1611,7 +1611,7 @@ export default function ProjectDetailPage() {
                       <Button
                         size="sm"
                         variant="ghost"
-                        className="text-red-500 hover:text-red-700"
+                        className="text-red-700 hover:text-red-800"
                         onClick={() => handleDeleteApiKey(key.id)}
                       >
                         {tp("apiKeyDelete")}

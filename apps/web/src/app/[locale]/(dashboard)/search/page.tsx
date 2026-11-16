@@ -34,8 +34,8 @@ import { Search, AlertCircle, CheckCircle, XCircle, Loader2 } from "lucide-react
 
 function SeverityBadge({ severity }: { severity: string }) {
   const colors: Record<string, string> = {
-    CRITICAL: "bg-red-500 hover:bg-red-600",
-    HIGH: "bg-orange-500 hover:bg-orange-600",
+    CRITICAL: "bg-red-600 hover:bg-red-700",
+    HIGH: "bg-orange-500 text-black hover:bg-orange-600",
     MEDIUM: "bg-yellow-500 text-black hover:bg-yellow-600",
     LOW: "bg-green-700 hover:bg-green-800",
   };
@@ -87,14 +87,14 @@ function CVESearchResults({ result, locale }: { result: CVESearchResult; locale:
                 <div key={project.project_id} className="border rounded-lg p-4">
                   <Link
                     href={`/${locale}/projects/${project.project_id}`}
-                    className="font-medium text-blue-500 hover:underline wrap-anywhere"
+                    className="font-medium text-blue-600 hover:underline wrap-anywhere"
                   >
                     {project.project_name}
                   </Link>
                   <div className="mt-2 space-y-1">
                     {project.affected_components.map((comp) => (
                       <div key={comp.id} className="flex flex-wrap items-center gap-x-2 text-sm">
-                        <span className="text-red-500">●</span>
+                        <span className="text-red-700">●</span>
                         <span className="min-w-0 font-mono wrap-anywhere">{comp.name}@{comp.version}</span>
                         {comp.fixed_version && (
                           <span className="text-muted-foreground">
@@ -176,7 +176,7 @@ function ComponentSearchResults({ result, locale }: { result: ComponentSearchRes
                 <TableCell>
                   <Link
                     href={`/${locale}/projects/${match.project_id}`}
-                    className="text-blue-500 hover:underline"
+                    className="text-blue-600 hover:underline"
                   >
                     {match.project_name}
                   </Link>
@@ -341,7 +341,7 @@ export default function SearchPage() {
           {error && (
             <Card className="border-red-200" data-testid="empty-state">
               <CardContent className="pt-6">
-                <div className="flex items-center gap-2 text-red-500">
+                <div className="flex items-center gap-2 text-red-700">
                   <AlertCircle className="h-5 w-5" />
                   <span>{error}</span>
                 </div>
@@ -425,7 +425,7 @@ export default function SearchPage() {
           {error && (
             <Card className="border-red-200" data-testid="empty-state">
               <CardContent className="pt-6">
-                <div className="flex items-center gap-2 text-red-500">
+                <div className="flex items-center gap-2 text-red-700">
                   <AlertCircle className="h-5 w-5" />
                   <span>{error}</span>
                 </div>
