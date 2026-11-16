@@ -29,6 +29,7 @@ type fakeProvider struct {
 	err          error
 	inputTokens  int
 	outputTokens int
+	finishReason string
 }
 
 var _ llm.Provider = (*fakeProvider)(nil)
@@ -72,6 +73,7 @@ func (f *fakeProvider) Complete(_ context.Context, req llm.CompleteRequest) (*ll
 		InputTokens:  f.inputTokens,
 		OutputTokens: f.outputTokens,
 		Model:        f.model,
+		FinishReason: f.finishReason,
 	}, nil
 }
 

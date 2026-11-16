@@ -180,7 +180,9 @@ const FinishReasonUnrecognized = "unrecognized"
 // the error first never consume the partial answer as a draft; the response
 // is still returned so the llm_calls row records what came back (M74).
 // Truncation the provider itself reports keeps the provider's own value
-// ("length", "max_tokens", "MAX_TOKENS").
+// ("length", "max_tokens", "MAX_TOKENS"); Complete returns it with a nil
+// error, and the package function llm.Complete (which every consumer uses,
+// M75) turns it into ErrTruncatedResponse — see finish_check.go.
 const FinishReasonIncomplete = "incomplete"
 
 // ErrIncompleteResponse is wrapped by Complete when the provider's answer

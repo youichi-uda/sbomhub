@@ -315,7 +315,10 @@ func (s *Service) Generate(ctx context.Context, req Request) (*Response, error) 
 	defer cancel()
 
 	start := s.clock()
-	cresp, cerr := provider.Complete(llmCtx, llm.CompleteRequest{
+	// M75: llm.Complete reports a provider-side cut (token limit), filter
+	// stop or other abnormal end as an error with the response; it takes
+	// the same path as ErrIncompleteResponse below.
+	cresp, cerr := llm.Complete(llmCtx, provider, llm.CompleteRequest{
 		System: systemPrompt,
 		Messages: []llm.Message{
 			{Role: llm.RoleUser, Content: userPrompt},
@@ -330,7 +333,8 @@ func (s *Service) Generate(ctx context.Context, req Request) (*Response, error) 
 	duration := s.clock().Sub(start)
 
 	if cerr != nil {
-		redacted := llm.RedactProviderError(cerr).Error()
+		redactedErr := llm.RedactProviderError(cerr)
+		redacted := redactedErr.Error()
 		var callID uuid.UUID
 		var llmErr error
 		if cresp != nil {
@@ -347,7 +351,10 @@ func (s *Service) Generate(ctx context.Context, req Request) (*Response, error) 
 		if auditErr := s.writeFailedAudit(ctx, req, callID, diffResp, redacted); auditErr != nil {
 			return nil, auditErr
 		}
-		return nil, fmt.Errorf("llm complete: %s", redacted)
+		// %w keeps llm.ErrIncompleteResponse / ErrTruncatedResponse /
+		// ErrFilteredResponse visible to errors.Is (the redacted error
+		// unwraps to the original chain); the text is unchanged.
+		return nil, fmt.Errorf("llm complete: %w", redactedErr)
 	}
 
 	// 5. parse JSON response.

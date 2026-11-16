@@ -142,7 +142,11 @@ type CaseResult struct {
 	OutputTokens  int     `json:"output_tokens"`
 	LatencyMs     int64   `json:"latency_ms"`
 	CostUSD       float64 `json:"cost_usd"`
-	Error         string  `json:"error,omitempty"`
+	// FinishReason is the provider's finish reason (M75), also on an
+	// error row when the provider answered but the answer was cut,
+	// filtered or unfinished.
+	FinishReason string `json:"finish_reason,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 // runOptions wires the F19 bounded-ctx + concurrency cap into runBench.
@@ -300,9 +304,18 @@ func runOne(
 	defer cancel()
 
 	start := clock()
-	resp, err := p.provider.Complete(ctx, req)
+	// M75: llm.Complete, like the production triage runner, turns an
+	// answer the provider reports as cut / filtered / unfinished into an
+	// error, so the bench never scores a cut answer as a verdict.
+	resp, err := llm.Complete(ctx, p.provider, req)
 	res.LatencyMs = clock().Sub(start).Milliseconds()
 
+	if resp != nil {
+		res.InputTokens = resp.InputTokens
+		res.OutputTokens = resp.OutputTokens
+		res.CostUSD = computeCost(p.name, p.provider.Model(), resp.InputTokens, resp.OutputTokens)
+		res.FinishReason = resp.FinishReason
+	}
 	if err != nil {
 		// F13: scrub provider transport errors before persisting /
 		// echoing in the JSONL row.
@@ -315,10 +328,6 @@ func runOne(
 		res.Error = "nil response from provider"
 		return res
 	}
-	res.InputTokens = resp.InputTokens
-	res.OutputTokens = resp.OutputTokens
-	res.CostUSD = computeCost(p.name, p.provider.Model(), resp.InputTokens, resp.OutputTokens)
-
 	parsed, _ := triage.ParseLLMResponse(resp.Content)
 	if parsed == nil {
 		res.Error = "parsed decision was nil"
@@ -436,6 +445,9 @@ func aggregate(results []CaseResult) []ProviderSummary {
 			if r.Error != "" {
 				s.Errors++
 				latSum += float64(r.LatencyMs)
+				// An answer rejected after it came back (cut, filtered,
+				// unparsable) was still paid for (M75).
+				s.TotalCostUSD += r.CostUSD
 				continue
 			}
 			if r.GotState == r.ExpectedState {

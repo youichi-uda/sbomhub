@@ -615,7 +615,11 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	llmCtx, cancel := context.WithTimeout(ctx, r.llmTimeout)
 	defer cancel()
 	llmStart := r.clock()
-	resp, llmErr := provider.Complete(llmCtx, completeReq)
+	// M75: llm.Complete turns a provider-reported cut (token limit),
+	// filter stop or other abnormal end into an error with the response,
+	// so the partial answer is recorded in llm_calls below and never
+	// rendered as a draft.
+	resp, llmErr := llm.Complete(llmCtx, provider, completeReq)
 	llmDuration := r.clock().Sub(llmStart)
 
 	// Build the llm_calls record up-front so success and failure paths

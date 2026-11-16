@@ -1137,8 +1137,13 @@ func (r *Runner) resolveAuthoritativeCVEID(ctx context.Context, vulnID uuid.UUID
 // provider per request without touching the rest of the Run() body. The
 // odd name avoids collision with the `provider` interface field that
 // used to live on the receiver.
+//
+// M75: it goes through llm.Complete, so an answer the provider reports as
+// cut at its token limit, filtered, or otherwise not normally ended comes
+// back as an error with the response; Run records it in llm_calls and saves
+// no draft, exactly like any other provider error.
 func (r *Runner) provider_Complete(ctx context.Context, p llm.Provider, req llm.CompleteRequest) (*llm.CompleteResponse, error) {
-	return p.Complete(ctx, req)
+	return llm.Complete(ctx, p, req)
 }
 
 // runAIDisabled implements the F4 AI-disabled draft path. For every
