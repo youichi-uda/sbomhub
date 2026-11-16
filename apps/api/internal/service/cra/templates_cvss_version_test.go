@@ -31,7 +31,7 @@ func TestRender_CVSSVersionNamedWithScore(t *testing.T) {
 
 			// Unrecognised or absent version: the score line is unchanged
 			// and no version is invented.
-			for _, v := range []string{"", "9.9", "*x*"} {
+			for _, v := range []string{"", "9.9", "*x*", "4", "2", " 3.1"} {
 				data.CVSSVersion = v
 				out, err := Render(rt, lang, data)
 				if err != nil {

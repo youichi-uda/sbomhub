@@ -36,7 +36,11 @@ func TestNotifCVSSLabel(t *testing.T) {
 		{"3.0", strPtr("3.0"), "CVSS v3.0"},
 		{"2.0", strPtr("2.0"), "CVSS v2.0"},
 		{"4.0", strPtr("4.0"), "CVSS v4.0"},
-		{"padded", strPtr(" 3.1 "), "CVSS v3.1"},
+		// Only the exact stored spellings are printed: the feed parser's
+		// aliases and padding are not (Codex R1 Low).
+		{"padded", strPtr(" 3.1 "), "CVSS"},
+		{"alias 4", strPtr("4"), "CVSS"},
+		{"alias 2", strPtr("2"), "CVSS"},
 		// A value the feed layer would never store is not echoed into a
 		// Slack mrkdwn / HTML body; the label falls back to bare CVSS.
 		{"garbage", strPtr("*bold* <b>"), "CVSS"},

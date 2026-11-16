@@ -181,7 +181,16 @@ var templateFuncs = template.FuncMap{
 	"add1": func(i int) int { return i + 1 },
 	// cvssVersion canonicalises CRATemplateData.CVSSVersion; "" when unknown
 	// or unrecognised, so a template never prints a guessed version (M74).
-	"cvssVersion": func(v string) string { return string(cvss.ParseVersion(v)) },
+	// Exact stored spellings only — not cvss.ParseVersion's "4" / "2" /
+	// padded aliases (Codex R1 Low).
+	"cvssVersion": func(v string) string {
+		switch cv := cvss.Version(v); cv {
+		case cvss.V31, cvss.V30, cvss.V40, cvss.V2:
+			return string(cv)
+		default:
+			return ""
+		}
+	},
 }
 
 // templateCache holds the parsed templates keyed by "<reportType>_<lang>".

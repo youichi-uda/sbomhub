@@ -23,7 +23,6 @@ import (
 	"github.com/johnfercher/maroto/v2/pkg/fontrepository"
 	"github.com/johnfercher/maroto/v2/pkg/props"
 	"github.com/sbomhub/sbomhub/internal/assets"
-	"github.com/sbomhub/sbomhub/internal/cvss"
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -815,10 +814,7 @@ func reportCVSSLabel(version *string) string {
 // reportCVSSVersionCell is the Excel Top Risks "CVSS version" cell: the
 // canonical version, or "" when unknown — never a guessed version (M74).
 func reportCVSSVersionCell(version *string) string {
-	if version == nil {
-		return ""
-	}
-	return string(cvss.ParseVersion(*version))
+	return canonicalCVSSVersion(version)
 }
 
 // executiveTopRiskText is the value of one executive-report Top Risks line.

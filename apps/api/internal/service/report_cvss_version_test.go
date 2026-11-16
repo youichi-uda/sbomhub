@@ -26,6 +26,14 @@ func TestReportCVSSLabel(t *testing.T) {
 	if got := reportCVSSLabel(strPtr("v9")); got != "CVSS" {
 		t.Errorf("reportCVSSLabel(unrecognised) = %q, want bare CVSS", got)
 	}
+	for _, alias := range []string{"4", "2", " 3.1", "3.1 "} {
+		if got := reportCVSSVersionCell(strPtr(alias)); got != "" {
+			t.Errorf("reportCVSSVersionCell(%q) = %q, want empty (not a stored spelling)", alias, got)
+		}
+	}
+	if got := reportCVSSVersionCell(strPtr("4.0")); got != "4.0" {
+		t.Errorf("reportCVSSVersionCell(4.0) = %q", got)
+	}
 }
 
 func TestReportTopRiskLines_NameCVSSVersion(t *testing.T) {

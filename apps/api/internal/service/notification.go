@@ -300,7 +300,7 @@ func notifCVSSText(score *float64) string {
 // notifCVSSLabel is the label printed in front of a notification's CVSS
 // value: "CVSS v3.1" when the version of the assessment the score (and
 // severity) came from is known, else the bare "CVSS" the notifications have
-// always printed (M74). Only a canonical version (cvss.ParseVersion) is
+// always printed (M74). Only a canonical version (canonicalCVSSVersion) is
 // printed, so a stray value never reaches a Slack mrkdwn / HTML body and an
 // unknown version is never guessed.
 func notifCVSSLabel(version *string) string {
@@ -309,14 +309,28 @@ func notifCVSSLabel(version *string) string {
 
 // cvssVersionLabel is shared by the notification and report renderers.
 func cvssVersionLabel(version *string) string {
-	if version == nil {
-		return "CVSS"
-	}
-	v := cvss.ParseVersion(*version)
+	v := canonicalCVSSVersion(version)
 	if v == "" {
 		return "CVSS"
 	}
-	return "CVSS v" + string(v)
+	return "CVSS v" + v
+}
+
+// canonicalCVSSVersion returns *version only when it is exactly one of the
+// values vulnerabilities.cvss_version holds ("3.1", "3.0", "4.0", "2.0"),
+// else "". Deliberately stricter than cvss.ParseVersion (a feed parser that
+// also accepts "4", "2" and padding): presentation only echoes stored,
+// canonical values (Codex R1 Low).
+func canonicalCVSSVersion(version *string) string {
+	if version == nil {
+		return ""
+	}
+	switch v := cvss.Version(*version); v {
+	case cvss.V31, cvss.V30, cvss.V40, cvss.V2:
+		return string(v)
+	default:
+		return ""
+	}
 }
 
 // notifEPSSText renders a notification's EPSS for Slack / Discord / email.
