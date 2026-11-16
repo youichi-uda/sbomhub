@@ -943,7 +943,9 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	// the counts were taken. Then this poll answers running; the next one
 	// gets a consistent pair.
 	if h.scanTracker != nil && (state == service.ScanStateCompleted || state == service.ScanStateFailed) {
-		if s2, _, _, v2 := h.scanTracker.GetDetailVersion(sbomID); s2 != state || v2 != version {
+		// The scan run too (Codex scangen R1 Low): the version is born:rev,
+		// and a recreated key could in principle repeat both.
+		if d2 := h.scanTracker.GetStatus(sbomID); d2.State != state || d2.Version != version || d2.Run != scanRun {
 			state, errMsg, reasons, skipped = service.ScanStateRunning, "", nil, nil
 			checked, checkedKnown = nil, false
 			// Something happened meanwhile: the first read's scan run may

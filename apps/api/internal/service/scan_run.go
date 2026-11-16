@@ -30,8 +30,18 @@ import (
 //     it until the next group this version starts.
 //
 // So two answers that carry the SAME scan_run are about the same scan: no
-// activity began on the SBOM between them. Different values, or either one
-// absent, prove nothing either way (a client then decides as it did before).
+// activity RECORDED IN THE STATUS began on the SBOM between them. Different
+// values, or either one absent, prove nothing either way (a client then
+// decides as it did before).
+//
+// What it cannot see is what the status itself cannot see (Codex scangen R1):
+//   - a run whose process cannot reach Redis (its Begin did not land within
+//     the wait; circuit open): other replicas keep answering the previous
+//     state, and its scan run, until that process's writes land (its Begin
+//     then starts or joins a group as usual, normally within one heartbeat);
+//   - several API processes WITHOUT Redis share nothing: each answers from
+//     its own memory, scan run included (the pre-M72 single-process mode).
+//     Run one API process, or use Redis, when scan-status is relied on.
 //
 // The name: not "generation", which the tracker already uses for ONE run
 // (Begin's gen) and which suggests a number to compare by size; not
