@@ -68,6 +68,12 @@ const ScanStatusSchema = z.looseObject({
   // consult because the operator switched them off, e.g. ["jvn"]. Omitted
   // when nothing was skipped, and by backends that predate the setting.
   skipped_sources: z.array(z.string()).optional(),
+  // apps/api (additive, 2026-11): the sources the scan actually checked. On
+  // a terminal status that reported its coverage it is always present ([]
+  // when nothing was checked, e.g. offline mode); absent while running, from
+  // a scan recorded by an older replica, and from older backends — absent
+  // means "not known", never "none".
+  checked_sources: z.array(z.string()).optional(),
 });
 
 export type SbomSummary = z.infer<typeof SbomSummarySchema>;
@@ -137,6 +143,12 @@ type ScanProbe = {
    * Empty when none were, or when the state could not be read.
    */
   skipped: string[];
+  /**
+   * The sources this reading says the scan checked (sorted, de-duplicated,
+   * never one in `skipped`). Null when the reading did not say (the field
+   * was absent) or the state could not be read.
+   */
+  checked: string[] | null;
 };
 
 /**
@@ -151,16 +163,42 @@ type ScanProbe = {
  * two readings disagree (they then also make `counts_final` false), never
  * under-state one that was read.
  */
+/**
+ * `checked_sources` names the sources the scan actually checked (apps/api
+ * scan-status `checked_sources`): sorted, de-duplicated, never one of
+ * `skipped_sources`. Null when the backend did not say — an older backend,
+ * a scan recorded by an older replica, a non-terminal state, or a state that
+ * could not be read — which is "not known", never "none". From two readings
+ * it is their INTERSECTION (null if either said nothing), so it can only
+ * under-state what was checked, never over-state it. A source in neither list
+ * failed, or its coverage is unknown: the counts are not complete for it.
+ */
 export type ScanReport = {
   scan_state: string;
   counts_final: boolean;
   scanned_sbom_id: string | null;
   skipped_sources: string[];
+  checked_sources: string[] | null;
 };
 
 /** Sorted, de-duplicated union of skipped-source lists. */
 function skippedUnion(...lists: string[][]): string[] {
   return [...new Set(lists.flat())].sort();
+}
+
+/**
+ * Sorted, de-duplicated intersection of checked-source lists, without any
+ * skipped source. Null when any list is null (that reading did not say).
+ */
+function checkedIntersection(
+  skipped: string[],
+  ...lists: (string[] | null)[]
+): string[] | null {
+  if (lists.some((l) => l === null)) return null;
+  const [first, ...rest] = lists as string[][];
+  return [...new Set(first)]
+    .filter((s) => rest.every((l) => l.includes(s)) && !skipped.includes(s))
+    .sort();
 }
 
 // GET /mcp/projects/:id/vulnerabilities caps `?limit=` at 500 and
@@ -598,6 +636,7 @@ private async readScanState(
     sbomId: null,
     counts: null,
     skipped: [],
+    checked: null,
   };
 
   try {
@@ -630,6 +669,13 @@ private async readScanState(
         )
       ),
       skipped: skippedUnion(status.skipped_sources ?? []),
+      checked:
+        status.checked_sources === undefined
+          ? null
+          : checkedIntersection(
+              skippedUnion(status.skipped_sources ?? []),
+              status.checked_sources
+            ),
     };
   } catch {
     return unreadable;
@@ -756,11 +802,18 @@ private async probeScanState(
       counts_final: false,
       scanned_sbom_id: before.sbomId,
       skipped_sources: before.skipped,
+      checked_sources: before.checked,
     };
   }
 
   const after = await this.readScanState(projectId, signal);
   const skipped_sources = skippedUnion(before.skipped, after.skipped);
+  // Both readings must say a source was checked (an unreadable second
+  // reading says nothing, so the first one's claim is all there is).
+  const checked_sources =
+    after.state === SCAN_STATE_UNAVAILABLE
+      ? checkedIntersection(skipped_sources, before.checked)
+      : checkedIntersection(skipped_sources, before.checked, after.checked);
   if (after.state === SCAN_STATE_UNAVAILABLE) {
     // The walk began on a finished scan, but whether it still is cannot be
     // read — which is not evidence that it is.
@@ -769,16 +822,19 @@ private async probeScanState(
       counts_final: false,
       scanned_sbom_id: before.sbomId,
       skipped_sources,
+      checked_sources,
     };
   }
 
-  // The skipped sources are compared too: the same summary from a scan that
-  // skipped a different set of sources is a different scan's answer.
+  // The skipped and checked sources are compared too: the same summary from
+  // a scan that covered a different set of sources is a different scan's
+  // answer.
   const settled =
     after.state === SCAN_STATE_FINAL &&
     after.sbomId === before.sbomId &&
     after.counts === before.counts &&
-    after.skipped.join(",") === before.skipped.join(",");
+    after.skipped.join(",") === before.skipped.join(",") &&
+    JSON.stringify(after.checked) === JSON.stringify(before.checked);
 
   if (!settled) {
     return {
@@ -789,6 +845,7 @@ private async probeScanState(
       // were answered somewhere in between.
       scanned_sbom_id: after.sbomId === before.sbomId ? before.sbomId : null,
       skipped_sources,
+      checked_sources,
     };
   }
 
@@ -804,6 +861,7 @@ private async probeScanState(
     counts_final: walkCovered,
     scanned_sbom_id: walkCovered ? before.sbomId : null,
     skipped_sources,
+    checked_sources,
   };
 }
 }

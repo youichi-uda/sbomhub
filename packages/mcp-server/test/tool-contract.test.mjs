@@ -568,6 +568,19 @@ test("a tool reporting scan counts reports whether the scan had finished", () =>
       /skipped_sources/,
       `${tool} carries skipped_sources but never names it where the model reads`
     );
+    // Coverage (2026-11): the sources actually checked travel next to the
+    // skipped ones, and the model is told to read them.
+    assert.equal(
+      keys.has("checked_sources"),
+      true,
+      `${tool} reports counts_final but not checked_sources, so a completed scan that ` +
+        "checked nothing (offline mode) reads as a full pass"
+    );
+    assert.match(
+      description,
+      /checked_sources/,
+      `${tool} carries checked_sources but never names it where the model reads`
+    );
     // A skip stops new lookups; it does not remove findings an earlier scan
     // of the same SBOM made with that source (Codex SBOMHUB_JVN R3, High).
     // Telling the model the counts EXCLUDE the source would make it discount

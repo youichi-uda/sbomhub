@@ -100,7 +100,12 @@ function errorResult(err: unknown): CallToolResult {
 //                       counts may still hold what an EARLIER scan found with
 //                       such a source (a skip adds nothing and removes
 //                       nothing), so for that source they are neither current
-//                       nor complete, final or not.
+//                       nor complete, final or not. Since 2026-11 it also
+//                       names sources offline mode or a `?sources=` subset
+//                       left out.
+//   checked_sources     sources the scan actually checked; null when the
+//                       backend did not say (unknown, not "none"). A source
+//                       in neither list failed or is unknown.
 //
 // Stated once and shared, for the reason SCOPE_NOTE is: a per-tool rewording is
 // a per-tool opportunity to describe a payload the tool does not produce. Every
@@ -118,10 +123,13 @@ const SCAN_STATE_NOTE =
   "scan_state がどのSBOMについての状態かは scanned_sbom_id " +
   "(counts_final=true のときはその件数の出所でもある。特定できないときは null)。" +
   "counts_final=false のときの0件や極端に少ない件数を「脆弱性なし」と断定しないこと。" +
-  "skipped_sources に挙がった情報源 (例: jvn) は運用者の設定 (SBOMHUB_JVN=off) で" +
-  "このスキャンでは照会されていない。件数にはその情報源が以前のスキャンで見つけた検出が" +
+  "skipped_sources に挙がった情報源 (例: jvn) は運用者の設定 (SBOMHUB_JVN=off、オフラインモード) や" +
+  "スキャン対象の指定でこのスキャンでは照会されていない。件数にはその情報源が以前のスキャンで見つけた検出が" +
   "残っていることがあるが、その情報源については最新でも網羅的でもない (counts_final=true でも同じ)。" +
-  "空でないときは、その情報源について「脆弱性なし」と断定しないこと。";
+  "空でないときは、その情報源について「脆弱性なし」と断定しないこと。" +
+  "checked_sources は実際に照会できた情報源 (例: [\"nvd\",\"jvn\",\"distro\"])。" +
+  "null はサーバーが報告しなかった (不明) ことを表し、「照会なし」ではない。" +
+  "checked_sources に無い情報源については、counts_final=true でも網羅的な結果として扱わず、「脆弱性なし」と断定しないこと。";
 
 // The per-project tools all take this. The refusal a project-scoped key gets
 // for someone ELSE's project is stated on the argument that causes it, because

@@ -174,7 +174,7 @@ const ok = (body, headers) => ({ status: 200, body, headers });
 // client compares across the walk to notice a scan that moved.
 export const scanStatusBody = (
   status,
-  { total = 0, sbomId = SBOM_NEWEST, buckets = {}, skipped = [] } = {}
+  { total = 0, sbomId = SBOM_NEWEST, buckets = {}, skipped = [], checked } = {}
 ) => ({
   status,
   sbom_id: sbomId,
@@ -183,6 +183,10 @@ export const scanStatusBody = (
   // when the scan skipped a source the operator switched off — omitted, as
   // the handler omits it, when nothing was skipped.
   ...(skipped.length > 0 ? { skipped_sources: skipped } : {}),
+  // apps/api scan-status `checked_sources` (2026-11): present on a terminal
+  // status that reported coverage (possibly []), absent otherwise and from
+  // older backends. `checked` undefined -> absent.
+  ...(checked !== undefined ? { checked_sources: checked } : {}),
   // The client compares this WHOLE object across the walk, not just `total`: a
   // vulnerability relabelled LOW -> CRITICAL mid-walk leaves the total untouched
   // while making by_severity and any severity filter stale (Codex R4, High).
@@ -261,6 +265,7 @@ export const scanProbeChanging = (first, second) => {
           sbomId: asked,
           buckets: which.buckets ?? {},
           skipped: which.skipped ?? [],
+          checked: which.checked,
         })
       );
     },
@@ -597,6 +602,99 @@ export const CONTRACT_CASES = [
       // Nothing skipped: the field is present and empty, never absent, so
       // "no source was skipped" is stated rather than implied.
       assert.deepEqual(payload.skipped_sources, []);
+      // The backend did not report coverage (no checked_sources): unknown,
+      // stated as null — never [] ("checked nothing") nor a guessed list.
+      assert.equal(payload.checked_sources, null);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "completed scan that checked every source reports them, sorted",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("completed", { total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro", "nvd"] }),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.counts_final, true);
+      assert.deepEqual(payload.checked_sources, ["distro", "jvn", "nvd"]);
+      assert.deepEqual(payload.skipped_sources, []);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "offline scan: completed, checked_sources [] and every source skipped",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("completed", {
+        total: VULNS.length, buckets: bucketsOf(VULNS), checked: [], skipped: ["nvd", "jvn", "distro"],
+      }),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "completed");
+      assert.equal(payload.counts_final, true);
+      assert.deepEqual(payload.checked_sources, []);
+      assert.deepEqual(payload.skipped_sources, ["distro", "jvn", "nvd"]);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "a source both checked and skipped reads skipped only",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("completed", {
+        total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn"], skipped: ["jvn"],
+      }),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.deepEqual(payload.checked_sources, ["nvd"]);
+      assert.deepEqual(payload.skipped_sources, ["jvn"]);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "checked sources moving between the two probes is a change; only what both said is checked",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbeChanging(
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"] },
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "distro"] }
+      ),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "changed");
+      assert.equal(payload.counts_final, false);
+      assert.deepEqual(payload.checked_sources, ["distro", "nvd"]);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "one probe without checked_sources makes the coverage unknown (null)",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbeChanging(
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"] },
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS) }
+      ),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "changed");
+      assert.equal(payload.counts_final, false);
+      assert.equal(payload.checked_sources, null);
     },
   },
 
