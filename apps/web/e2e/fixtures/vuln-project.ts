@@ -12,7 +12,7 @@
 // Every helper here FAILS (via expect) when its precondition is not met.
 // A spec that gets a project from here can assert on its vulnerabilities
 // unconditionally — there is no "no vulns, so skip" branch any more.
-import { expect, type APIRequestContext } from '@playwright/test';
+import { expect, type APIRequestContext, type Page } from '@playwright/test';
 
 export const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
@@ -210,4 +210,32 @@ export async function createVulnerableProject(
             return v;
         },
     };
+}
+
+/**
+ * The hermetic stack runs SBOMHUB_OFFLINE=true, so every real scan reports
+ * that it checked nothing (checked_sources [], skipped_sources nvd / jvn /
+ * distro — UPGRADE §31) and the project page qualifies the vulnerability
+ * count ("4 · partial"). Specs that are not about scan coverage call this
+ * BEFORE page.goto: every settled scan-status answer then reports full
+ * coverage, so the page shows the bare count as it would after an online
+ * scan. Scan coverage itself is tested in scan-status.spec.ts.
+ */
+export async function reportFullScanCoverage(page: Page): Promise<void> {
+    await page.route(
+        (url) => /^\/api\/v1\/projects\/[^/]+\/sboms\/[^/]+\/scan-status$/.test(url.pathname),
+        async (route) => {
+            try {
+                const res = await route.fetch();
+                const body = await res.json();
+                if (body && (body.status === 'completed' || body.status === 'failed')) {
+                    delete body.skipped_sources;
+                    body.checked_sources = ['nvd', 'jvn', 'distro'];
+                }
+                await route.fulfill({ response: res, json: body });
+            } catch {
+                // the page closed while the request was in flight
+            }
+        },
+    );
 }

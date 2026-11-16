@@ -8,6 +8,7 @@ import {
     deleteProject,
     uniqueName,
     type VulnerableProject,
+    reportFullScanCoverage,
 } from './fixtures/vuln-project';
 
 // Every test that needs vulnerabilities / statements creates its own
@@ -99,8 +100,10 @@ test.describe('VEX Statement Management', () => {
         // Fresh project per test: these tests create / delete statements.
         let project: VulnerableProject;
 
-        test.beforeEach(async ({ request }) => {
+        test.beforeEach(async ({ page, request }) => {
             project = await createVulnerableProject(request, 'VEX Statements Project');
+            // The bare tab count openVexForm clicks (offline stack: §31).
+            await reportFullScanCoverage(page);
         });
 
         test.afterEach(async ({ request }) => {

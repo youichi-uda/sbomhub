@@ -7,6 +7,7 @@ import {
     deleteProject,
     API_BASE_URL,
     FIXTURE_CVES,
+    reportFullScanCoverage,
     uniqueName,
     uploadSbom,
     vulnerableSbom,
@@ -24,14 +25,37 @@ import {
 // The hermetic stack runs SBOMHUB_OFFLINE=true, where a real scan completes
 // at once, so the other states are produced by rewriting the real
 // scan-status answer (route.fetch keeps the API's own CORS headers).
+//
+// Coverage (UPGRADE §31): offline, every real terminal answer reads
+// checked_sources [] and skipped_sources ["nvd","jvn","distro"]. Tests about
+// other things see full coverage instead: every test starts with
+// reportFullScanCoverage (below), and the answers a test mocks itself go
+// through withCoverage. The coverage tests set both lists themselves, and one
+// test removes the route to see the real offline answer.
 
 type ScanBody = {
     status: string;
     error?: string;
     reasons?: string[];
     skipped_sources?: string[];
+    checked_sources?: string[];
     vulnerabilities?: { total: number };
 };
+
+const ALL_SOURCES = ['nvd', 'jvn', 'distro'];
+
+/**
+ * The real answer with its offline coverage replaced: full coverage
+ * (checked nvd, jvn, distro; nothing skipped) unless `b` sets the lists. A
+ * key present with the value undefined drops it (absent checked_sources =
+ * coverage not reported).
+ */
+function withCoverage(real: Record<string, unknown>, b: Record<string, unknown>) {
+    const rest = { ...real };
+    delete rest.checked_sources;
+    delete rest.skipped_sources;
+    return { ...rest, checked_sources: ALL_SOURCES, ...b };
+}
 
 /** Answers every scan-status poll of the project with `body()` (read per request). */
 async function mockScanStatus(page: Page, projectId: string, body: () => ScanBody) {
@@ -43,7 +67,7 @@ async function mockScanStatus(page: Page, projectId: string, body: () => ScanBod
             const real = await res.json();
             const b = body();
             polls.push(b.status);
-            await route.fulfill({ response: res, json: { ...real, ...b } });
+            await route.fulfill({ response: res, json: withCoverage(real, b) });
         },
     );
     return polls;
@@ -63,6 +87,10 @@ const tabText = (count: number | null, qualifier: string | null) =>
 const vulnTab = (page: Page) => page.getByRole('button', { name: new RegExp(`^${en.Vulnerabilities.title} \\(`) });
 const notice = (page: Page) => page.getByTestId('scan-status-notice');
 const empty = (page: Page) => page.getByTestId('vulnerabilities-empty');
+
+test.beforeEach(async ({ page }) => {
+    await reportFullScanCoverage(page);
+});
 
 test.describe('project page: scan status of the latest SBOM', () => {
     let clean: { id: string } | undefined;
@@ -203,11 +231,18 @@ test.describe('project page: scan status of the latest SBOM', () => {
     });
 
     test('completed with skipped_sources: a persistent coverage notice, also at the empty state', async ({ page }) => {
-        await mockScanStatus(page, clean!.id, () => ({ status: 'completed', skipped_sources: ['jvn'] }));
+        // The scheduled scan's shape (§31): JVN skipped, NVD + distro checked.
+        await mockScanStatus(page, clean!.id, () => ({ status: 'completed', skipped_sources: ['jvn'], checked_sources: ['nvd', 'distro'] }));
         await page.goto(`/en/projects/${clean!.id}`);
         const coverage = page.getByTestId('scan-coverage-notice');
         await expect(coverage).toHaveAttribute('role', 'status');
+        await expect(coverage).toHaveAttribute('data-coverage', 'partial');
         await expect(coverage).toContainText(en.ScanStatus.skippedBody.replace('{sources}', 'JVN'));
+        await expect(coverage).toContainText(
+            en.ScanStatus.checkedList.replace('{sources}', `NVD, ${en.ScanStatus.sourceDistro}`),
+        );
+        // Cause-neutral: the possible causes are listed, none is asserted.
+        await expect(coverage).toContainText(en.ScanStatus.skippedCauses);
         await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountPartial));
         await vulnTab(page).click();
         await expect(empty(page)).toHaveText(en.ScanStatus.emptyPartial.replace('{sources}', 'JVN'));
@@ -218,17 +253,107 @@ test.describe('project page: scan status of the latest SBOM', () => {
     });
 
     // Codex R1 Critical: "completed" does not prove every source / component
-    // was looked up (this very stack is SBOMHUB_OFFLINE=true and completes
-    // with nothing queried), so even then the page does not say a bare
-    // "No vulnerabilities found.".
-    test('completed (the real API, nothing mocked): a message scoped to what the scan could look up', async ({ page }) => {
+    // was looked up. This very stack is SBOMHUB_OFFLINE=true: since §31 the
+    // API says so (checked [], every source skipped), and the page shows it.
+    test('completed offline (the real API, nothing mocked): nothing was checked, never a clean result', async ({ page }) => {
+        await page.unrouteAll(); // the real answer, not reportFullScanCoverage's
+        await page.goto(`/en/projects/${clean!.id}`);
+        await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountPartial));
+        const coverage = page.getByTestId('scan-coverage-notice');
+        await expect(coverage).toHaveAttribute('data-coverage', 'partial');
+        await expect(coverage.getByTestId('scan-coverage-not-checked')).toHaveText(
+            en.ScanStatus.skippedBody.replace('{sources}', `NVD, JVN, ${en.ScanStatus.sourceDistro}`),
+        );
+        await expect(coverage.getByTestId('scan-coverage-checked')).toHaveText(en.ScanStatus.checkedNone);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveAttribute('data-empty-state', 'emptyPartial');
+        await expect(page.getByText(en.ProjectDetail.noVulnerabilities, { exact: true })).toHaveCount(0);
+        await expect(notice(page)).toHaveCount(0);
+    });
+
+    // UPGRADE §31: full coverage is provable — completed, checked nvd + jvn +
+    // distro, nothing skipped. Only then: no coverage notice, a bare count and
+    // an empty state that names the checked sources (still not the bare
+    // "No vulnerabilities found.").
+    test('completed with full coverage: bare count, no coverage notice, the sources named at the empty state', async ({ page }) => {
+        await mockScanStatus(page, clean!.id, () => ({ status: 'completed', checked_sources: ['nvd', 'jvn', 'distro'] }));
         await page.goto(`/en/projects/${clean!.id}`);
         await expect(vulnTab(page)).toHaveText(tabText(0, null));
         await vulnTab(page).click();
         await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
+        await expect(empty(page)).toContainText('NVD, JVN and Linux distro data');
         await expect(page.getByText(en.ProjectDetail.noVulnerabilities, { exact: true })).toHaveCount(0);
         await expect(notice(page)).toHaveCount(0);
         await expect(page.getByTestId('scan-coverage-notice')).toHaveCount(0);
+    });
+
+    // Integration review (Medium, §31): checked_sources absent (an older
+    // replica, the scan status lost in Redis) is "coverage unknown" — it
+    // used to render a bare count with no notice.
+    test('completed without checked_sources: coverage unknown, never a bare count', async ({ page }) => {
+        await mockScanStatus(page, clean!.id, () => ({ status: 'completed', checked_sources: undefined }));
+        await page.goto(`/en/projects/${clean!.id}`);
+        await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountCoverageUnknown));
+        const coverage = page.getByTestId('scan-coverage-notice');
+        await expect(coverage).toHaveAttribute('data-coverage', 'unknown');
+        await expect(coverage).toHaveAttribute('role', 'status');
+        await expect(coverage).toContainText(en.ScanStatus.coverageUnknownTitle);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCoverageUnknown);
+        await expect(page.locator('[data-empty-state="emptyCompleted"]')).toHaveCount(0);
+    });
+
+    test('completed offline-style (checked [], all skipped) with findings: the count is partial', async ({ page }) => {
+        await mockScanStatus(page, vulnerable!.projectId, () => ({
+            status: 'completed',
+            checked_sources: [],
+            skipped_sources: ['nvd', 'jvn', 'distro'],
+        }));
+        await page.goto(`/en/projects/${vulnerable!.projectId}`);
+        await expect(vulnTab(page)).toHaveText(tabText(FIXTURE_CVES.length, en.ScanStatus.tabCountPartial));
+        const coverage = page.getByTestId('scan-coverage-notice');
+        await expect(coverage.getByTestId('scan-coverage-checked')).toHaveText(en.ScanStatus.checkedNone);
+        await vulnTab(page).click();
+        await expect(page.getByTestId('vuln-entry')).toHaveCount(FIXTURE_CVES.length);
+    });
+
+    test('failed with a checked subset: the alert, plus the sources that were not checked', async ({ page }) => {
+        await mockScanStatus(page, clean!.id, () => ({
+            status: 'failed',
+            error: 'jvn: scan failed (fetch_failed, source_unavailable)',
+            reasons: ['fetch_failed', 'source_unavailable'],
+            checked_sources: ['nvd', 'distro'],
+        }));
+        await page.goto(`/en/projects/${clean!.id}`);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'failed');
+        const coverage = page.getByTestId('scan-coverage-notice');
+        await expect(coverage).toHaveAttribute('data-coverage', 'partial');
+        await expect(coverage.getByTestId('scan-coverage-not-checked')).toHaveText(
+            en.ScanStatus.skippedBody.replace('{sources}', 'JVN'),
+        );
+        await expect(coverage.getByTestId('scan-coverage-checked')).toHaveText(
+            en.ScanStatus.checkedList.replace('{sources}', `NVD, ${en.ScanStatus.sourceDistro}`),
+        );
+        await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountIncomplete));
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyFailed);
+    });
+
+    test('coverage in Japanese: unknown, and the scheduled-scan shape', async ({ page }) => {
+        let body: ScanBody = { status: 'completed', checked_sources: undefined };
+        await mockScanStatus(page, clean!.id, () => body);
+        await page.goto(`/ja/projects/${clean!.id}`);
+        const coverage = page.getByTestId('scan-coverage-notice');
+        await expect(coverage).toContainText(ja.ScanStatus.coverageUnknownTitle, { timeout: 15_000 });
+        body = { status: 'completed', skipped_sources: ['jvn'], checked_sources: ['nvd', 'distro'] };
+        await coverage.page().reload();
+        await expect(coverage.getByTestId('scan-coverage-not-checked')).toHaveText(
+            ja.ScanStatus.skippedBody.replace('{sources}', 'JVN'),
+            { timeout: 15_000 },
+        );
+        await expect(coverage.getByTestId('scan-coverage-checked')).toHaveText(
+            ja.ScanStatus.checkedList.replace('{sources}', `NVD、${ja.ScanStatus.sourceDistro}`),
+        );
     });
 
     test('scan-status cannot be loaded: an alert with Retry, not clean; Retry recovers', async ({ page }) => {
@@ -316,9 +441,9 @@ test.describe('project page: scan status of the latest SBOM', () => {
                     await statusHeld;
                     committed = true;
                     phase = 'completed';
-                    return route.fulfill({ response: res, json: { ...real, status: 'completed' } });
+                    return route.fulfill({ response: res, json: withCoverage(real, { status: 'completed' }) });
                 }
-                await route.fulfill({ response: res, json: { ...real, status: phase } });
+                await route.fulfill({ response: res, json: withCoverage(real, { status: phase }) });
             },
         );
         await page.route(
@@ -390,7 +515,7 @@ test.describe('project page: uploading an SBOM follows its scan', () => {
                 const res = await route.fetch();
                 const real = await res.json();
                 polled.add(real.sbom_id);
-                await route.fulfill({ response: res, json: { ...real, status: phase } });
+                await route.fulfill({ response: res, json: withCoverage(real, { status: phase }) });
             },
         );
         let uploadedId = '';
@@ -447,14 +572,14 @@ test.describe('project page: the scan state and the list stay paired (Codex R2)'
                 polled.add(real.sbom_id);
                 if (real.sbom_id !== first) {
                     // the new SBOM: its scan is running
-                    return route.fulfill({ response: res, json: { ...real, status: 'running' } });
+                    return route.fulfill({ response: res, json: withCoverage(real, { status: 'running' }) });
                 }
                 if (phase === 'held') {
                     heldSeen = true;
                     await held;
-                    return route.fulfill({ response: res, json: { ...real, status: 'completed' } });
+                    return route.fulfill({ response: res, json: withCoverage(real, { status: 'completed' }) });
                 }
-                await route.fulfill({ response: res, json: { ...real, status: 'running' } });
+                await route.fulfill({ response: res, json: withCoverage(real, { status: 'running' }) });
             },
         );
         await page.goto(`/en/projects/${p.id}`);
@@ -622,10 +747,10 @@ test.describe('project page: settled answers that move, uploads during a scan, t
             async (route) => {
                 const res = await route.fetch();
                 const real = await res.json();
-                if (phase === 'running') return route.fulfill({ response: res, json: { ...real, status: 'running' } });
+                if (phase === 'running') return route.fulfill({ response: res, json: withCoverage(real, { status: 'running' }) });
                 settleReads++;
                 const total = committed ? FIXTURE_CVES.length : 0;
-                await route.fulfill({ response: res, json: { ...real, status: 'completed', vulnerabilities: { ...real.vulnerabilities, total } } });
+                await route.fulfill({ response: res, json: withCoverage(real, { status: 'completed', vulnerabilities: { ...real.vulnerabilities, total } }) });
             },
         );
         await page.route(
@@ -739,7 +864,9 @@ test.describe('project page: list bound to its SBOM, coverage changes between re
         await mockScanStatus(page, p.id, () =>
             phase === 'running'
                 ? { status: 'running' }
-                : { status: 'completed', skipped_sources: listServedWhileSettling ? ['jvn'] : [] },
+                : listServedWhileSettling
+                  ? { status: 'completed', skipped_sources: ['jvn'], checked_sources: ['nvd', 'distro'] }
+                  : { status: 'completed' },
         );
         await page.route(
             (url) => url.pathname === `/api/v1/projects/${p.id}/vulnerabilities`,
@@ -757,6 +884,40 @@ test.describe('project page: list bound to its SBOM, coverage changes between re
         await expect(page.getByTestId('scan-coverage-notice')).toBeVisible({ timeout: 15_000 });
         await expect(empty(page)).toHaveText(en.ScanStatus.emptyPartial.replace('{sources}', 'JVN'));
         await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountPartial));
+    });
+
+    // §31: a checked_sources change between the two settled reads (here the
+    // coverage report disappears — the shared status was lost) is not
+    // hidden behind the first read's full coverage.
+    test('checked sources that disappear between two settled reads are shown as unknown, not the first read', async ({ page, request }) => {
+        const p = await createProject(request, uniqueName('Scan Status Checked Moves'));
+        projects.push(p.id);
+        await uploadSbom(request, p.id, cleanSbom);
+        let phase: 'running' | 'settling' = 'running';
+        let listServedWhileSettling = false;
+        await mockScanStatus(page, p.id, () =>
+            phase === 'running'
+                ? { status: 'running' }
+                : listServedWhileSettling
+                  ? { status: 'completed', checked_sources: undefined }
+                  : { status: 'completed' },
+        );
+        await page.route(
+            (url) => url.pathname === `/api/v1/projects/${p.id}/vulnerabilities`,
+            async (route) => {
+                const res = await route.fetch();
+                await route.fulfill({ response: res });
+                if (phase === 'settling') listServedWhileSettling = true;
+            },
+        );
+        await page.goto(`/en/projects/${p.id}`);
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveAttribute('data-empty-state', 'emptyRunning');
+        await page.waitForLoadState('networkidle');
+        phase = 'settling';
+        await expect(page.getByTestId('scan-coverage-notice')).toHaveAttribute('data-coverage', 'unknown', { timeout: 15_000 });
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCoverageUnknown);
+        await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountCoverageUnknown));
     });
 });
 
@@ -783,7 +944,7 @@ test.describe('project page: a list read after another upload (Codex R5)', () =>
                 const real = await res.json();
                 polled.add(real.sbom_id);
                 // the first SBOM's scan is done; any later one is still running
-                await route.fulfill({ response: res, json: { ...real, status: real.sbom_id === first ? 'completed' : 'running' } });
+                await route.fulfill({ response: res, json: withCoverage(real, { status: real.sbom_id === first ? 'completed' : 'running' }) });
             },
         );
         await page.goto(`/en/projects/${p.id}`);
@@ -843,9 +1004,9 @@ test.describe('project page: malformed settled answers, leaving mid-check (Codex
                 if (phase === 'held') {
                     heldSeen = true;
                     await held;
-                    return route.fulfill({ response: res, json: { ...real, status: 'completed' } });
+                    return route.fulfill({ response: res, json: withCoverage(real, { status: 'completed' }) });
                 }
-                return route.fulfill({ response: res, json: { ...real, status: 'running' } });
+                return route.fulfill({ response: res, json: withCoverage(real, { status: 'running' }) });
             },
         );
         await page.goto(`/en/projects/${projectId}`);
@@ -948,9 +1109,9 @@ test.describe('project page: overlapping reads (Codex R9)', () => {
                     heldSeen = true;
                     const answer = state; // read before the rescan began
                     await held;
-                    return route.fulfill({ response: res, json: { ...real, status: answer } });
+                    return route.fulfill({ response: res, json: withCoverage(real, { status: answer }) });
                 }
-                await route.fulfill({ response: res, json: { ...real, status: state } });
+                await route.fulfill({ response: res, json: withCoverage(real, { status: state }) });
             },
         );
         await page.goto(`/en/projects/${vp.projectId}`);
@@ -996,7 +1157,7 @@ test.describe('project page: overlapping reads (Codex R9)', () => {
                 const res = await route.fetch();
                 const real = await res.json();
                 polled.add(real.sbom_id);
-                await route.fulfill({ response: res, json: { ...real, status: real.sbom_id === first ? 'completed' : 'running' } });
+                await route.fulfill({ response: res, json: withCoverage(real, { status: real.sbom_id === first ? 'completed' : 'running' }) });
             },
         );
         await page.goto(`/en/projects/${p.id}`);
@@ -1074,8 +1235,8 @@ test.describe('project page: refreshes of the snapshot (Codex R10)', () => {
                 const res = await route.fetch();
                 const real = await res.json();
                 const json = real.sbom_id === first
-                    ? { ...real, status: 'failed', reasons: ['source_unavailable'] }
-                    : { ...real, status: 'completed' };
+                    ? withCoverage(real, { status: 'failed', reasons: ['source_unavailable'] })
+                    : withCoverage(real, { status: 'completed' });
                 await route.fulfill({ response: res, json });
             },
         );
@@ -1285,7 +1446,7 @@ test('project page: returning to a hidden tab re-reads the scan state (Codex R14
                 const res = await route.fetch();
                 const real = await res.json();
                 polled.add(real.sbom_id);
-                await route.fulfill({ response: res, json: { ...real, status: real.sbom_id === first ? 'completed' : 'running' } });
+                await route.fulfill({ response: res, json: withCoverage(real, { status: real.sbom_id === first ? 'completed' : 'running' }) });
             },
         );
         await page.goto(`/en/projects/${p.id}`);
@@ -1328,7 +1489,7 @@ test('project page: returning to the tab starts a fresh read, not the one from b
                 const res = await route.fetch();
                 const real = await res.json();
                 polled.add(real.sbom_id);
-                const json = { ...real, status: real.sbom_id === first ? 'completed' : 'running' };
+                const json = withCoverage(real, { status: real.sbom_id === first ? 'completed' : 'running' });
                 if (holdArmed && real.sbom_id === first && ++readsSinceArmed === 2) {
                     heldSeen = true; // the poll's final state read, delayed
                     await held;
@@ -1388,7 +1549,7 @@ test('project page: returning to the tab while the project is still loading stil
                 const real = await res.json();
                 polled.add(real.sbom_id);
                 if (real.sbom_id === first) snapshotDone = true;
-                await route.fulfill({ response: res, json: { ...real, status: real.sbom_id === first ? 'completed' : 'running' } });
+                await route.fulfill({ response: res, json: withCoverage(real, { status: real.sbom_id === first ? 'completed' : 'running' }) });
             },
         );
         await page.goto(`/en/projects/${p.id}`);

@@ -7,6 +7,7 @@ import {
   FIXTURE_CVES,
   uniqueName,
   type VulnerableProject,
+  reportFullScanCoverage,
 } from './fixtures/vuln-project';
 
 // GET /api/v1/projects/:id answers 404 only for a missing project (or another
@@ -123,6 +124,7 @@ test.describe('project page: full outage, then Retry', () => {
     expect([...failed]).toEqual(expect.arrayContaining([`${prefix}/components`, `${prefix}/sbom`]));
 
     await page.unrouteAll();
+    await reportFullScanCoverage(page);
     await alert.getByRole('button', { name: en.Common.retry }).click();
     await expect(page.getByRole('heading', { level: 1, name: project!.projectName })).toBeVisible();
     // Counts come from the sibling queries: without the fix they stay 0.
@@ -139,6 +141,8 @@ test.describe('project page: full outage, then Retry', () => {
   // no-data in-flight request): they fail after the API has recovered.
   test('sibling requests still in flight at Retry are not reused', async ({ page }) => {
     const prefix = `/api/v1/projects/${project!.projectId}`;
+    // Registered first: the outage route falls back to it (offline stack: §31).
+    await reportFullScanCoverage(page);
     let outage = true;
     let release: () => void = () => {};
     const held = new Promise<void>((r) => (release = r));

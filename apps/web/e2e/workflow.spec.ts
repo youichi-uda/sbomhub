@@ -9,6 +9,7 @@ import {
     uniqueName,
     uploadSbom,
     uploadVulnerableSbom,
+    reportFullScanCoverage,
 } from './fixtures/vuln-project';
 
 const componentsTab = (page: Page) =>
@@ -41,6 +42,8 @@ test.describe('Complete Workflow', () => {
     });
 
     test('should complete full SBOM management workflow', async ({ page, request }) => {
+        // Step 4 asserts the bare vulnerability count (offline stack: §31).
+        await reportFullScanCoverage(page);
         // ============================
         // Step 1: Create a new project through the UI
         // ============================

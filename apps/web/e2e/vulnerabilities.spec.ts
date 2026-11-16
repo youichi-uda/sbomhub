@@ -6,6 +6,7 @@ import {
   createVulnerableProject,
   deleteProject,
   type VulnerableProject,
+  reportFullScanCoverage,
 } from './fixtures/vuln-project';
 
 // Every test here runs against a fresh project that carries exactly the
@@ -16,6 +17,8 @@ import {
 const vulnTabName = new RegExp(`^${en.Vulnerabilities.title} \\((\\d+)\\)$`);
 
 async function openVulnerabilitiesTab(page: Page, projectId: string): Promise<void> {
+  // The tab counter is asserted bare (offline stack: §31).
+  await reportFullScanCoverage(page);
   await page.goto(`/en/projects/${projectId}`);
   await page.getByRole('button', { name: vulnTabName }).click();
   // The list is fetched asynchronously; wait until every fixture entry is in.

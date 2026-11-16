@@ -6,6 +6,7 @@ import {
   createVulnerableProject,
   deleteProject,
   type VulnerableProject,
+  reportFullScanCoverage,
 } from './fixtures/vuln-project';
 
 // The CI stack runs in self-hosted anonymous mode (no auth), so every call
@@ -122,6 +123,7 @@ test.describe('KEV (Known Exploited Vulnerabilities)', () => {
     });
 
     test('should mark exactly the KEV vulnerabilities with the KEV badge', async ({ page }) => {
+      await reportFullScanCoverage(page); // the bare tab count below (offline stack: §31)
       await page.goto(`/en/projects/${project.projectId}`);
       await page
         .getByRole('button', { name: `${en.Vulnerabilities.title} (${FIXTURE_CVES.length})` })
