@@ -10,26 +10,37 @@
 //   - the scan failed — e.g. MyJVN has been suspended since 2026-10-22, so
 //     every online scan with JVN on reads failed with reasons
 //     fetch_failed + source_unavailable (§26.1);
-//   - the scan completed without consulting a source the operator switched
-//     off (SBOMHUB_JVN=off → skipped_sources ["jvn"], §26.2);
+//   - the scan completed without checking some source (skipped_sources:
+//     offline mode, ?sources=, the scheduled scan, SBOMHUB_JVN=off, no
+//     scanner configured — §26.2, §31);
 //   - the status is unknown — the API keeps a scan's status for about an hour
 //     (max(1h, SBOMHUB_SCAN_DEADLINE + 15m)), and reads unknown when Redis
 //     cannot be read (§25.3).
-// Even a completed scan does not prove that every source and component was
-// checked: offline mode, components without a usable name, a manual
-// `?sources=nvd` scan and the scheduled scan (NVD + distro only) all complete
-// without reporting the sources they did not consult (handler/sbom.go
-// runScan godoc, UPGRADE.md §26.2). The API offers no positive coverage
-// signal, so the page never says a bare "no vulnerabilities": a completed
-// scan with nothing skipped gets a message scoped to what that scan could
-// look up (core principle: never imply something is safe that was not
-// checked; Codex R1 Critical).
+// `completed` alone does not prove that every source was checked: offline
+// mode, a manual `?sources=nvd` scan and the scheduled scan (no JVN) complete
+// too. Since UPGRADE.md §31 a terminal answer says which sources (nvd, jvn,
+// distro) the scan checked (`checked_sources`) and which it made no request
+// to (`skipped_sources`). The page derives a coverage from both
+// (scanCoverage):
+//   - full     completed, checked ⊇ {nvd, jvn, distro}, nothing skipped —
+//              the only state with a bare count and the "checked, none
+//              recorded" empty state;
+//   - partial  some source is known not to have been checked (skipped, or
+//              missing from a reported checked_sources);
+//   - unknown  checked_sources absent (an older replica, the scan's shared
+//              status lost in Redis): coverage is unknown, never "none" and
+//              never "all".
+// Even full coverage says nothing about components that cannot be looked up
+// (no usable name / version), so the page never says a bare "No
+// vulnerabilities found." (core principle: never imply something is safe
+// that was not checked; Codex R1 Critical, integration review §31 Medium).
 //
 // API: GET /api/v1/projects/:id/sboms/:sbom_id/scan-status
 // (apps/api/internal/handler/sbom.go ScanStatusResponse):
 //   { status: running|completed|failed|unknown, sbom_id, project_id,
 //     error?: string (failed only), reasons?: string[] (failed only),
-//     skipped_sources?: string[] (completed / failed only),
+//     skipped_sources?: string[] (completed / failed only; absent = none),
+//     checked_sources?: string[] (completed / failed only; absent = unknown),
 //     vulnerabilities: { critical, high, medium, low, unknown, kev, total } }
 
 export type ScanState = "running" | "completed" | "failed" | "unknown";
@@ -40,6 +51,12 @@ export interface ScanStatus {
   error?: string;
   reasons: string[];
   skippedSources: string[];
+  /**
+   * checked_sources of a completed / failed answer: the sources the scan
+   * checked. null = not reported (coverage unknown) — distinct from [] (the
+   * scan reported that it checked nothing, e.g. offline).
+   */
+  checkedSources: string[] | null;
   /**
    * vulnerabilities.total of the response: this SBOM's committed findings.
    * Used only to notice that findings changed between two settled answers
@@ -70,13 +87,15 @@ export function parseScanStatus(raw: unknown): ScanStatus {
   // against the list (and could never be seen to settle): unknown, not
   // completed / failed (Codex R6). The API always sends it.
   if ((status === "completed" || status === "failed") && total === null) status = "unknown";
-  const out: ScanStatus = { status, reasons: [], skippedSources: [], total };
+  const out: ScanStatus = { status, reasons: [], skippedSources: [], checkedSources: null, total };
   if (status === "failed") {
     out.reasons = stringList(o.reasons);
     if (typeof o.error === "string" && o.error !== "") out.error = o.error;
   }
   if (status === "completed" || status === "failed") {
     out.skippedSources = stringList(o.skipped_sources);
+    // Anything but an array is "not reported", never "none" (§31).
+    out.checkedSources = Array.isArray(o.checked_sources) ? stringList(o.checked_sources) : null;
   }
   return out;
 }
@@ -125,11 +144,47 @@ export function reasonItems(reasons: readonly string[]): ReasonItem[] {
   return out;
 }
 
-const SOURCE_LABELS: Record<string, string> = { jvn: "JVN", nvd: "NVD" };
+/** The sources a scan can check, in the API's order (UPGRADE.md §31). */
+export const SCAN_SOURCES: readonly string[] = ["nvd", "jvn", "distro"];
 
-/** Display name of a skipped source; unknown ones are shown as the API names them. */
-export function skippedSourceLabel(source: string): string {
-  return Object.hasOwn(SOURCE_LABELS, source) ? SOURCE_LABELS[source] : source;
+export type SourceLabelKey = "sourceNvd" | "sourceJvn" | "sourceDistro";
+
+const SOURCE_LABEL_KEYS: Record<string, SourceLabelKey> = {
+  nvd: "sourceNvd",
+  jvn: "sourceJvn",
+  distro: "sourceDistro",
+};
+
+/** "ScanStatus" message key naming a source; null = show it as the API names it. */
+export function sourceLabelKey(source: string): SourceLabelKey | null {
+  return Object.hasOwn(SOURCE_LABEL_KEYS, source) ? SOURCE_LABEL_KEYS[source] : null;
+}
+
+export type Coverage =
+  | { kind: "full" }
+  /**
+   * Some sources were not checked. `notChecked`: SCAN_SOURCES missing from a
+   * reported checked list (API order), then any other skipped source; when
+   * checked was not reported, only the skipped ones (the rest are unknown).
+   */
+  | { kind: "partial"; notChecked: string[]; checked: string[] | null }
+  | { kind: "unknown" };
+
+/**
+ * What a terminal answer says about which sources were checked. Pure function
+ * of skipped_sources / checked_sources; whether the scan completed is judged
+ * by the callers (a failed scan is never presented as clean).
+ */
+export function scanCoverage(skipped: readonly string[], checked: readonly string[] | null): Coverage {
+  if (checked === null) {
+    return skipped.length > 0 ? { kind: "partial", notChecked: [...new Set(skipped)], checked: null } : { kind: "unknown" };
+  }
+  const notChecked = SCAN_SOURCES.filter((s) => !checked.includes(s));
+  // Every skipped source is a gap — also one reported checked as well (the
+  // API never overlaps the lists) and one the page does not know.
+  for (const s of skipped) if (!notChecked.includes(s)) notChecked.push(s);
+  if (notChecked.length === 0) return { kind: "full" };
+  return { kind: "partial", notChecked, checked: checked.filter((s) => !notChecked.includes(s)) };
 }
 
 export type ScanView =
@@ -138,8 +193,15 @@ export type ScanView =
   | { kind: "unavailable" }
   | { kind: "running" }
   | { kind: "unknown" }
-  | { kind: "failed"; reasons: ReasonItem[]; skippedSources: string[]; error?: string }
-  | { kind: "completed"; skippedSources: string[] };
+  | {
+      kind: "failed";
+      reasons: ReasonItem[];
+      skippedSources: string[];
+      checkedSources: string[] | null;
+      coverage: Coverage;
+      error?: string;
+    }
+  | { kind: "completed"; skippedSources: string[]; checkedSources: string[] | null; coverage: Coverage };
 
 export interface ScanViewInput {
   /** The latest-SBOM lookup: id null = the project has no SBOM. */
@@ -166,10 +228,17 @@ export function scanView({ sbom, status }: ScanViewInput): ScanView {
         kind: "failed",
         reasons: reasonItems(d.reasons),
         skippedSources: d.skippedSources,
+        checkedSources: d.checkedSources,
+        coverage: scanCoverage(d.skippedSources, d.checkedSources),
         ...(d.error ? { error: d.error } : {}),
       };
     case "completed":
-      return { kind: "completed", skippedSources: d.skippedSources };
+      return {
+        kind: "completed",
+        skippedSources: d.skippedSources,
+        checkedSources: d.checkedSources,
+        coverage: scanCoverage(d.skippedSources, d.checkedSources),
+      };
     default:
       return { kind: "unknown" };
   }
@@ -183,6 +252,7 @@ export type EmptyStateKey =
   | "emptyUnknown"
   | "emptyFailed"
   | "emptyPartial"
+  | "emptyCoverageUnknown"
   | "emptyCompleted";
 
 /**
@@ -206,7 +276,15 @@ export function emptyStateKey(view: ScanView, listFresh: boolean): EmptyStateKey
     case "failed":
       return "emptyFailed";
     case "completed":
-      return view.skippedSources.length > 0 ? "emptyPartial" : "emptyCompleted";
+      // emptyCompleted is reserved for proven full coverage (§31).
+      switch (view.coverage.kind) {
+        case "full":
+          return "emptyCompleted";
+        case "partial":
+          return "emptyPartial";
+        case "unknown":
+          return "emptyCoverageUnknown";
+      }
   }
 }
 
@@ -229,18 +307,24 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
+function sameNullableList(a: readonly string[] | null, b: readonly string[] | null): boolean {
+  return a === null || b === null ? a === b : sameList(a, b);
+}
+
 /**
  * Whether two scan-status answers agree on everything the page shows from
- * them: state, finding total, skipped sources, reasons and failure marker
- * (Codex R4: agreeing on state and total alone let a changed coverage
- * through). A null total only occurs for running / unknown answers
- * (parseScanStatus), where agreement claims nothing final.
+ * them: state, finding total, skipped and checked sources (a reported list
+ * and "not reported" differ), reasons and failure marker (Codex R4: agreeing
+ * on state and total alone let a changed coverage through). A null total
+ * only occurs for running / unknown answers (parseScanStatus), where
+ * agreement claims nothing final.
  */
 export function sameScanAnswer(a: ScanStatus, b: ScanStatus): boolean {
   return (
     a.status === b.status &&
     a.total === b.total &&
     sameList(a.skippedSources, b.skippedSources) &&
+    sameNullableList(a.checkedSources, b.checkedSources) &&
     sameList(a.reasons, b.reasons) &&
     (a.error ?? "") === (b.error ?? "")
   );
@@ -253,6 +337,7 @@ export type CountQualifierKey =
   | "tabCountIncomplete"
   | "tabCountUnconfirmed"
   | "tabCountPartial"
+  | "tabCountCoverageUnknown"
   | "tabCountNotScanned"
   | "tabCountLoadFailed";
 
@@ -265,7 +350,8 @@ export interface ListState {
 
 /**
  * How the vulnerability count is qualified (tab counter, card header). null =
- * a bare number: only a completed scan with nothing skipped and a fresh list.
+ * a bare number: only a completed scan with full coverage (§31: NVD, JVN and
+ * distro checked, nothing skipped) and a fresh list.
  * A failed list load wins — its count
  * is not current, even when earlier rows are still on screen — then a list
  * still loading (Codex R2).
@@ -277,7 +363,14 @@ export function countQualifierKey(view: ScanView, list: ListState): CountQualifi
   if (!list.fresh) return "tabCountChecking";
   switch (view.kind) {
     case "completed":
-      return view.skippedSources.length > 0 ? "tabCountPartial" : null;
+      switch (view.coverage.kind) {
+        case "full":
+          return null;
+        case "partial":
+          return "tabCountPartial";
+        case "unknown":
+          return "tabCountCoverageUnknown";
+      }
     case "running":
       return "tabCountRunning";
     case "checking":

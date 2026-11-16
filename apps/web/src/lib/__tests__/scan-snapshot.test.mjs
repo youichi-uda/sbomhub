@@ -19,7 +19,7 @@ import { describe, test } from "node:test";
 
 import { readSnapshot, SnapshotError, SNAPSHOT_ATTEMPTS } from "../scan-snapshot.ts";
 
-const st = (status, total = 0, extra = {}) => ({ status, total, reasons: [], skippedSources: [], ...extra });
+const st = (status, total = 0, extra = {}) => ({ status, total, reasons: [], skippedSources: [], checkedSources: null, ...extra });
 const page = (n) => ({ data: Array.from({ length: n }, (_, i) => `v${i}`), totalCount: n });
 
 /** Scripted fetchers: each call takes the next answer (an Error is thrown). */
@@ -106,6 +106,22 @@ describe("readSnapshot: races", () => {
     });
     const s = await readSnapshot(f.deps, undefined);
     assert.deepEqual(s.status.skippedSources, ["jvn"]);
+  });
+
+  // UPGRADE §31: checked_sources is part of what the page shows, so a
+  // coverage report that changes between the two status reads (e.g. the
+  // shared status lost, or another run of the SBOM finishing) reads again.
+  test("a checked_sources change while the list was read also reads again (§31)", async () => {
+    const all = ["nvd", "jvn", "distro"];
+    const f = fake({
+      latest: ["A", "A", "A", "A"],
+      status: [st("completed", 0, { checkedSources: all }), st("completed", 0), st("completed", 0), st("completed", 0)],
+      list: [page(0), page(0)],
+    });
+    const s = await readSnapshot(f.deps, undefined);
+    assert.equal(s.status.status, "completed");
+    assert.equal(s.status.checkedSources, null);
+    assert.equal(f.log.filter((x) => x === "list").length, 2);
   });
 
   test("a rescan that starts while the list is read (R8/R9): not returned as the earlier settled state", async () => {

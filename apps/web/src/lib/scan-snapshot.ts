@@ -32,8 +32,8 @@
 //
 // Residual (the API has no scan generation): a whole scan of the same SBOM
 // that starts AND ends between reads 2 and 5 without changing anything the
-// status shows (state, finding total, skipped sources, reasons, error) is
-// not detectable.
+// status shows (state, finding total, skipped / checked sources, reasons,
+// error) is not detectable.
 
 import { sameScanAnswer, type ScanStatus } from "./scan-status.ts";
 

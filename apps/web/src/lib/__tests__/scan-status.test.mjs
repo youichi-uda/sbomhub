@@ -29,11 +29,28 @@ import {
   parseScanStatus,
   pollIntervalMs,
   reasonItems,
+  scanCoverage,
   scanView,
-  skippedSourceLabel,
+  SCAN_SOURCES,
+  sourceLabelKey,
 } from "../scan-status.ts";
 
 const FRESH = { failed: false, fresh: true };
+const ALL = ["nvd", "jvn", "distro"];
+/** A completed view as scanView builds it (coverage derived from the lists). */
+const done = (skippedSources = [], checkedSources = ALL) => ({
+  kind: "completed",
+  skippedSources,
+  checkedSources,
+  coverage: scanCoverage(skippedSources, checkedSources),
+});
+const failedView = (skippedSources = [], checkedSources = null) => ({
+  kind: "failed",
+  reasons: [],
+  skippedSources,
+  checkedSources,
+  coverage: scanCoverage(skippedSources, checkedSources),
+});
 const sbom = (id = "s1") => ({ pending: false, error: false, id });
 const status = (data) => ({
   pending: false,
@@ -117,9 +134,11 @@ describe("scanView", () => {
     assert.equal(failed.kind, "failed");
     assert.deepEqual(failed.reasons.map((r) => r.code), ["fetch_failed", "source_unavailable"]);
     assert.deepEqual(failed.skippedSources, ["jvn"]);
-    const done = scanView({ sbom: sbom(), status: status({ status: "completed" }) });
-    assert.equal(done.kind, "completed");
-    assert.deepEqual(done.skippedSources, []);
+    const completed = scanView({ sbom: sbom(), status: status({ status: "completed" }) });
+    assert.equal(completed.kind, "completed");
+    assert.deepEqual(completed.skippedSources, []);
+    assert.equal(completed.checkedSources, null);
+    assert.deepEqual(completed.coverage, { kind: "unknown" });
     const partial = scanView({ sbom: sbom(), status: status({ status: "completed", skipped_sources: ["jvn"] }) });
     assert.equal(partial.kind, "completed");
     assert.deepEqual(partial.skippedSources, ["jvn"]);
@@ -139,9 +158,14 @@ describe("emptyStateKey", () => {
       [{ kind: "unavailable" }, "emptyUnavailable"],
       [{ kind: "running" }, "emptyRunning"],
       [{ kind: "unknown" }, "emptyUnknown"],
-      [{ kind: "failed", reasons: [], skippedSources: [] }, "emptyFailed"],
-      [{ kind: "completed", skippedSources: ["jvn"] }, "emptyPartial"],
-      [{ kind: "completed", skippedSources: [] }, "emptyCompleted"],
+      [failedView(), "emptyFailed"],
+      [failedView([], ALL), "emptyFailed"],
+      [done(["jvn"], ["nvd", "distro"]), "emptyPartial"],
+      [done(["jvn"], null), "emptyPartial"],
+      [done([], ["nvd", "distro"]), "emptyPartial"],
+      [done(ALL, []), "emptyPartial"],
+      [done([], null), "emptyCoverageUnknown"],
+      [done([], ALL), "emptyCompleted"],
     ];
     for (const [view, key] of all) assert.equal(emptyStateKey(view, true), key, view.kind);
     assert.equal(all.filter(([, k]) => k === "emptyCompleted").length, 1);
@@ -149,7 +173,7 @@ describe("emptyStateKey", () => {
   // Codex R2 High: a list still loading (a new sort, a refresh) must not be
   // read as the empty result of the scan.
   test("a list that is not fresh is 'checking' whatever the scan state", () => {
-    for (const view of [{ kind: "completed", skippedSources: [] }, { kind: "failed", reasons: [], skippedSources: [] }, { kind: "running" }]) {
+    for (const view of [done(), failedView(), { kind: "running" }]) {
       assert.equal(emptyStateKey(view, false), "emptyChecking", view.kind);
     }
     // no SBOM: there is nothing to wait for
@@ -180,11 +204,13 @@ describe("reasonItems", () => {
   });
 });
 
-describe("skippedSourceLabel", () => {
-  test("known sources are named, others shown as given", () => {
-    assert.equal(skippedSourceLabel("jvn"), "JVN");
-    assert.equal(skippedSourceLabel("nvd"), "NVD");
-    assert.equal(skippedSourceLabel("osv"), "osv");
+describe("sourceLabelKey", () => {
+  test("the three API sources have their own label, others are shown as given (null)", () => {
+    assert.equal(sourceLabelKey("jvn"), "sourceJvn");
+    assert.equal(sourceLabelKey("nvd"), "sourceNvd");
+    assert.equal(sourceLabelKey("distro"), "sourceDistro");
+    assert.equal(sourceLabelKey("osv"), null);
+    assert.equal(sourceLabelKey("toString"), null);
   });
 });
 
@@ -205,7 +231,7 @@ describe("pollIntervalMs", () => {
 // Codex R4 High: two answers agree only if everything the page shows from
 // them agrees — not just state and total (skipped sources, reasons, error).
 describe("sameScanAnswer", () => {
-  const base = { status: "completed", total: 0, reasons: [], skippedSources: [] };
+  const base = { status: "completed", total: 0, reasons: [], skippedSources: [], checkedSources: ["nvd", "jvn", "distro"] };
   test("identical answers agree", () => {
     assert.equal(sameScanAnswer(base, { ...base }), true);
     assert.equal(sameScanAnswer({ ...base, status: "failed", reasons: ["a", "b"], error: "x" }, { ...base, status: "failed", reasons: ["a", "b"], error: "x" }), true);
@@ -214,6 +240,12 @@ describe("sameScanAnswer", () => {
     assert.equal(sameScanAnswer(base, { ...base, status: "failed" }), false);
     assert.equal(sameScanAnswer(base, { ...base, total: 1 }), false);
     assert.equal(sameScanAnswer(base, { ...base, skippedSources: ["jvn"] }), false);
+    // §31 checked_sources: a coverage change between the two reads, including
+    // "reported" vs "not reported" (null) and "none" ([]) vs not reported.
+    assert.equal(sameScanAnswer(base, { ...base, checkedSources: ["nvd", "distro"] }), false);
+    assert.equal(sameScanAnswer(base, { ...base, checkedSources: null }), false);
+    assert.equal(sameScanAnswer({ ...base, checkedSources: [] }, { ...base, checkedSources: null }), false);
+    assert.equal(sameScanAnswer({ ...base, checkedSources: null }, { ...base, checkedSources: null }), true);
     assert.equal(sameScanAnswer({ ...base, status: "failed", reasons: ["a"] }, { ...base, status: "failed", reasons: ["a", "b"] }), false);
     assert.equal(sameScanAnswer({ ...base, status: "failed", error: "x" }, { ...base, status: "failed", error: "y" }), false);
     // A null total only occurs for running / unknown (a settled answer
@@ -226,21 +258,29 @@ describe("sameScanAnswer", () => {
 // running, so a failed / unknown / partial scan (or a failed list load on the
 // default tab) read as a final count.
 describe("countQualifierKey", () => {
-  test("a bare count only for a completed scan with nothing skipped", () => {
-    assert.equal(countQualifierKey({ kind: "completed", skippedSources: [] }, FRESH), null);
+  test("a bare count only for a completed scan that checked NVD, JVN and distro and skipped nothing", () => {
+    assert.equal(countQualifierKey(done([], ALL), FRESH), null);
+    // order of checked_sources does not matter, extra (future) sources neither
+    assert.equal(countQualifierKey(done([], ["distro", "jvn", "nvd", "osv"]), FRESH), null);
   });
   test("every other state qualifies the count", () => {
     assert.equal(countQualifierKey({ kind: "running" }, FRESH), "tabCountRunning");
     assert.equal(countQualifierKey({ kind: "checking" }, FRESH), "tabCountChecking");
-    assert.equal(countQualifierKey({ kind: "failed", reasons: [], skippedSources: [] }, FRESH), "tabCountIncomplete");
+    assert.equal(countQualifierKey(failedView(), FRESH), "tabCountIncomplete");
+    assert.equal(countQualifierKey(failedView([], ALL), FRESH), "tabCountIncomplete");
     assert.equal(countQualifierKey({ kind: "unknown" }, FRESH), "tabCountUnconfirmed");
     assert.equal(countQualifierKey({ kind: "unavailable" }, FRESH), "tabCountUnconfirmed");
-    assert.equal(countQualifierKey({ kind: "completed", skippedSources: ["jvn"] }, FRESH), "tabCountPartial");
+    assert.equal(countQualifierKey(done(["jvn"], ["nvd", "distro"]), FRESH), "tabCountPartial");
+    assert.equal(countQualifierKey(done(["jvn"], null), FRESH), "tabCountPartial");
+    assert.equal(countQualifierKey(done(ALL, []), FRESH), "tabCountPartial");
+    assert.equal(countQualifierKey(done([], ["nvd"]), FRESH), "tabCountPartial");
+    // §31: absent checked_sources = coverage unknown, never "none" or "all"
+    assert.equal(countQualifierKey(done([], null), FRESH), "tabCountCoverageUnknown");
   });
   // Codex R2 High: a failed refresh keeps the old rows on screen (banner);
   // their count is not current either.
   test("a failed list load (with or without rows kept) wins over every scan state", () => {
-    for (const view of [{ kind: "completed", skippedSources: [] }, { kind: "running" }, { kind: "no-sbom" }]) {
+    for (const view of [done(), { kind: "running" }, { kind: "no-sbom" }]) {
       assert.equal(countQualifierKey(view, { failed: true, fresh: false }), "tabCountLoadFailed", view.kind);
       assert.equal(countQualifierKey(view, { failed: true, fresh: true }), "tabCountLoadFailed", view.kind);
     }
@@ -248,9 +288,67 @@ describe("countQualifierKey", () => {
   // Codex R2 High: the list for the current sort still loading shows the
   // previous rows; their count is not the settled one.
   test("a list that is not fresh is 'checking', even for a completed scan", () => {
-    assert.equal(countQualifierKey({ kind: "completed", skippedSources: [] }, { failed: false, fresh: false }), "tabCountChecking");
+    assert.equal(countQualifierKey(done(), { failed: false, fresh: false }), "tabCountChecking");
     // Codex R6: no SBOM is "not scanned", never a bare 0.
     assert.equal(countQualifierKey({ kind: "no-sbom" }, { failed: false, fresh: false }), "tabCountNotScanned");
     assert.equal(countQualifierKey({ kind: "no-sbom" }, FRESH), "tabCountNotScanned");
+  });
+});
+
+// Integration Codex review (Medium, UPGRADE §31): the API reports which
+// sources a terminal scan checked (checked_sources). The page read only
+// skipped_sources, so a completed answer with neither list (an older replica,
+// status lost in Redis) rendered a bare count, and the unqualified / clean
+// presentation did not require proven coverage.
+describe("checked_sources (UPGRADE §31)", () => {
+  test("SCAN_SOURCES is the API's order", () => {
+    assert.deepEqual([...SCAN_SOURCES], ["nvd", "jvn", "distro"]);
+  });
+  test("parse: kept for completed / failed; absent or malformed is null (unknown), [] is kept as none", () => {
+    const p = (extra, st = "completed") => parseScanStatus({ status: st, vulnerabilities: { total: 0 }, ...extra });
+    assert.deepEqual(p({ checked_sources: ["nvd", "jvn", "distro"] }).checkedSources, ["nvd", "jvn", "distro"]);
+    assert.deepEqual(p({ checked_sources: ["nvd"] }, "failed").checkedSources, ["nvd"]);
+    assert.deepEqual(p({ checked_sources: [] }).checkedSources, []);
+    assert.equal(p({}).checkedSources, null);
+    assert.equal(p({ checked_sources: null }).checkedSources, null);
+    assert.equal(p({ checked_sources: "nvd" }).checkedSources, null);
+    assert.deepEqual(p({ checked_sources: ["nvd", 3, "", null] }).checkedSources, ["nvd"]);
+    assert.equal(parseScanStatus({ status: "running", checked_sources: ["nvd"] }).checkedSources, null);
+    assert.equal(parseScanStatus({ status: "unknown", checked_sources: ["nvd"] }).checkedSources, null);
+  });
+  test("coverage: full only with all three checked and nothing skipped", () => {
+    assert.deepEqual(scanCoverage([], ALL), { kind: "full" });
+    assert.deepEqual(scanCoverage([], ["distro", "nvd", "jvn"]), { kind: "full" });
+    // an unknown extra skipped source is still a gap
+    assert.deepEqual(scanCoverage(["osv"], ALL), { kind: "partial", notChecked: ["osv"], checked: ALL });
+    // contradictory answer (the API never overlaps the lists): not checked wins
+    assert.deepEqual(scanCoverage(["jvn"], ALL), { kind: "partial", notChecked: ["jvn"], checked: ["nvd", "distro"] });
+  });
+  test("coverage: known gaps list every source not checked, in API order", () => {
+    // offline: checked [], skipped all three
+    assert.deepEqual(scanCoverage(ALL, []), { kind: "partial", notChecked: ALL, checked: [] });
+    // scheduled scan: skipped jvn
+    assert.deepEqual(scanCoverage(["jvn"], ["nvd", "distro"]), { kind: "partial", notChecked: ["jvn"], checked: ["nvd", "distro"] });
+    // failed with a checked subset: nvd failed (neither list), jvn skipped
+    assert.deepEqual(scanCoverage(["jvn"], ["distro"]), { kind: "partial", notChecked: ["nvd", "jvn"], checked: ["distro"] });
+    assert.deepEqual(scanCoverage([], ["nvd"]), { kind: "partial", notChecked: ["jvn", "distro"], checked: ["nvd"] });
+  });
+  test("coverage: checked not reported — skipped ones are known gaps, the rest unknown; none skipped is unknown", () => {
+    assert.deepEqual(scanCoverage([], null), { kind: "unknown" });
+    assert.deepEqual(scanCoverage(["jvn"], null), { kind: "partial", notChecked: ["jvn"], checked: null });
+  });
+  test("scanView carries checked sources and coverage for completed and failed", () => {
+    const full = scanView({ sbom: sbom(), status: status({ status: "completed", checked_sources: ALL }) });
+    assert.deepEqual(full.coverage, { kind: "full" });
+    assert.deepEqual(full.checkedSources, ALL);
+    const f = scanView({ sbom: sbom(), status: status({ status: "failed", reasons: ["fetch_failed"], checked_sources: ["nvd"] }) });
+    assert.equal(f.kind, "failed");
+    assert.deepEqual(f.checkedSources, ["nvd"]);
+    assert.deepEqual(f.coverage, { kind: "partial", notChecked: ["jvn", "distro"], checked: ["nvd"] });
+  });
+  test("only full coverage gets the unqualified count and the 'checked, none recorded' empty state", () => {
+    const views = [done([], ALL), done([], null), done(["jvn"], ["nvd", "distro"]), done(ALL, []), done([], ["nvd", "jvn"])];
+    assert.deepEqual(views.map((v) => countQualifierKey(v, FRESH)), [null, "tabCountCoverageUnknown", "tabCountPartial", "tabCountPartial", "tabCountPartial"]);
+    assert.deepEqual(views.map((v) => emptyStateKey(v, true)), ["emptyCompleted", "emptyCoverageUnknown", "emptyPartial", "emptyPartial", "emptyPartial"]);
   });
 });
