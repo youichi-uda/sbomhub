@@ -17,6 +17,7 @@ import { FindingMatchBadge } from "@/components/vulnerability/finding-match";
 import { EOLBadge } from "@/components/component/eol-badge";
 import { DependencyPathPanel } from "@/components/component/dependency-path";
 import { LoadError } from "@/components/ui/load-error";
+import { loadErrorState, tabCountState, type TabCountState } from "@/lib/load-state";
 import {
   ScanEmptyState,
   ScanFinishedAnnouncer,
@@ -26,7 +27,6 @@ import {
 import Link from "next/link";
 import { queryKeys } from "@/lib/query/keys";
 import { useRetainedData } from "@/lib/query/use-retained-data";
-import { loadErrorState } from "@/lib/load-state";
 import {
   countQualifierKey,
   parseScanStatus,
@@ -59,6 +59,15 @@ type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "n
 
 // Loader helper: log a failed fetch under the same message the hand-written
 // loaders used, then rethrow so react-query keeps the previous data.
+/** A tab counter's number, or why there is none (src/lib/load-state.ts). */
+function TabCount({ state, count }: { state: TabCountState; count: number }) {
+  const tp = useTranslations("ProjectDetail");
+  if (state === "loading") return <>…</>;
+  if (state === "failed") return <>{tp("tabCountLoadFailed")}</>;
+  if (state === "stale") return <>{tp("tabCountRefreshFailed", { count: String(count) })}</>;
+  return <>{count}</>;
+}
+
 async function logged<T>(message: string, fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
@@ -183,6 +192,7 @@ export default function ProjectDetailPage() {
         (await api.projects.getComponents(projectId)) || []),
   });
   const components = componentsQuery.data ?? [];
+  const componentsLoadError = loadErrorState(componentsQuery.isError, components.length > 0);
 
   // Latest SBOM id, used to check license violations. Through the API
   // client so it carries the auth / org headers (it used to be a bare fetch
@@ -321,6 +331,7 @@ export default function ProjectDetailPage() {
         (await api.projects.getVEXStatements(projectId)) || []),
   });
   const vexStatements = vexQuery.data ?? [];
+  const vexLoadError = loadErrorState(vexQuery.isError, vexStatements.length > 0);
 
   const licensePoliciesQuery = useQuery({
     queryKey: queryKeys.projects.licensePolicies(projectId),
@@ -329,6 +340,7 @@ export default function ProjectDetailPage() {
         (await api.projects.getLicensePolicies(projectId)) || []),
   });
   const licensePolicies = licensePoliciesQuery.data ?? [];
+  const licensePoliciesLoadError = loadErrorState(licensePoliciesQuery.isError, licensePolicies.length > 0);
 
   const licenseViolationsQuery = useQuery({
     queryKey: queryKeys.projects.licenseViolations(projectId, sbomId),
@@ -670,7 +682,8 @@ export default function ProjectDetailPage() {
           onClick={() => selectTab("components")}
         >
           <Package className="h-4 w-4 mr-2" />
-          {t("Components.title")} ({components.length})
+          {t("Components.title")} (
+          <TabCount state={tabCountState(componentsQuery, componentsQuery.data !== undefined)} count={components.length} />)
         </Button>
         <Button
           variant={activeTab === "vulnerabilities" ? "default" : "outline"}
@@ -689,14 +702,16 @@ export default function ProjectDetailPage() {
           onClick={() => selectTab("vex")}
         >
           <Shield className="h-4 w-4 mr-2" />
-          VEX ({vexStatements.length})
+          VEX (
+          <TabCount state={tabCountState(vexQuery, vexQuery.data !== undefined)} count={vexStatements.length} />)
         </Button>
         <Button
           variant={activeTab === "licenses" ? "default" : "outline"}
           onClick={() => selectTab("licenses")}
         >
           <FileCheck className="h-4 w-4 mr-2" />
-          {t("Components.license")} ({licensePolicies.length})
+          {t("Components.license")} (
+          <TabCount state={tabCountState(licensePoliciesQuery, licensePoliciesQuery.data !== undefined)} count={licensePolicies.length} />)
         </Button>
         <Button
           variant={activeTab === "notifications" ? "default" : "outline"}
@@ -710,7 +725,8 @@ export default function ProjectDetailPage() {
           onClick={() => selectTab("apikeys")}
         >
           <Key className="h-4 w-4 mr-2" />
-          {tp("apiKeys")} ({apiKeys.length})
+          {tp("apiKeys")} (
+          <TabCount state={tabCountState(apiKeysQuery, apiKeysQuery.data !== undefined)} count={apiKeys.length} />)
         </Button>
       </div>
 
@@ -748,7 +764,19 @@ export default function ProjectDetailPage() {
             <CardTitle>{t("Components.title")}</CardTitle>
           </CardHeader>
           <CardContent>
-            {components.length === 0 ? (
+            {componentsLoadError !== "none" && (
+              <LoadError
+                testId="components-load-error"
+                compact={componentsLoadError === "banner"}
+                message={tp("componentsLoadFailed")}
+                retryLabel={tc("retry")}
+                onRetry={loadComponents}
+                retrying={componentsQuery.isFetching}
+              />
+            )}
+            {componentsLoadError === "full" ? null : componentsQuery.isPending ? (
+              <p className="text-center text-muted-foreground py-8">{tc("loading")}</p>
+            ) : components.length === 0 ? (
               <p className="text-center text-muted-foreground py-8">
                 {tp("noComponents")}
               </p>
@@ -1108,7 +1136,19 @@ export default function ProjectDetailPage() {
               />
             )}
 
-            {vexStatements.length === 0 && !showVexForm ? (
+            {vexLoadError !== "none" && (
+              <LoadError
+                testId="vex-load-error"
+                compact={vexLoadError === "banner"}
+                message={tp("vexLoadFailed")}
+                retryLabel={tc("retry")}
+                onRetry={loadVexStatements}
+                retrying={vexQuery.isFetching}
+              />
+            )}
+            {vexLoadError === "full" ? null : vexQuery.isPending ? (
+              <p className="text-center text-muted-foreground py-8">{tc("loading")}</p>
+            ) : vexStatements.length === 0 && !showVexForm ? (
               <p className="text-center text-muted-foreground py-8">
                 {tp("noVexStatements")}
               </p>
@@ -1233,7 +1273,19 @@ export default function ProjectDetailPage() {
             )}
 
             <h3 className="font-semibold mb-3">{tp("configuredPolicies")}</h3>
-            {licensePolicies.length === 0 && !showLicenseForm ? (
+            {licensePoliciesLoadError !== "none" && (
+              <LoadError
+                testId="license-policies-load-error"
+                compact={licensePoliciesLoadError === "banner"}
+                message={tp("licensePoliciesLoadFailed")}
+                retryLabel={tc("retry")}
+                onRetry={loadLicensePolicies}
+                retrying={licensePoliciesQuery.isFetching}
+              />
+            )}
+            {licensePoliciesLoadError === "full" ? null : licensePoliciesQuery.isPending ? (
+              <p className="text-center text-muted-foreground py-8">{tc("loading")}</p>
+            ) : licensePolicies.length === 0 && !showLicenseForm ? (
               <p className="text-center text-muted-foreground py-8">
                 {tp("noLicensePolicies")}
               </p>
@@ -1283,6 +1335,23 @@ export default function ProjectDetailPage() {
             <CardTitle>{tp("notifications")}</CardTitle>
           </CardHeader>
           <CardContent>
+            {notificationSettingsQuery.isError && (
+              <LoadError
+                testId="notification-settings-load-error"
+                compact={notificationSettings !== null}
+                message={tp("notificationSettingsLoadFailed")}
+                retryLabel={tc("retry")}
+                onRetry={loadNotificationSettings}
+                retrying={notificationSettingsQuery.isFetching}
+              />
+            )}
+            {/* Never a form of default values over a load that has not
+                answered: Save would overwrite the real settings with them. */}
+            {notificationSettings === null ? (
+              notificationSettingsQuery.isError ? null : (
+                <p className="text-center text-muted-foreground py-8">{tc("loading")}</p>
+              )
+            ) : (
             <NotificationSettingsForm
               key={projectId}
               // key: a different project gets a fresh form (Codex R3) — never
@@ -1294,6 +1363,20 @@ export default function ProjectDetailPage() {
                 loadNotificationSettings();
               }}
             />
+            )}
+
+            {notificationLogsQuery.isError && (
+              <div className="mt-6">
+                <LoadError
+                  testId="notification-logs-load-error"
+                  compact
+                  message={tp("notificationLogsLoadFailed")}
+                  retryLabel={tc("retry")}
+                  onRetry={() => void notificationLogsQuery.refetch()}
+                  retrying={notificationLogsQuery.isFetching}
+                />
+              </div>
+            )}
 
             {notificationLogs.length > 0 && (
               <div className="mt-6">
