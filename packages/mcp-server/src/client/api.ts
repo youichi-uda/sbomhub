@@ -64,9 +64,10 @@ const ScanStatusSchema = z.looseObject({
     kev: z.number(),
     total: z.number(),
   }),
-  // SBOMHUB_JVN=off (apps/api, additive): the sources the scan did not
-  // consult because the operator switched them off, e.g. ["jvn"]. Omitted
-  // when nothing was skipped, and by backends that predate the setting.
+  // apps/api (additive): the sources the scan made no request to —
+  // SBOMHUB_JVN=off (["jvn"]), offline mode, a `?sources=` subset, the
+  // scheduled scan, or no scanner configured. Omitted when nothing was
+  // skipped, and by backends that predate the field.
   skipped_sources: z.array(z.string()).optional(),
   // apps/api (additive, 2026-11): the sources the scan actually checked. On
   // a terminal status that reported its coverage it is always present ([]
@@ -152,8 +153,9 @@ type ScanProbe = {
 };
 
 /**
- * `skipped_sources` names the sources the scan did not consult because the
- * operator switched them off (apps/api SBOMHUB_JVN=off -> ["jvn"]). It is
+ * `skipped_sources` names the sources the scan made no request to (apps/api:
+ * SBOMHUB_JVN=off -> ["jvn"], offline mode, a `?sources=` subset, the
+ * scheduled scan, no scanner configured). It is
  * independent of `counts_final`: a settled scan is final for what this
  * deployment checks, and these are what it did not. A skip removes nothing,
  * so the counts may still hold findings an EARLIER scan of the SBOM made with
