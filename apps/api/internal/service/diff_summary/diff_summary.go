@@ -331,7 +331,16 @@ func (s *Service) Generate(ctx context.Context, req Request) (*Response, error) 
 
 	if cerr != nil {
 		redacted := llm.RedactProviderError(cerr).Error()
-		callID, llmErr := s.writeFailedLLMCall(ctx, req, provider, promptHash, promptPreview, redacted, duration, now)
+		var callID uuid.UUID
+		var llmErr error
+		if cresp != nil {
+			// An error that comes with a response (llm.ErrIncompleteResponse:
+			// the partial answer, FinishReason "incomplete") still fails the
+			// summary, but the row keeps what came back (M74).
+			callID, llmErr = s.writeLLMCallFailedParse(ctx, req, provider, promptHash, promptPreview, cresp, redacted, duration, now)
+		} else {
+			callID, llmErr = s.writeFailedLLMCall(ctx, req, provider, promptHash, promptPreview, redacted, duration, now)
+		}
 		if llmErr != nil {
 			return nil, llmErr
 		}

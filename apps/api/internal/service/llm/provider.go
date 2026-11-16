@@ -46,6 +46,11 @@ type Provider interface {
 	Model() string
 
 	// Complete generates a chat completion.
+	//
+	// A non-nil error means the answer must not be used. The response may
+	// still be non-nil alongside an error (ErrIncompleteResponse: the
+	// partial answer, FinishReason FinishReasonIncomplete) so the caller
+	// can record it in llm_calls; callers check the error first.
 	Complete(ctx context.Context, req CompleteRequest) (*CompleteResponse, error)
 
 	// Embed produces embedding vectors.
