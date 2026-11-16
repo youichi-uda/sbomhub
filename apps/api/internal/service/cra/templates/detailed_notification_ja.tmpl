@@ -28,7 +28,7 @@
 
 - **CVE ID**: {{ .CVEID }}
 {{- if .CVSSScore }}
-- **CVSS スコア**: {{ .CVSSScore }}{{ if .CVSSVector }} ({{ .CVSSVector }}){{ end }}
+- **CVSS スコア**: {{ .CVSSScore }}{{ with cvssVersion .CVSSVersion }} (CVSS v{{ . }}){{ end }}{{ if .CVSSVector }} ({{ .CVSSVector }}){{ end }}
 {{- end }}
 {{- if .Severity }}
 - **重大度**: {{ .Severity }}

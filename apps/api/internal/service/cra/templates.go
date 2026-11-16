@@ -29,6 +29,8 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"github.com/sbomhub/sbomhub/internal/cvss"
 )
 
 // templatesFS embeds the six Markdown templates that ship with the binary
@@ -96,6 +98,7 @@ type CRATemplateData struct {
 	CVEID                string // CVE ID (required, e.g. "CVE-2025-12345")
 	CVSSScore            string // free-form (e.g. "9.8") so unknown can be empty without zero-ambiguity
 	CVSSVector           string // optional (e.g. "CVSS:3.1/AV:N/...")
+	CVSSVersion          string // optional cvss_version of CVSSScore ("3.1"); printed as "(CVSS v3.1)" only when canonical (M74)
 	Severity             string // optional (e.g. "Critical")
 	VulnerabilitySummary string // short summary (used by early warning + as fallback in detailed/final)
 	VulnerabilityDetail  string // longer technical description (detailed + final)
@@ -176,6 +179,9 @@ type TimelineEntry struct {
 // in Go before calling Render.
 var templateFuncs = template.FuncMap{
 	"add1": func(i int) int { return i + 1 },
+	// cvssVersion canonicalises CRATemplateData.CVSSVersion; "" when unknown
+	// or unrecognised, so a template never prints a guessed version (M74).
+	"cvssVersion": func(v string) string { return string(cvss.ParseVersion(v)) },
 }
 
 // templateCache holds the parsed templates keyed by "<reportType>_<lang>".

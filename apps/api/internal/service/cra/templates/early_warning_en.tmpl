@@ -25,7 +25,7 @@
 
 - **CVE ID**: {{ .CVEID }}
 {{- if .CVSSScore }}
-- **CVSS score**: {{ .CVSSScore }}{{ if .CVSSVector }} ({{ .CVSSVector }}){{ end }}
+- **CVSS score**: {{ .CVSSScore }}{{ with cvssVersion .CVSSVersion }} (CVSS v{{ . }}){{ end }}{{ if .CVSSVector }} ({{ .CVSSVector }}){{ end }}
 {{- end }}
 {{- if .Severity }}
 - **Severity**: {{ .Severity }}
