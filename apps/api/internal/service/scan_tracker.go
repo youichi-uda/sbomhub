@@ -99,9 +99,10 @@ type scanEntry struct {
 	// last one finishes.
 	groupMsgs    []string
 	groupReasons []string
-	// skipped is the terminal state's skipped sources (SBOMHUB_JVN=off):
-	// sources a run of the group did not consult because the operator
-	// switched them off. groupSkipped accumulates them like groupReasons,
+	// skipped is the terminal state's skipped sources: sources a run of the
+	// group made no request to (SBOMHUB_JVN=off, offline mode, a
+	// `?sources=` subset, the scheduled scan's JVN, no scanner;
+	// scan_coverage.go). groupSkipped accumulates them like groupReasons,
 	// over every run of the group, and is published with the terminal
 	// state — completed or failed alike, since a skip is not a failure.
 	skipped      []string

@@ -78,8 +78,9 @@ type liveRun struct {
 	acked bool
 	// rejoinPending: a rejoin of it is queued.
 	rejoinPending bool
-	// finSkipped is the run's skipped sources (SBOMHUB_JVN=off) once it has
-	// finished. A late intent or rejoin cleanup (cleanupFinish) writes them
+	// finSkipped is the run's skipped sources (SBOMHUB_JVN=off, offline
+	// mode, a `?sources=` subset, the scheduled scan's JVN, no scanner;
+	// scan_coverage.go) once it has finished. A late intent or rejoin cleanup (cleanupFinish) writes them
 	// again: if the key was evicted after the run's real finish, the cleanup
 	// recreates it, and a bare removal recreated it as a "completed" that no
 	// longer said JVN was skipped (Codex SBOMHUB_JVN R1 Medium-2).
@@ -88,8 +89,9 @@ type liveRun struct {
 	// Medium-1): the cleanup can land after a later group began, and a
 	// replayed failure turned that group's successful scan into "failed" —
 	// with JVN on as well. A replayed skip in that window over-states what
-	// was skipped, the conservative direction; with JVN on there is never a
-	// skip, so the cleanup stays the bare removal it was before. (Losing the
+	// was skipped, the conservative direction; a run that skipped nothing
+	// gets the bare removal it had before. Its checked sources are never
+	// replayed (cleanupFinish): that would be the unsafe direction. (Losing the
 	// run's failure to an eviction is the pre-existing M72 limitation and is
 	// left as it was.)
 	finSkipped []string

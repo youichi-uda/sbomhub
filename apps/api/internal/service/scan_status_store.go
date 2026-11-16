@@ -92,8 +92,9 @@ func scanStatusKeys(sbomID uuid.UUID) []string {
 //	outcomes      JSON: the group's distinct failures (marker + reasons),
 //	              bounded by the marker vocabulary (Codex M72 R2 High-3), and
 //	              at most one entry with an EMPTY marker, {m:"", s:[source...]}:
-//	              the sources a run of the group skipped because the operator
-//	              switched them off (SBOMHUB_JVN=off), the union over the
+//	              the sources a run of the group made no request to
+//	              (SBOMHUB_JVN=off, offline mode, a `?sources=` subset, the
+//	              scheduled scan's JVN, no scanner), the union over the
 //	              group's finishes. Inside outcomes rather than in a field of
 //	              its own so that every script that resets a group — this
 //	              version's and older ones, during a rolling upgrade — resets
