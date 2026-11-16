@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,16 +33,63 @@ type scanStep struct {
 type scanOutcome struct {
 	markers []string
 	reasons []string
-	// skipped names the sources not consulted because the operator switched
-	// them off (SBOMHUB_JVN=off). Not a failure; reported as scan-status
-	// skipped_sources.
+	// skipped names the sources the run made no request to because of
+	// configuration or the request: switched off (SBOMHUB_JVN=off), offline
+	// mode (SBOMHUB_OFFLINE), not requested (`?sources=`), or no scanner
+	// configured. Not a failure; reported as scan-status skipped_sources.
 	skipped []string
+	// checked names the sources whose step ran against the live source and
+	// returned no error (service/scan_coverage.go); reported as scan-status
+	// checked_sources. A failed step is in neither list.
+	checked []string
 }
 
 // disableableScanner is a scanner the operator can switch off
 // (service.JVNService with SBOMHUB_JVN=off).
 type disableableScanner interface {
 	ScanDisabled() bool
+}
+
+// offlineScanner is a scanner whose sweep is a no-op in offline mode
+// (SBOMHUB_OFFLINE): it "succeeds" without a request, so it must be reported
+// skipped, never checked.
+type offlineScanner interface {
+	ScanOffline() bool
+}
+
+// stepSkipped reports whether st will make no request because of
+// configuration: no scanner, switched off, or offline.
+func stepSkipped(st scanStep) (bool, string) {
+	if st.scanner == nil {
+		return true, "not configured"
+	}
+	if d, ok := st.scanner.(disableableScanner); ok && d.ScanDisabled() {
+		return true, "switched off by the operator"
+	}
+	if o, ok := st.scanner.(offlineScanner); ok && o.ScanOffline() {
+		return true, "offline mode"
+	}
+	return false, ""
+}
+
+// plannedSkippedSources is the sources a scan of these steps will skip: every
+// source of service.ScanSources without a step (not requested), and every
+// step stepSkipped says makes no request. Ordered as scan-status lists them
+// (service.OrderScanSources); empty when none. The 202 of POST .../scan
+// reports it, and the run reports the same list to scan-status.
+func plannedSkippedSources(steps []scanStep) []string {
+	var skipped []string
+	for _, src := range service.ScanSources {
+		if !slices.ContainsFunc(steps, func(st scanStep) bool { return st.source == src }) {
+			skipped = append(skipped, src)
+		}
+	}
+	for _, st := range steps {
+		if skip, _ := stepSkipped(st); skip {
+			skipped = append(skipped, st.source)
+		}
+	}
+	return service.OrderScanSources(skipped)
 }
 
 func (o scanOutcome) failed() bool { return len(o.markers) > 0 }
@@ -73,15 +121,13 @@ func runSBOMScan(ctx context.Context, db *sql.DB, tenantID, sbomID uuid.UUID, de
 	sctx = service.WithScanScope(sctx, db, tenantID)
 
 	started := time.Now()
-	var out scanOutcome
-	// Sources the operator switched off (SBOMHUB_JVN=off) are named before
-	// the slot is taken (Codex SBOMHUB_JVN R2 Low-2): a scan that never got a
-	// slot must still say it would not have consulted them.
-	for _, st := range steps {
-		if d, ok := st.scanner.(disableableScanner); ok && st.scanner != nil && d.ScanDisabled() {
-			out.skipped = service.MergeScanReasons(out.skipped, []string{st.source})
-		}
-	}
+	// checked is never nil: the run always reports its coverage, even when
+	// it checked nothing (offline, or no slot).
+	out := scanOutcome{checked: []string{}}
+	// Skipped sources are named before the slot is taken (Codex SBOMHUB_JVN
+	// R2 Low-2): a scan that never got a slot must still say it would not
+	// have consulted them.
+	out.skipped = plannedSkippedSources(steps)
 	// M72: at most SBOMHUB_SCAN_TENANT_CONCURRENCY scans of one tenant run at
 	// once, so one tenant's burst of scans cannot crowd out the others. The
 	// wait counts against this scan's own deadline.
@@ -94,15 +140,15 @@ func runSBOMScan(ctx context.Context, db *sql.DB, tenantID, sbomID uuid.UUID, de
 	}
 	defer release()
 	for _, st := range steps {
-		if st.scanner == nil {
-			continue
-		}
-		if d, ok := st.scanner.(disableableScanner); ok && d.ScanDisabled() {
-			// SBOMHUB_JVN=off: not run, not a failure, and never silent —
-			// it is reported as scan-status skipped_sources (already in
-			// out.skipped, above).
-			slog.Info("scan: source switched off by the operator; skipped",
-				"sbom_id", sbomID, "scanner", st.source)
+		if skip, why := stepSkipped(st); skip {
+			// SBOMHUB_JVN=off, offline mode, or no scanner: not run, not a
+			// failure, and never silent — it is reported as scan-status
+			// skipped_sources (already in out.skipped, above), never as
+			// checked.
+			if st.scanner != nil {
+				slog.Info("scan: source skipped; it makes no request",
+					"sbom_id", sbomID, "scanner", st.source, "why", why)
+			}
 			continue
 		}
 		var err error
@@ -133,6 +179,7 @@ func runSBOMScan(ctx context.Context, db *sql.DB, tenantID, sbomID uuid.UUID, de
 			okMsg = "scan completed"
 		}
 		slog.Info(okMsg, "sbom_id", sbomID, "scanner", st.source)
+		out.checked = service.MergeScanReasons(out.checked, []string{st.source})
 	}
 	if errors.Is(context.Cause(sctx), service.ErrScanDeadlineExceeded) {
 		slog.Warn("scan: overall scan deadline exceeded; the scan is reported failed",
@@ -161,7 +208,8 @@ func recordScanOutcome(tracker *service.ScanTracker, sbomID uuid.UUID, gen uint6
 	if tracker == nil {
 		return
 	}
-	if !tracker.FinishSkipped(sbomID, gen, o.reasons, o.message(), o.skipped) {
+	cov := service.ScanCoverage{Checked: append([]string{}, o.checked...), Skipped: o.skipped, Reported: true}
+	if !tracker.FinishCoverage(sbomID, gen, o.reasons, o.message(), cov) {
 		slog.Info("scan: outcome not recorded; the tracker no longer counts this run as active",
 			"sbom_id", sbomID, "failed", o.failed())
 	}

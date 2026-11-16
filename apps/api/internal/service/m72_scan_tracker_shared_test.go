@@ -24,6 +24,7 @@ type memStore struct {
 	msg     map[uuid.UUID]string
 	reasons map[uuid.UUID][]string
 	skipped map[uuid.UUID][]string
+	cov     map[uuid.UUID]ScanCoverage
 	runs    map[uuid.UUID]map[uint64]bool
 	beats   int
 	calls   int
@@ -33,7 +34,7 @@ var errStoreDown = errors.New("store down")
 
 func newMemStore() *memStore {
 	return &memStore{version: map[uuid.UUID]int{}, state: map[uuid.UUID]ScanState{}, msg: map[uuid.UUID]string{},
-		reasons: map[uuid.UUID][]string{}, skipped: map[uuid.UUID][]string{}, runs: map[uuid.UUID]map[uint64]bool{}}
+		reasons: map[uuid.UUID][]string{}, skipped: map[uuid.UUID][]string{}, cov: map[uuid.UUID]ScanCoverage{}, runs: map[uuid.UUID]map[uint64]bool{}}
 }
 
 func (m *memStore) setDown(d bool) { m.mu.Lock(); m.down = d; m.mu.Unlock() }
@@ -54,7 +55,7 @@ func (m *memStore) begin(_ context.Context, id uuid.UUID, gen uint64) error {
 	return nil
 }
 
-func (m *memStore) finish(_ context.Context, id uuid.UUID, gen uint64, msg string, reasons, skipped []string) (bool, error) {
+func (m *memStore) finish(_ context.Context, id uuid.UUID, gen uint64, msg string, reasons []string, cov ScanCoverage) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls++
@@ -65,7 +66,8 @@ func (m *memStore) finish(_ context.Context, id uuid.UUID, gen uint64, msg strin
 		return false, nil
 	}
 	delete(m.runs[id], gen)
-	m.skipped[id] = skipped
+	m.skipped[id] = cov.Skipped
+	m.cov[id] = cov
 	if msg != "" {
 		m.state[id], m.msg[id], m.reasons[id] = ScanStateFailed, msg, reasons
 		m.version[id]++
@@ -126,7 +128,7 @@ func (m *memStore) merge(ctx context.Context, id uuid.UUID, ms *mergeSet) error 
 		}
 	}
 	for g := range ms.finishes {
-		if _, err := m.finish(ctx, id, g, "", nil, ms.skipped); err != nil {
+		if _, err := m.finish(ctx, id, g, "", nil, ScanCoverage{Skipped: ms.skipped, Checked: ms.checked, Reported: ms.checkedKnown}); err != nil {
 			return err
 		}
 	}
@@ -163,7 +165,8 @@ func (m *memStore) get(_ context.Context, id uuid.UUID) (statusView, error) {
 	if !ok {
 		return statusView{}, nil
 	}
-	return statusView{state: st, errMsg: m.msg[id], reasons: m.reasons[id], skipped: m.skipped[id], found: true,
+	return statusView{state: st, errMsg: m.msg[id], reasons: m.reasons[id], skipped: m.skipped[id],
+		checked: m.cov[id].Checked, checkedKnown: m.cov[id].Reported, found: true,
 		version: fmt.Sprintf("m%d", m.version[id])}, nil
 }
 
@@ -474,7 +477,7 @@ func (g *groupStore) begin(ctx context.Context, id uuid.UUID, gen uint64) error 
 	return g.memStore.begin(ctx, id, gen)
 }
 
-func (g *groupStore) finish(_ context.Context, id uuid.UUID, gen uint64, msg string, _, _ []string) (bool, error) {
+func (g *groupStore) finish(_ context.Context, id uuid.UUID, gen uint64, msg string, _ []string, _ ScanCoverage) (bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.down {
@@ -855,7 +858,7 @@ func TestM72R7_StalledQueuesAreBoundedAndReclaimed(t *testing.T) {
 // finishFailStore fails every finish (Redis "flaky" for one kind of write).
 type finishFailStore struct{ *countingStore }
 
-func (f finishFailStore) finish(context.Context, uuid.UUID, uint64, string, []string, []string) (bool, error) {
+func (f finishFailStore) finish(context.Context, uuid.UUID, uint64, string, []string, ScanCoverage) (bool, error) {
 	return false, errStoreDown
 }
 
@@ -1009,9 +1012,9 @@ func (s slowApplyStore) begin(ctx context.Context, id uuid.UUID, gen uint64) err
 	return s.memStore.begin(ctx, id, gen)
 }
 
-func (s slowApplyStore) finish(ctx context.Context, id uuid.UUID, gen uint64, msg string, r, skipped []string) (bool, error) {
+func (s slowApplyStore) finish(ctx context.Context, id uuid.UUID, gen uint64, msg string, r []string, cov ScanCoverage) (bool, error) {
 	time.Sleep(s.d)
-	return s.memStore.finish(ctx, id, gen, msg, r, skipped)
+	return s.memStore.finish(ctx, id, gen, msg, r, cov)
 }
 
 // Codex M72 R13 High-2: a fresh Begin is not starved by backlog drains; it
@@ -1241,7 +1244,7 @@ func (s *inactiveStore) heartbeatMany(_ context.Context, runs []runKey) ([]bool,
 	return make([]bool, len(runs)), nil
 }
 
-func (s *inactiveStore) finish(context.Context, uuid.UUID, uint64, string, []string, []string) (bool, error) {
+func (s *inactiveStore) finish(context.Context, uuid.UUID, uint64, string, []string, ScanCoverage) (bool, error) {
 	return false, errStoreDown
 }
 

@@ -37,6 +37,7 @@ func TestJVNSwitch_RunSBOMScanSkipsADisabledSource(t *testing.T) {
 	out := runSBOMScan(context.Background(), nil, uuid.New(), uuid.New(), time.Minute, []scanStep{
 		{source: "nvd", scanner: nvd},
 		{source: "jvn", scanner: jvn},
+		{source: "distro", scanner: &stubScanner{}},
 	})
 	if jvn.called != 0 {
 		t.Errorf("the disabled scanner was called %d time(s)", jvn.called)
@@ -57,7 +58,7 @@ func TestJVNSwitch_RunSBOMScanSkipsADisabledSource(t *testing.T) {
 func TestJVNSwitch_RunSBOMScanEnabledIsUnchanged(t *testing.T) {
 	jvn := &switchScanner{disabled: false}
 	out := runSBOMScan(context.Background(), nil, uuid.New(), uuid.New(), time.Minute,
-		[]scanStep{{source: "jvn", scanner: jvn}})
+		[]scanStep{{source: "nvd", scanner: &stubScanner{}}, {source: "jvn", scanner: jvn}, {source: "distro", scanner: &stubScanner{}}})
 	if jvn.called != 1 || len(out.skipped) != 0 || out.failed() {
 		t.Errorf("called=%d out=%+v, want the scanner run and nothing skipped", jvn.called, out)
 	}
@@ -69,6 +70,7 @@ func TestJVNSwitch_SkipDoesNotMaskAFailure(t *testing.T) {
 	out := runSBOMScan(context.Background(), nil, uuid.New(), uuid.New(), time.Minute, []scanStep{
 		{source: "nvd", scanner: nvd},
 		{source: "jvn", scanner: &switchScanner{disabled: true}},
+		{source: "distro", scanner: &stubScanner{}},
 	})
 	if !out.failed() || !slices.Equal(out.reasons, []string{service.ScanReasonFetchFailed}) ||
 		!slices.Equal(out.skipped, []string{"jvn"}) {
@@ -152,7 +154,9 @@ func TestJVNSwitch_ScanStatusOmitsSkippedSourcesWhenNoneSkipped(t *testing.T) {
 
 // The manual route with sources=jvn while JVN is off: 202 as usual (the
 // GitHub Action requires 202 by number), the scan skips JVN and reads
-// completed with skipped_sources [jvn].
+// completed with jvn in skipped_sources. Since 2026-11 skipped_sources also
+// names the sources not requested (nvd) and the step without a scanner
+// (distro, not configured in this handler).
 func TestJVNSwitch_ManualJVNOnlyScanIsSkippedNotRefused(t *testing.T) {
 	jvn := &switchScanner{disabled: true}
 	tracker := service.NewScanTracker()
@@ -162,8 +166,9 @@ func TestJVNSwitch_ManualJVNOnlyScanIsSkippedNotRefused(t *testing.T) {
 	if jvn.called != 0 {
 		t.Errorf("JVN scanner called %d time(s) while disabled", jvn.called)
 	}
-	if st := tracker.GetStatus(id); st.State != service.ScanStateCompleted || !slices.Equal(st.Skipped, []string{"jvn"}) {
-		t.Errorf("status = %+v, want completed with skipped [jvn]", st)
+	if st := tracker.GetStatus(id); st.State != service.ScanStateCompleted ||
+		!slices.Equal(st.Skipped, []string{"nvd", "jvn", "distro"}) || !st.CheckedKnown || len(st.Checked) != 0 {
+		t.Errorf("status = %+v, want completed, skipped [nvd jvn distro], checked []", st)
 	}
 }
 
@@ -179,6 +184,7 @@ func TestJVNSwitch_SlotFailureStillReportsTheSkip(t *testing.T) {
 	out := runSBOMScan(ctx, nil, uuid.New(), uuid.New(), time.Minute, []scanStep{
 		{source: "nvd", scanner: &stubScanner{}},
 		{source: "jvn", scanner: jvn},
+		{source: "distro", scanner: &stubScanner{}},
 	})
 	if !out.failed() || !slices.Equal(out.reasons, []string{service.ScanReasonCancelled}) {
 		t.Fatalf("out = %+v, want failed (cancelled)", out)

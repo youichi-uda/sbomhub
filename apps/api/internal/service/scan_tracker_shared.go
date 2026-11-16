@@ -58,11 +58,11 @@ type sharedEvent struct {
 	state   ScanState
 	msg     string
 	reasons []string
-	// skipped: an evFinish's skipped sources (SBOMHUB_JVN=off).
-	skipped []string
-	at      time.Time
-	done    chan struct{} // closed once applied
-	merged  *mergeSet     // evMerge
+	// cov: an evFinish's coverage (its skipped and checked sources).
+	cov    ScanCoverage
+	at     time.Time
+	done   chan struct{} // closed once applied
+	merged *mergeSet     // evMerge
 	// applying: an evMerge being applied; it takes no more writes.
 	applying bool
 }
@@ -96,7 +96,11 @@ type liveRun struct {
 func cleanupFinish(gen uint64, lr *liveRun) *sharedEvent {
 	ev := &sharedEvent{kind: evFinish, gen: gen}
 	if lr != nil && len(lr.finSkipped) > 0 {
-		ev.skipped = append([]string(nil), lr.finSkipped...)
+		// The skip only, never the checked sources: a replayed check landing
+		// in a later group would claim a check that group did not make (the
+		// unsafe direction). Reported stays false, so the cleanup neither
+		// adds to nor narrows a group's checked sources.
+		ev.cov.Skipped = append([]string(nil), lr.finSkipped...)
 	}
 	return ev
 }
@@ -170,7 +174,7 @@ func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedE
 		if ev.msg != "" {
 			m.addFailure(ev.msg, ev.reasons)
 		}
-		m.addSkipped(ev.skipped)
+		m.addCoverage(ev.cov)
 	case evMark:
 		if ev.state == ScanStateFailed && ev.msg != "" {
 			m.addFailure(ev.msg, ev.reasons)
@@ -295,7 +299,7 @@ func (t *ScanTracker) apply(sbomID uuid.UUID, ev *sharedEvent) error {
 	case evRejoin:
 		return t.shared.rejoin(ctx, sbomID, ev.gen)
 	case evFinish:
-		known, err := t.shared.finish(ctx, sbomID, ev.gen, ev.msg, ev.reasons, ev.skipped)
+		known, err := t.shared.finish(ctx, sbomID, ev.gen, ev.msg, ev.reasons, ev.cov)
 		if err == nil && !known {
 			slog.Info("scan status: the shared store did not know this run; its outcome was merged into the current group",
 				"sbom_id", sbomID, "failed", ev.msg != "")
@@ -368,16 +372,18 @@ func (t *ScanTracker) waitBegin(done <-chan struct{}) {
 	}
 }
 
-func (t *ScanTracker) queueFinishLocked(sbomID uuid.UUID, gen uint64, errMsg string, reasons, skipped []string) {
+func (t *ScanTracker) queueFinishLocked(sbomID uuid.UUID, gen uint64, errMsg string, reasons []string, cov ScanCoverage) {
 	if t.shared == nil {
 		return
 	}
 	t.qMu.Lock()
 	defer t.qMu.Unlock()
+	cov = ScanCoverage{Skipped: append([]string(nil), cov.Skipped...),
+		Checked: append([]string{}, cov.Checked...), Reported: cov.Reported}
 	ev := &sharedEvent{kind: evFinish, gen: gen, msg: errMsg,
-		reasons: append([]string(nil), reasons...), skipped: append([]string(nil), skipped...)}
+		reasons: append([]string(nil), reasons...), cov: cov}
 	if lr := t.live[runKey{sbomID, gen}]; lr != nil {
-		lr.finSkipped = ev.skipped
+		lr.finSkipped = cov.Skipped
 	}
 	delete(t.live, runKey{sbomID, gen})
 	t.enqueueLocked(sbomID, ev)

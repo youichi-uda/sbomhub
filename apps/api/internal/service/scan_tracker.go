@@ -106,6 +106,14 @@ type scanEntry struct {
 	// state — completed or failed alike, since a skip is not a failure.
 	skipped      []string
 	groupSkipped []string
+	// checked / checkedKnown are the terminal state's checked sources
+	// (scan_coverage.go): the intersection over the group's runs that
+	// reported coverage; checkedKnown is false when none did. group* hold
+	// them while runs of the group are still active.
+	checked           []string
+	checkedKnown      bool
+	groupChecked      []string
+	groupCheckedKnown bool
 	// rev is the tracker-wide sequence number of the entry's last
 	// transition (M72): GetDetail detects a transition that raced its Redis
 	// read (Codex M72 R4 High-1).
@@ -243,6 +251,7 @@ func (t *ScanTracker) Begin(sbomID uuid.UUID) uint64 {
 	}
 	e.state = ScanStateRunning
 	e.errMsg, e.reasons, e.skipped = "", nil, nil
+	e.checked, e.checkedKnown = nil, false
 	e.updatedAt = time.Now()
 	e.active[gen] = true
 	t.put(sbomID, e)
@@ -269,7 +278,7 @@ var testHookAfterLocalBegin func(gen uint64)
 // non-empty, completed otherwise. It reports whether gen was an active run.
 // The SBOM's state becomes terminal only when no other run is active.
 func (t *ScanTracker) Finish(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string) bool {
-	return t.finishLocal(sbomID, gen, reasons, errMsg, nil)
+	return t.finishLocal(sbomID, gen, reasons, errMsg, ScanCoverage{})
 }
 
 // FinishSkipped is Finish for a run that skipped sources the operator
@@ -278,10 +287,18 @@ func (t *ScanTracker) Finish(sbomID uuid.UUID, gen uint64, reasons []string, err
 // terminal state carries the union of the skips of every run of its group,
 // in the shared store too, so every replica reports it.
 func (t *ScanTracker) FinishSkipped(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string, skipped []string) bool {
-	return t.finishLocal(sbomID, gen, reasons, errMsg, skipped)
+	return t.finishLocal(sbomID, gen, reasons, errMsg, ScanCoverage{Skipped: skipped})
 }
 
-func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string, skipped []string) bool {
+// FinishCoverage is Finish for a run that reports its coverage: the sources
+// it checked and the ones it skipped (scan_coverage.go). Like a skip, a
+// coverage report is not a failure; the SBOM's terminal state carries the
+// group's coverage, in the shared store too.
+func (t *ScanTracker) FinishCoverage(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string, cov ScanCoverage) bool {
+	return t.finishLocal(sbomID, gen, reasons, errMsg, cov)
+}
+
+func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string, errMsg string, cov ScanCoverage) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	e, ok := t.entries[sbomID]
@@ -297,8 +314,10 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 	if sharedMsg == "" && len(reasons) > 0 {
 		sharedMsg = "scan failed"
 	}
-	t.queueFinishLocked(sbomID, gen, sharedMsg, reasons, skipped)
-	e.groupSkipped = MergeScanReasons(e.groupSkipped, skipped)
+	t.queueFinishLocked(sbomID, gen, sharedMsg, reasons, cov)
+	g := groupCoverage{skipped: e.groupSkipped, checked: e.groupChecked, checkedKnown: e.groupCheckedKnown}
+	g.add(cov)
+	e.groupSkipped, e.groupChecked, e.groupCheckedKnown = g.skipped, g.checked, g.checkedKnown
 	if errMsg != "" || len(reasons) > 0 {
 		if errMsg == "" {
 			errMsg = "scan failed"
@@ -325,7 +344,9 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 		e.errMsg, e.reasons = "", nil
 	}
 	e.skipped = e.groupSkipped
+	e.checked, e.checkedKnown = e.groupChecked, e.groupCheckedKnown
 	e.groupMsgs, e.groupReasons, e.groupSkipped = nil, nil, nil
+	e.groupChecked, e.groupCheckedKnown = nil, false
 	t.put(sbomID, e)
 	return true
 }
@@ -385,10 +406,18 @@ type ScanStatusDetail struct {
 	// Error and Reasons are set only when State is failed.
 	Error   string
 	Reasons []string
-	// Skipped (SBOMHUB_JVN=off) names the sources the scan did not consult
-	// because the operator switched them off. Set only when State is
-	// completed or failed.
+	// Skipped names the sources the scan made no request to because of
+	// configuration or the request (SBOMHUB_JVN=off, offline mode, a
+	// `?sources=` subset, the scheduled scan; scan_coverage.go), in
+	// ScanSources order; nil when none. Set only when State is completed or
+	// failed.
 	Skipped []string
+	// Checked names the sources the scan checked (scan_coverage.go), in
+	// ScanSources order, never one in Skipped. Meaningful only when
+	// CheckedKnown, which is set only when State is completed or failed and
+	// a run of the group reported its coverage; then Checked is non-nil.
+	Checked      []string
+	CheckedKnown bool
 	// Version changes with every transition of the status (see
 	// GetDetailVersion).
 	Version string
@@ -443,8 +472,10 @@ func (t *ScanTracker) GetStatus(sbomID uuid.UUID) ScanStatusDetail {
 		case t.pendingShared(sbomID):
 			return t.localPending(sbomID)
 		}
-		return ScanStatusDetail{State: view.state, Error: view.errMsg, Reasons: view.reasons,
-			Skipped: view.skipped, Version: view.version}
+		d := ScanStatusDetail{State: view.state, Error: view.errMsg, Reasons: view.reasons,
+			Skipped: view.skipped, Checked: view.checked, CheckedKnown: view.checkedKnown, Version: view.version}
+		normaliseCoverage(&d)
+		return d
 	}
 	// Transitions kept racing the read: the safe local answer.
 	return t.localVersioned(sbomID, true)
@@ -490,6 +521,8 @@ func (t *ScanTracker) getDetailLocked(sbomID uuid.UUID) ScanStatusDetail {
 	d := ScanStatusDetail{State: entry.state, Error: entry.errMsg}
 	if entry.state == ScanStateCompleted || entry.state == ScanStateFailed {
 		d.Skipped = append([]string(nil), entry.skipped...)
+		d.Checked, d.CheckedKnown = append([]string(nil), entry.checked...), entry.checkedKnown
+		normaliseCoverage(&d)
 	}
 	if entry.state == ScanStateFailed {
 		d.Reasons = append([]string(nil), entry.reasons...)

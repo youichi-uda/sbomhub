@@ -1569,3 +1569,8 @@ func extractJVNCVEID(item JVNItem) string {
 // written against https://jvndb.jvn.jp/schema/vuldef_3.2.xsd from scratch, not
 // revived from here. TestM55JVN_DetailInfoIsNotAnRSSFeed keeps the measured
 // incompatibility executable so that decision is made with the fact in hand.
+
+// ScanOffline reports whether the service runs in offline mode
+// (SBOMHUB_OFFLINE): its sweep makes no request and checks nothing, so the
+// scan routes report JVN as skipped, never as checked (scan_coverage.go).
+func (s *JVNService) ScanOffline() bool { return s.offline }

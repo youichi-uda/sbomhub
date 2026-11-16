@@ -1901,3 +1901,8 @@ func (s *NVDService) SaveVulnerability(ctx context.Context, vuln *model.Vulnerab
 	vuln.ID = existing.ID
 	return nil
 }
+
+// ScanOffline reports whether the service runs in offline mode
+// (SBOMHUB_OFFLINE): its sweep makes no request and checks nothing, so the
+// scan routes report NVD as skipped, never as checked (scan_coverage.go).
+func (s *NVDService) ScanOffline() bool { return s.offline }

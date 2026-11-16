@@ -99,6 +99,15 @@ func scanStatusKeys(sbomID uuid.UUID) []string {
 //	              version's and older ones, during a rolling upgrade — resets
 //	              it too (Codex SBOMHUB_JVN R1 High-1). An empty marker is not
 //	              a failure to publish or to add_failure, in any version.
+//	              The same entry carries c:[source...] (2026-11, coverage):
+//	              absent until a finish of the group reports its coverage,
+//	              then the intersection of the reported checked sources (see
+//	              scan_coverage.go). Older replicas decode and re-encode the
+//	              entry whole (add_skipped), so they keep c; their own
+//	              finishes report nothing and leave it as it is. This
+//	              version always writes s (possibly empty) next to c, so an
+//	              older replica's add_skipped finds this entry rather than
+//	              adding a second one.
 //	r:<gen>       an active run, value = lease expiry (ms, Redis time)
 //	p:<gen>       an intent: a Begin still queued behind older writes; reads
 //	              as running, value = lease expiry
@@ -194,6 +203,40 @@ local function add_skipped(ss)
   for _, x in ipairs(ss) do
     if type(x) == 'string' and x ~= '' and not have[x] then table.insert(entry.s, x); have[x] = true end
   end
+  save_outcomes(o)
+end
+-- The group's checked sources: c of the marker-less entry; nil while no
+-- finish of the group reported coverage.
+local function checked_list()
+  for _, e in ipairs(load_outcomes()) do
+    if e.m == '' and type(e.c) == 'table' then return e.c end
+  end
+  return nil
+end
+-- add_checked intersects the group's checked sources with a finish's (the
+-- first report sets them). cs is nil when the finish reports nothing.
+local function add_checked(cs)
+  if type(cs) ~= 'table' then return end
+  local o = load_outcomes()
+  local entry = nil
+  for _, e in ipairs(o) do
+    if e.m == '' and type(e.s) == 'table' then entry = e; break end
+  end
+  if not entry then
+    entry = {m = '', s = {}}
+    table.insert(o, entry)
+  end
+  local inc = {}
+  for _, x in ipairs(cs) do
+    if type(x) == 'string' and x ~= '' then inc[x] = true end
+  end
+  local out, seen = {}, {}
+  local base = cs
+  if type(entry.c) == 'table' then base = entry.c end
+  for _, x in ipairs(base) do
+    if type(x) == 'string' and inc[x] and not seen[x] then table.insert(out, x); seen[x] = true end
+  end
+  entry.c = out
   save_outcomes(o)
 end
 local function add_failure(msg, rs)
@@ -417,7 +460,9 @@ expire(ARGV[3])
 return 1`
 
 // ARGV: gen, ttl ms, error marker (empty = completed), reasons JSON, skipped
-// sources JSON (recorded either way too, like the failure).
+// sources JSON (recorded either way too, like the failure), checked sources
+// JSON (” when the finish reports no coverage; recorded either way too:
+// it can only narrow a group that already has checked sources).
 // Returns 1 if the run was active or swept as interrupted, 2 if Redis did not
 // know it (its begin never landed, or it lapsed and its tombstone expired). A
 // failure is recorded EITHER WAY (Codex M72 R5 High-2): a failure is never
@@ -435,13 +480,18 @@ if not ok or type(rs) ~= 'table' then rs = {} end
 add_failure(ARGV[3], rs)
 local okS, ss = pcall(cjson.decode, ARGV[5] or '[]')
 if okS then add_skipped(ss) end
+if ARGV[6] and ARGV[6] ~= '' then
+  local okC, cs = pcall(cjson.decode, ARGV[6])
+  if okC then add_checked(cs) end
+end
 publish(now)
 expire(ARGV[2])
 if active or wasLost then return 1 end
 return 2`
 
 // ARGV: JSON {"b": [gen...], "f": [gen...], "x": [[marker, [reason...]]...],
-// "s": [skipped source...]},
+// "s": [skipped source...], "c": [checked source...] (only when a folded
+// finish reported coverage)},
 // lease ms, ttl ms. The coalesced writes of a queue that overflowed: runs
 // that began (joined to the current group, never a new one), runs that
 // finished, and the failures among them (Codex M72 R5 High-3).
@@ -469,6 +519,7 @@ if type(m.x) == 'table' then
   end
 end
 add_skipped(m.s)
+add_checked(m.c)
 publish(now)
 expire(ARGV[3])
 return 1`
@@ -524,7 +575,7 @@ expire(ARGV[4])
 return 1`
 
 // Returns false (nil) when there is no entry, else {state, error, reasons,
-// rev, skipped}.
+// rev, skipped, checked (” when no finish of the group reported coverage)}.
 const scanStatusGetLua = `
 if redis.call('EXISTS', K) == 0 then return false end
 local now = nowms()
@@ -555,6 +606,11 @@ return {redis.call('HGET', K, 'state') or '', redis.call('HGET', K, 'error') or 
   local sk = skipped_list()
   if #sk == 0 then return '[]' end
   return cjson.encode(sk)
+end)(), (function()
+  local cs = checked_list()
+  if cs == nil then return '' end
+  if #cs == 0 then return '[]' end
+  return cjson.encode(cs)
 end)()}`
 
 // statusView is one read of the shared status. version changes with every
@@ -566,8 +622,13 @@ type statusView struct {
 	// skipped: the group's skipped sources (SBOMHUB_JVN=off), on terminal
 	// states only.
 	skipped []string
-	version string
-	found   bool
+	// checked / checkedKnown: the group's checked sources (scan_coverage.go),
+	// on terminal states only; checkedKnown is false when no finish of the
+	// group reported coverage.
+	checked      []string
+	checkedKnown bool
+	version      string
+	found        bool
 }
 
 // scanStatusStore is what the tracker needs from shared storage.
@@ -575,8 +636,9 @@ type scanStatusStore interface {
 	begin(ctx context.Context, sbomID uuid.UUID, gen uint64) error
 	// finish records run gen's outcome; known is false when the store did
 	// not know the run (its failure is recorded anyway).
-	// skipped is the run's skipped sources (SBOMHUB_JVN=off).
-	finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons, skipped []string) (known bool, err error)
+	// cov is the run's coverage: its skipped sources, and its checked
+	// sources when cov.Reported.
+	finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons []string, cov ScanCoverage) (known bool, err error)
 	// heartbeatMany renews the leases of runs in one round trip; active[i]
 	// is false for a run that was superseded.
 	heartbeatMany(ctx context.Context, runs []runKey) (active []bool, err error)
@@ -732,11 +794,15 @@ func (s *redisScanStatusStore) begin(ctx context.Context, sbomID uuid.UUID, gen 
 		genString(gen), s.lease.Milliseconds(), s.ttl.Milliseconds()).Err()
 }
 
-func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons, skipped []string) (bool, error) {
+func (s *redisScanStatusStore) finish(ctx context.Context, sbomID uuid.UUID, gen uint64, errMsg string, reasons []string, cov ScanCoverage) (bool, error) {
 	ctx, cancel := s.opCtx(ctx)
 	defer cancel()
+	checked := ""
+	if cov.Reported {
+		checked = reasonsJSON(cov.Checked)
+	}
 	n, err := s.sc().finish.Run(ctx, s.client, scanStatusKeys(sbomID),
-		genString(gen), s.ttl.Milliseconds(), errMsg, reasonsJSON(reasons), reasonsJSON(skipped)).Int()
+		genString(gen), s.ttl.Milliseconds(), errMsg, reasonsJSON(reasons), reasonsJSON(cov.Skipped), checked).Int()
 	return n == 1, err
 }
 
@@ -755,14 +821,24 @@ type mergeSet struct {
 	fresh         map[uint64]bool
 	freshFinishes int
 	failures      []mergeFailure
-	// skipped: the folded finishes' skipped sources (SBOMHUB_JVN=off),
-	// bounded by the source vocabulary.
-	skipped []string
+	// skipped: the folded finishes' skipped sources, bounded by the source
+	// vocabulary. checked / checkedKnown: the intersection of the checked
+	// sources of the folded finishes that reported coverage.
+	skipped      []string
+	checked      []string
+	checkedKnown bool
 }
 
 // addSkipped folds a finish's skipped sources.
 func (m *mergeSet) addSkipped(skipped []string) {
-	m.skipped = MergeScanReasons(m.skipped, skipped)
+	m.addCoverage(ScanCoverage{Skipped: skipped})
+}
+
+// addCoverage folds a finish's coverage (groupCoverage's rule).
+func (m *mergeSet) addCoverage(c ScanCoverage) {
+	g := groupCoverage{skipped: m.skipped, checked: m.checked, checkedKnown: m.checkedKnown}
+	g.add(c)
+	m.skipped, m.checked, m.checkedKnown = g.skipped, g.checked, g.checkedKnown
 }
 
 type mergeFailure struct {
@@ -839,7 +915,15 @@ func (m *mergeSet) json() string {
 	if sk == nil {
 		sk = []string{}
 	}
-	b, err := json.Marshal(map[string]any{"b": gens(m.begins), "f": gens(m.finishes), "x": x, "s": sk})
+	body := map[string]any{"b": gens(m.begins), "f": gens(m.finishes), "x": x, "s": sk}
+	if m.checkedKnown {
+		c := m.checked
+		if c == nil {
+			c = []string{}
+		}
+		body["c"] = c
+	}
+	b, err := json.Marshal(body)
 	if err != nil {
 		return "{}"
 	}
@@ -928,7 +1012,7 @@ func (s *redisScanStatusStore) get(ctx context.Context, sbomID uuid.UUID) (statu
 	if err != nil {
 		return statusView{}, err
 	}
-	if len(v) != 5 {
+	if len(v) != 6 {
 		return statusView{}, fmt.Errorf("scan status: unexpected reply of %d values", len(v))
 	}
 	state := ScanState(v[0])
@@ -943,6 +1027,13 @@ func (s *redisScanStatusStore) get(ctx context.Context, sbomID uuid.UUID) (statu
 	}
 	if err := json.Unmarshal([]byte(v[4]), &view.skipped); err != nil {
 		view.skipped = nil
+	}
+	if v[5] != "" {
+		// An undecodable value is "not known", never "checked nothing".
+		var c []string
+		if err := json.Unmarshal([]byte(v[5]), &c); err == nil {
+			view.checked, view.checkedKnown = append([]string{}, c...), true
+		}
 	}
 	if state != ScanStateFailed {
 		return view, nil

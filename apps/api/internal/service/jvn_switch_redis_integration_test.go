@@ -112,7 +112,7 @@ func TestJVNSwitchRedis_UnknownRunStillRecordsSkip(t *testing.T) {
 	a := process(rdb, 0, time.Hour)
 	id := uuid.New()
 	store := a.shared.(*redisScanStatusStore)
-	known, err := store.finish(context.Background(), id, 42, "", nil, []string{"jvn"})
+	known, err := store.finish(context.Background(), id, 42, "", nil, ScanCoverage{Skipped: []string{"jvn"}})
 	if err != nil || known {
 		t.Fatalf("finish of an unknown run: known=%t err=%v", known, err)
 	}
@@ -134,7 +134,7 @@ func TestJVNSwitchRedis_OldReplicaGroupResetClearsTheSkip(t *testing.T) {
 	id := uuid.New()
 	store := a.shared.(*redisScanStatusStore)
 	ctx := context.Background()
-	if _, err := store.finish(ctx, id, 1, "", nil, []string{"jvn"}); err != nil {
+	if _, err := store.finish(ctx, id, 1, "", nil, ScanCoverage{Skipped: []string{"jvn"}}); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := store.get(ctx, id); !slices.Equal(v.skipped, []string{"jvn"}) {
@@ -146,7 +146,7 @@ redis.call('HSET', KEYS[1], 'outcomes', '[]')
 return 1`, scanStatusKeys(id)).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.finish(ctx, id, 2, "", nil, nil); err != nil {
+	if _, err := store.finish(ctx, id, 2, "", nil, ScanCoverage{}); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := store.get(ctx, id); len(v.skipped) != 0 {
@@ -162,13 +162,13 @@ func TestJVNSwitchRedis_SkipEntryIsNotAFailure(t *testing.T) {
 	id := uuid.New()
 	store := a.shared.(*redisScanStatusStore)
 	ctx := context.Background()
-	if _, err := store.finish(ctx, id, 1, "", nil, []string{"jvn"}); err != nil {
+	if _, err := store.finish(ctx, id, 1, "", nil, ScanCoverage{Skipped: []string{"jvn"}}); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := store.get(ctx, id); v.state != ScanStateCompleted || v.errMsg != "" || len(v.reasons) != 0 {
 		t.Fatalf("a skip alone published %+v", v)
 	}
-	if _, err := store.finish(ctx, id, 2, "nvd: scan failed (fetch_failed)", []string{ScanReasonFetchFailed}, nil); err != nil {
+	if _, err := store.finish(ctx, id, 2, "nvd: scan failed (fetch_failed)", []string{ScanReasonFetchFailed}, ScanCoverage{}); err != nil {
 		t.Fatal(err)
 	}
 	v, _ := store.get(ctx, id)

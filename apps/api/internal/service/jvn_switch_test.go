@@ -157,11 +157,12 @@ type finishCall struct {
 	gen     uint64
 	msg     string
 	skipped []string
+	cov     ScanCoverage
 }
 
-func (f *finishLog) record(gen uint64, msg string, skipped []string) {
+func (f *finishLog) record(gen uint64, msg string, cov ScanCoverage) {
 	f.mu <- struct{}{}
-	f.calls = append(f.calls, finishCall{gen, msg, append([]string(nil), skipped...)})
+	f.calls = append(f.calls, finishCall{gen, msg, append([]string(nil), cov.Skipped...), cov})
 	<-f.mu
 }
 
@@ -192,9 +193,9 @@ func (s slowIntentFinishLog) intent(ctx context.Context, id uuid.UUID, gen uint6
 	return s.memStore.intent(ctx, id, gen)
 }
 
-func (s slowIntentFinishLog) finish(ctx context.Context, id uuid.UUID, gen uint64, msg string, r, skipped []string) (bool, error) {
-	s.record(gen, msg, skipped)
-	return s.memStore.finish(ctx, id, gen, msg, r, skipped)
+func (s slowIntentFinishLog) finish(ctx context.Context, id uuid.UUID, gen uint64, msg string, r []string, cov ScanCoverage) (bool, error) {
+	s.record(gen, msg, cov)
+	return s.memStore.finish(ctx, id, gen, msg, r, cov)
 }
 
 // Codex (SBOMHUB_JVN) R1 Medium-2: the cleanup finish written after a late
@@ -265,9 +266,9 @@ type lossyRejoinFinishLog struct {
 	log *finishLog
 }
 
-func (s lossyRejoinFinishLog) finish(ctx context.Context, id uuid.UUID, gen uint64, msg string, r, skipped []string) (bool, error) {
-	s.log.record(gen, msg, skipped)
-	return s.lossyRejoinStore.finish(ctx, id, gen, msg, r, skipped)
+func (s lossyRejoinFinishLog) finish(ctx context.Context, id uuid.UUID, gen uint64, msg string, r []string, cov ScanCoverage) (bool, error) {
+	s.log.record(gen, msg, cov)
+	return s.lossyRejoinStore.finish(ctx, id, gen, msg, r, cov)
 }
 
 // The rejoin cleanup (Codex M72 R21 Medium-1) carries the outcome too.

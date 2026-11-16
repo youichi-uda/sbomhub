@@ -1087,3 +1087,8 @@ func sbomOperatingSystem(comps []model.Component) *distroOS {
 	}
 	return found
 }
+
+// ScanOffline reports whether the step runs in offline mode
+// (SBOMHUB_OFFLINE): it makes no request and relabels nothing, so the scan
+// routes report distro as skipped, never as checked (scan_coverage.go).
+func (s *DistroService) ScanOffline() bool { return s.offline }

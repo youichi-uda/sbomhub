@@ -603,9 +603,9 @@ func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
 // runScanRun is runScan for a run already begun (gen from ScanTracker.Begin).
 func (h *SbomHandler) runScanRun(ctx context.Context, sbomID, tenantID uuid.UUID, gen uint64) {
 	out := runSBOMScan(ctx, h.db, tenantID, sbomID, h.scanDeadline, []scanStep{
-		{source: "nvd", scanner: h.nvdService, okMsg: "Auto NVD scan completed"},
-		{source: "jvn", scanner: h.jvnService, okMsg: "Auto JVN scan completed"},
-		{source: "distro", scanner: h.distroService, okMsg: "Auto distro relabel completed"},
+		{source: service.ScanSourceNVD, scanner: h.nvdService, okMsg: "Auto NVD scan completed"},
+		{source: service.ScanSourceJVN, scanner: h.jvnService, okMsg: "Auto JVN scan completed"},
+		{source: service.ScanSourceDistro, scanner: h.distroService, okMsg: "Auto distro relabel completed"},
 	})
 	recordScanOutcome(h.scanTracker, sbomID, gen, out)
 }
@@ -787,12 +787,24 @@ type ScanStatusResponse struct {
 	// distro_data_failed, queue_full, scan_error. Present only when
 	// status=failed and known.
 	Reasons []string `json:"reasons,omitempty"`
-	// SkippedSources (additive) names the sources the scan did not consult
-	// because the operator switched them off (SBOMHUB_JVN=off: ["jvn"]).
-	// Present only when status is completed or failed and something was
-	// skipped; a completed scan with it present checked less than a default
-	// one does.
+	// SkippedSources (additive) names the sources the scan made no request
+	// to because of configuration or the request: SBOMHUB_JVN=off (["jvn"]),
+	// offline mode (SBOMHUB_OFFLINE: every source), a `?sources=` subset of
+	// POST .../scan, the scheduled scan (["jvn"]). Each once, ordered nvd,
+	// jvn, distro (an unknown name after them, lexically). Present only when
+	// status is completed or failed and something was skipped; a completed
+	// scan with it present checked less than a default one does.
 	SkippedSources []string `json:"skipped_sources,omitempty"`
+	// CheckedSources (additive, 2026-11) names the sources the scan actually
+	// checked: the step queried its live source (or had nothing to look up)
+	// and finished without failure — for overlapping runs of the SBOM, every
+	// run that reported coverage checked it. Same order as skipped_sources,
+	// never overlapping it; a failed source is in neither (it is in
+	// error/reasons). Present only when status is completed or failed AND
+	// the scan reported its coverage — then always, as [] when nothing was
+	// checked (offline mode). Absent otherwise: running/unknown, or a scan
+	// recorded by an older replica (coverage unknown, not "none").
+	CheckedSources *[]string `json:"checked_sources,omitempty"`
 }
 
 // VulnerabilitySummaryCount aggregates vulnerability counts by severity
@@ -885,10 +897,12 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	// with the pre-commit counts.
 	state := service.ScanStateUnknown
 	var errMsg, version string
-	var reasons, skipped []string
+	var reasons, skipped, checked []string
+	checkedKnown := false
 	if h.scanTracker != nil {
 		d := h.scanTracker.GetStatus(sbomID)
 		state, errMsg, reasons, skipped, version = d.State, d.Error, d.Reasons, d.Skipped, d.Version
+		checked, checkedKnown = d.Checked, d.CheckedKnown
 	}
 
 	vulns, err := h.sbomService.GetVulnerabilitiesBySbom(c.Request().Context(), projectID, sbomID)
@@ -912,6 +926,7 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	if h.scanTracker != nil && (state == service.ScanStateCompleted || state == service.ScanStateFailed) {
 		if s2, _, _, v2 := h.scanTracker.GetDetailVersion(sbomID); s2 != state || v2 != version {
 			state, errMsg, reasons, skipped = service.ScanStateRunning, "", nil, nil
+			checked, checkedKnown = nil, false
 		}
 	}
 
@@ -927,6 +942,10 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	}
 	if state == service.ScanStateCompleted || state == service.ScanStateFailed {
 		resp.SkippedSources = skipped
+		if checkedKnown {
+			c := append([]string{}, checked...)
+			resp.CheckedSources = &c
+		}
 	}
 
 	return c.JSON(http.StatusOK, resp)
