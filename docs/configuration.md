@@ -64,14 +64,30 @@ A full re-read is ~300 NVD requests and ~2.4 GB (measured 2026-11-08), takes rou
 
 - The scan after an upload and `POST /api/v1/projects/:id/scan` skip the JVN step. A scan whose other sources succeeded reads `completed`; one whose other sources failed still reads `failed` with their reasons.
 - `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` adds `"skipped_sources": ["jvn"]` to a `completed` or `failed` scan that skipped JVN. The field is absent when nothing was skipped. It is kept in the shared scan status (Redis), so every API replica reports it.
-- `POST /api/v1/projects/:id/scan?sources=jvn` (or `nvd,jvn`) still answers `202`; JVN is skipped and reported in `skipped_sources`.
+- `POST /api/v1/projects/:id/scan?sources=jvn` (or `nvd,jvn`) still answers `202`; JVN is skipped and reported in `skipped_sources` (in the `202` body too). See [Scan coverage](#scan-coverage-checked_sources--skipped_sources) for the other sources `skipped_sources` names.
 - Findings that earlier scans of an SBOM made with JVN stay linked: `off` adds no JVN finding and removes none, so a scan with `skipped_sources: ["jvn"]` may still list older JVN findings, which are then not re-checked.
-- The scheduled scan (periodic and forced) runs NVD and the distro step only, with JVN `on` or `off`; this setting does not change it.
+- The scheduled scan (periodic and forced) runs NVD and the distro step only, with JVN `on` or `off`; this setting does not change it. Its scan-status reports `skipped_sources: ["jvn"]` either way.
 - The API logs a `WARN` at startup naming the setting.
 
 **Undo.** Unset `SBOMHUB_JVN`, or set it to `on`, and restart. Scans run JVN again from the next scan on; existing findings are not changed.
 
 **Several replicas.** Set `off` only once every replica sharing the Redis runs a version that knows `SBOMHUB_JVN`: an older replica cannot report `skipped_sources`, so a scan polled through it reads a bare `completed` (or, if another source failed, `failed` without the field). The `sbomhub` CLI shows `skipped_sources` (a warning, and the field in `--json`) from sbomhub-cli commit `2354439` on; older CLI builds print `completed` or `failed` without the skip, so read scan-status directly with those.
+
+### Scan coverage (`checked_sources` / `skipped_sources`)
+
+`completed` alone does not say which data sources a scan queried: with `SBOMHUB_OFFLINE=true` the NVD, JVN and distro steps make no request and still succeed, and `POST /api/v1/projects/:id/scan?sources=nvd` runs a subset. For a `completed` or `failed` scan, `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` therefore names each source (`nvd`, `jvn`, `distro`) as exactly one of:
+
+| Field | Contains | Presence |
+|-------|----------|----------|
+| `checked_sources` | Sources whose step ran against the live source (online, switched on, requested) and finished without a failure. A step with nothing to look up for the SBOM (no components, no distro packages) counts as checked. | On `completed` / `failed` when the scan reported its coverage — then always, as `[]` when nothing was checked (offline). Absent while `running` / `unknown`, and for a scan recorded by an API replica older than this field: absent means *not known*, never "none". |
+| `skipped_sources` | Sources whose step made no request because of configuration or the request: `SBOMHUB_OFFLINE=true` (every source), `SBOMHUB_JVN=off` (`jvn`), not in `?sources=` (for example `jvn` with `?sources=nvd`), the scheduled scan (`jvn`; it runs NVD and distro only), or a step without a configured scanner. | On `completed` / `failed` when something was skipped; absent otherwise (unchanged rule). |
+| neither | A source whose step failed — it is in `error` (`jvn: scan failed (...)`) and `reasons`. | — |
+
+Both lists name each source once, ordered `nvd`, `jvn`, `distro` (a name this version does not know comes after them, in lexical order), and never overlap. When scans of one SBOM overlap, `skipped_sources` is the union of their skips and `checked_sources` the sources every run that reported coverage checked. Only a `completed` scan with `checked_sources` `["nvd","jvn","distro"]` and no `skipped_sources` checked every source.
+
+`POST /api/v1/projects/:id/scan` adds `skipped_sources` to its `202` body: the sources this run will skip, by the same rules and ordering (absent when none). scan-status reports them again once the scan is terminal (together with those of any overlapping run).
+
+During a rolling upgrade, a scan finished by an older replica reports no coverage; if every run of the scan was on older replicas, `checked_sources` is absent. The `sbomhub` CLI shows the checked sources and warns about a scan that checked nothing; the MCP tools report `checked_sources` next to `skipped_sources` (`null` when not reported).
 
 ### OSV (Distro-Aware Matching)
 

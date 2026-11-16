@@ -64,14 +64,30 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 
 - アップロード後のスキャンと `POST /api/v1/projects/:id/scan` は JVN ステップを飛ばします。他の情報源が成功したスキャンは `completed`、他の情報源が失敗したスキャンはその理由付きで従来どおり `failed` です。
 - `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` は、JVN を飛ばした `completed` / `failed` のスキャンに `"skipped_sources": ["jvn"]` を追加します。何も飛ばしていなければ項目自体がありません。共有スキャン状態 (Redis) に保存されるので、どの API レプリカからも同じく返ります。
-- `POST /api/v1/projects/:id/scan?sources=jvn` (`nvd,jvn` も) は従来どおり `202` を返し、JVN は飛ばして `skipped_sources` で知らせます。
+- `POST /api/v1/projects/:id/scan?sources=jvn` (`nvd,jvn` も) は従来どおり `202` を返し、JVN は飛ばして `skipped_sources` で知らせます (`202` の本文にも含まれます)。`skipped_sources` が挙げるほかの情報源は「スキャンのカバレッジ」を参照してください。
 - 以前のスキャンが JVN で見つけた検出は SBOM に残ります。`off` は JVN の検出を追加も削除もしないため、`skipped_sources: ["jvn"]` のスキャンにも以前の JVN の検出が含まれることがあり、それらは再確認されていません。
-- 定期スキャン (定期実行・強制実行) は JVN の `on` / `off` にかかわらず NVD と distro ステップだけを実行します。この設定では変わりません。
+- 定期スキャン (定期実行・強制実行) は JVN の `on` / `off` にかかわらず NVD と distro ステップだけを実行します。この設定では変わりません。その scan-status はどちらでも `skipped_sources: ["jvn"]` を返します。
 - `off` のとき API は起動時に設定名を含む `WARN` を出力します。
 
 **元に戻す。** `SBOMHUB_JVN` を削除するか `on` にして再起動します。次のスキャンから JVN を再び照会します。既存の検出結果は変わりません。
 
 **複数レプリカ。** `off` にするのは、同じ Redis を使う全レプリカが `SBOMHUB_JVN` を知っている版になってからにしてください。古いレプリカは `skipped_sources` を返せないため、そこを経由して状態を読むと単なる `completed` (他の情報源が失敗していれば項目なしの `failed`) に見えます。`sbomhub` CLI は sbomhub-cli のコミット `2354439` 以降で `skipped_sources` を表示します (警告と `--json` の項目)。それより古い CLI では飛ばしたことが表示されない `completed` / `failed` に見えるので、scan-status を直接読んでください。
+
+### スキャンのカバレッジ (`checked_sources` / `skipped_sources`)
+
+`completed` だけでは、スキャンがどの情報源を照会したかは分かりません。`SBOMHUB_OFFLINE=true` では NVD・JVN・distro の各ステップがリクエストせずに成功し、`POST /api/v1/projects/:id/scan?sources=nvd` は一部だけを実行します。そのため `completed` / `failed` のスキャンについて、`GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` は各情報源 (`nvd`、`jvn`、`distro`) を次のどれか 1 つとして返します。
+
+| 項目 | 内容 | 有無 |
+|------|------|------|
+| `checked_sources` | ステップが実際の情報源に対して実行され (オンライン、有効、要求に含まれる)、失敗せずに終わった情報源。SBOM に照会対象がない (component がない、distro パッケージがない) ステップも照会済みとします。 | スキャンがカバレッジを報告した `completed` / `failed` で常に存在し、何も照会していなければ `[]` (オフライン)。`running` / `unknown` のとき、およびこの項目より古い API レプリカが記録したスキャンでは項目なし。項目なしは「不明」であり「照会なし」ではありません。 |
+| `skipped_sources` | 設定や要求のためにステップがリクエストしなかった情報源。`SBOMHUB_OFFLINE=true` (すべて)、`SBOMHUB_JVN=off` (`jvn`)、`?sources=` に含まれない (`?sources=nvd` なら `jvn`)、定期スキャン (`jvn`。NVD と distro のみ実行)、スキャナが設定されていないステップ。 | 何かを飛ばした `completed` / `failed` でのみ存在 (従来どおり)。 |
+| どちらでもない | ステップが失敗した情報源。`error` (`jvn: scan failed (...)`) と `reasons` に現れます。 | — |
+
+どちらのリストも各情報源を 1 回だけ `nvd`、`jvn`、`distro` の順で並べ (この版が知らない名前はその後に辞書順)、互いに重なりません。同じ SBOM のスキャンが重なった場合、`skipped_sources` は各スキャンの和集合、`checked_sources` はカバレッジを報告したすべてのスキャンが照会した情報源です。すべての情報源を照会したのは、`checked_sources` が `["nvd","jvn","distro"]` で `skipped_sources` がない `completed` のスキャンだけです。
+
+`POST /api/v1/projects/:id/scan` の `202` の本文には `skipped_sources` が加わります。この実行が飛ばす情報源で、規則と順序は同じです (なければ項目なし)。スキャンが終わると scan-status が (重なったスキャンの分とあわせて) 同じものを返します。
+
+ローリングアップグレード中、古いレプリカが終えたスキャンはカバレッジを報告しません。スキャンのすべての実行が古いレプリカだった場合 `checked_sources` は項目なしです。`sbomhub` CLI は照会済みの情報源を表示し、何も照会していないスキャンを警告します。MCP ツールは `skipped_sources` の横に `checked_sources` を返します (報告がなければ `null`)。
 
 ### OSV (ディストリビューション別の照合)
 
