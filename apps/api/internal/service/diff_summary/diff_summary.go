@@ -105,7 +105,9 @@ type LLMCallWriter interface {
 
 // TxRunner runs fn in its own committed transaction bound to tenantID.
 // Satisfied by *triage.DBTxManager (the caller passes a ctx stripped of the
-// request transaction, so DBTxManager opens a new one).
+// request transaction, so DBTxManager opens a new one). It must draw on a
+// different connection pool than the request transaction: the caller still
+// holds that connection while it waits for this one (Codex R3 High).
 type TxRunner interface {
 	RunWrite(ctx context.Context, tenantID uuid.UUID, fn func(ctx context.Context) error) error
 }

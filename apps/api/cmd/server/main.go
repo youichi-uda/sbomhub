@@ -880,6 +880,19 @@ func main() {
 	// TenantTx so RLS GUC is honoured and audit failure rolls the
 	// llm_calls write back. See internal/service/diff_summary/diff_summary.go
 	// godoc for the request flow.
+	// M75 (Codex R3 High): failed-summary rows commit through their own
+	// small pool. The route holds a main-pool connection (TenantTx) while
+	// the failure write asks for a second; on the same pool, enough
+	// concurrent failures would deadlock it (same reasoning as the M57
+	// catalogue pool).
+	aiFailureDB, err := database.Connect(cfg.DatabaseURL)
+	if err != nil {
+		slog.Error("Failed to connect to database (AI failure-record pool)", "error", err)
+		os.Exit(1)
+	}
+	defer aiFailureDB.Close()
+	aiFailureDB.SetMaxOpenConns(4)
+	aiFailureDB.SetMaxIdleConns(1)
 	projectDiffSummaryService := diff_summary.NewService(diff_summary.Config{
 		Diff:             projectDiffService,
 		Provider:         triageDefaultProvider,
@@ -887,8 +900,9 @@ func main() {
 		LLMCalls:         llmCallsRepo,
 		Audit:            auditRepo,
 		// M75: failed-summary llm_calls / audit rows commit in their own
-		// tx; the route's TenantTx rolls back on the 500 it answers.
-		FailureTx:  triageTxManager,
+		// tx, on their own pool; the route's TenantTx rolls back on the
+		// 500 it answers.
+		FailureTx:  triage.NewDBTxManager(aiFailureDB),
 		LLMTimeout: triageLLMTimeout,
 	})
 	slog.Info("Diff AI summary service initialised",
