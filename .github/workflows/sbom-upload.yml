@@ -140,11 +140,13 @@ jobs:
       #
       # WHICH IS WHY THE `scan` INPUT NOW DEFAULTS TO FALSE. With the route
       # reachable, running this step on a freshly uploaded SBOM sweeps it a
-      # SECOND time, and the second sweep is untracked: measured on the same
+      # SECOND time (when this was written the second sweep was untracked; the
+      # route has since gained the shared scan tracker and a `status_url`, which
+      # this step deliberately does not poll): measured on the same
       # stack, NVD was absorbed by its Redis cache (`cache_hits=1, api_calls=0`)
       # but JVN issued a fresh outbound request (it has no cache), the
       # component_vulnerabilities count did not change, and scan-status did not
-      # move — because this route has no ScanTracker. Fixing a silent failure is
+      # move — because the route had no ScanTracker then. Fixing a silent failure is
       # not a licence to add duplicated outbound traffic to every dispatch, so
       # the default leaves a plain run doing exactly the work it did before
       # (upload, one tracked scan) and the input — declared at the top of this
@@ -170,9 +172,9 @@ jobs:
       # drafts of this paragraph each promised more than the step delivers.)
       #
       # WHAT THIS STEP CAN AND CANNOT DETECT. The endpoint is a TRIGGER: it
-      # answers 202 Accepted and runs the sweep in a background goroutine, with
-      # no tracker for this route (see VulnerabilityHandler.runScan's doc
-      # comment). So a red step here means "the re-scan was not started"; a green
+      # answers 202 Accepted and runs the sweep in a background goroutine; the
+      # sweep is tracked (202 carries `status_url`), but this step does not poll
+      # it. So a red step here means "the re-scan was not started"; a green
       # step does NOT mean it finished, or found anything, or that its
       # transaction committed. To gate a build on scan RESULTS use the CLI —
       # `sbomhub scan . --project <name> --fail-on critical` polls

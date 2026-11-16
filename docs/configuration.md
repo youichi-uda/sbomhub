@@ -66,7 +66,7 @@ A full re-read is ~300 NVD requests and ~2.4 GB (measured 2026-11-08), takes rou
 - `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` adds `"skipped_sources": ["jvn"]` to a `completed` or `failed` scan that skipped JVN. The field is absent when nothing was skipped. It is kept in the shared scan status (Redis), so every API replica reports it.
 - `POST /api/v1/projects/:id/scan?sources=jvn` (or `nvd,jvn`) still answers `202`; JVN is skipped and reported in `skipped_sources` (in the `202` body too). See [Scan coverage](#scan-coverage-checked_sources--skipped_sources) for the other sources `skipped_sources` names.
 - Findings that earlier scans of an SBOM made with JVN stay linked: `off` adds no JVN finding and removes none, so a scan with `skipped_sources: ["jvn"]` may still list older JVN findings, which are then not re-checked.
-- The scheduled scan (periodic and forced) runs NVD and the distro step only, with JVN `on` or `off`; this setting does not change it. Its scan-status reports `skipped_sources: ["jvn"]` either way.
+- The scheduled scan (periodic and forced) runs NVD and the distro step only, with JVN `on` or `off`; this setting does not change it. Its scan-status reports `skipped_sources: ["jvn"]` either way (all three sources with `SBOMHUB_OFFLINE=true`).
 - The API logs a `WARN` at startup naming the setting.
 
 **Undo.** Unset `SBOMHUB_JVN`, or set it to `on`, and restart. Scans run JVN again from the next scan on; existing findings are not changed.

@@ -66,7 +66,7 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 - `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` は、JVN を飛ばした `completed` / `failed` のスキャンに `"skipped_sources": ["jvn"]` を追加します。何も飛ばしていなければ項目自体がありません。共有スキャン状態 (Redis) に保存されるので、どの API レプリカからも同じく返ります。
 - `POST /api/v1/projects/:id/scan?sources=jvn` (`nvd,jvn` も) は従来どおり `202` を返し、JVN は飛ばして `skipped_sources` で知らせます (`202` の本文にも含まれます)。`skipped_sources` が挙げるほかの情報源は「スキャンのカバレッジ」を参照してください。
 - 以前のスキャンが JVN で見つけた検出は SBOM に残ります。`off` は JVN の検出を追加も削除もしないため、`skipped_sources: ["jvn"]` のスキャンにも以前の JVN の検出が含まれることがあり、それらは再確認されていません。
-- 定期スキャン (定期実行・強制実行) は JVN の `on` / `off` にかかわらず NVD と distro ステップだけを実行します。この設定では変わりません。その scan-status はどちらでも `skipped_sources: ["jvn"]` を返します。
+- 定期スキャン (定期実行・強制実行) は JVN の `on` / `off` にかかわらず NVD と distro ステップだけを実行します。この設定では変わりません。その scan-status はどちらでも `skipped_sources: ["jvn"]` を返します (`SBOMHUB_OFFLINE=true` では 3 ソースすべて)。
 - `off` のとき API は起動時に設定名を含む `WARN` を出力します。
 
 **元に戻す。** `SBOMHUB_JVN` を削除するか `on` にして再起動します。次のスキャンから JVN を再び照会します。既存の検出結果は変わりません。
