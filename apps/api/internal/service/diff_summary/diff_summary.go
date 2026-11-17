@@ -650,8 +650,17 @@ func (s *Service) persistFailure(ctx context.Context, tenantID uuid.UUID, fn fun
 	if s.failureTx == nil {
 		return fn(ctx)
 	}
-	return s.failureTx.RunWrite(database.WithoutTx(ctx), tenantID, fn)
+	// The request ctx may already be cancelled (client disconnect, upstream
+	// deadline) — often the very reason the call failed. Detach from that
+	// cancellation so the failure rows still commit, but keep the write
+	// bounded.
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(database.WithoutTx(ctx)), failureWriteTimeout)
+	defer cancel()
+	return s.failureTx.RunWrite(wctx, tenantID, fn)
 }
+
+// failureWriteTimeout bounds the detached failure-row write.
+const failureWriteTimeout = 10 * time.Second
 
 func (s *Service) writeSuccessLLMCall(
 	ctx context.Context, req Request, provider llm.Provider,

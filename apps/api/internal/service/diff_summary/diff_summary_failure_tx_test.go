@@ -121,3 +121,37 @@ func TestGenerate_FailureRowKeepsFullResponseBody(t *testing.T) {
 		t.Errorf("response_body len=%d, want the full %d-byte partial answer", len(got), len(long))
 	}
 }
+
+// ctxCheckFailureTx records whether the ctx handed to FailureTx was live.
+type ctxCheckFailureTx struct {
+	errAtRun    error
+	hasDeadline bool
+}
+
+func (f *ctxCheckFailureTx) RunWrite(ctx context.Context, _ uuid.UUID, fn func(ctx context.Context) error) error {
+	f.errAtRun = ctx.Err()
+	_, f.hasDeadline = ctx.Deadline()
+	return fn(ctx)
+}
+
+// Codex integration R1 Medium: a client disconnect or upstream deadline
+// while the LLM runs cancels the request ctx; the failure rows must still
+// commit, so FailureTx gets a ctx detached from that cancellation (with its
+// own bounded deadline), not the dead request ctx.
+func TestPersistFailure_DetachesFromRequestCancellation(t *testing.T) {
+	ftx := &ctxCheckFailureTx{}
+	f := newFixture(t)
+	svc := NewService(Config{Diff: f.diffSvc, Provider: &fakeProvider{name: "openai", model: "m"}, LLMCalls: f.llmCalls, Audit: f.audit, FailureTx: ftx})
+	ctx, cancel := context.WithCancel(database.WithTx(context.Background(), &sql.Tx{}))
+	cancel()
+	ran := false
+	if err := svc.persistFailure(ctx, uuid.New(), func(ctx context.Context) error { ran = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !ran || ftx.errAtRun != nil {
+		t.Fatalf("ran=%v ctx.Err()=%v at FailureTx, want a live ctx", ran, ftx.errAtRun)
+	}
+	if !ftx.hasDeadline {
+		t.Error("detached ctx has no deadline; the failure write must stay bounded")
+	}
+}
