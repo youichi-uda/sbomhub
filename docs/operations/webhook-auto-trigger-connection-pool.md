@@ -136,6 +136,16 @@ choosing the PostgreSQL instance class). Use the steady-state figure
 when sizing the application pool (`DATABASE_MAX_OPEN_CONNS` etc.) so
 healthy operation does not over-allocate idle connections.
 
+> **Current implementation (2026-11).** The API's pool ceilings are fixed in
+> code, not configurable: one API process opens at most **33** PostgreSQL
+> connections — 25 (main pool) + 4 (vulnerability catalogue inserts,
+> UPGRADE §13) + 4 (AI failure records, UPGRADE §35). There is no
+> `DATABASE_MAX_OPEN_CONNS` variable yet; read the "App pool max-open"
+> column and the formulas below as a target for when one exists, and use
+> 33 per replica when checking today's deployment (for example, 3 replicas
+> = 99 of PostgreSQL's default 100, which leaves no room for migrations or
+> administration — raise `max_connections` or put pgbouncer in front).
+
 ### Standard recommendations for sbomhub self-host deployments
 
 | Profile | Ingests / sec | `max_connections` | App pool max-open | Notes |
