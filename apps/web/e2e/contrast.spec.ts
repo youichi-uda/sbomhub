@@ -67,6 +67,20 @@ test.describe('text meets WCAG AA contrast', () => {
     });
   }
 
+  // In self-host mode the billing page shows only "self-hosted"; the plan
+  // cards (where non-current plans were faded to opacity 0.8) need a SaaS
+  // subscription answer.
+  test('billing plan cards (SaaS subscription)', async ({ page }) => {
+    await page.route('**/api/v1/subscription', async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      await route.fulfill({ response: res, json: { ...body, plan: 'free', is_self_hosted: false, billing_enabled: true } });
+    });
+    await openPage(page, '/en/billing');
+    await expect(page.getByRole('heading', { name: en.Billing.selectPlan })).toBeVisible();
+    await expectReadable(page, 'billing plan cards');
+  });
+
   test('landing page', async ({ page }) => {
     await page.goto('/en');
     await expect(page.locator('h1').first()).toBeVisible({ timeout: 15_000 });
@@ -176,8 +190,10 @@ test.describe('the contrast measurement', () => {
       <input type="checkbox" checked>
       <select style="color:#d1d5db;background:#fff"><option>pale option</option></select>
       <input disabled value="disabled input" style="color:#d1d5db">
+      <div style="opacity:0.5;background:rgb(0 32 0 / 0.9)"><span style="color:#fff">white on a faded translucent dark box</span></div>
+      <input placeholder="faded placeholder" style="background:#fff" class="faded-ph">
     </div>
-    <style>.pale::placeholder{color:#d1d5db} .dark-ph::placeholder{color:#374151}</style>`;
+    <style>.pale::placeholder{color:#d1d5db} .dark-ph::placeholder{color:#374151} .faded-ph::placeholder{color:#000;opacity:0.2}</style>`;
 
   test('reports what fails, with its ratio, and only that', async ({ page }) => {
     await page.setContent(CASES);
@@ -193,7 +209,12 @@ test.describe('the contrast measurement', () => {
       'placeholder: pale placeholder': expect.any(Number),
       'pale value': expect.any(Number),
       'pale option': expect.any(Number),
+      'white on a faded translucent dark box': expect.any(Number),
+      'placeholder: faded placeholder': expect.any(Number),
     });
+    // Codex R2: rendered ~2.9:1 and ~1.6:1; both used to read as passing.
+    expect(byText['white on a faded translucent dark box']).toBeLessThan(3.2);
+    expect(byText['placeholder: faded placeholder']).toBeLessThan(2);
     // slate-500 is 4.76:1 on white; opacity 0.8 on the card fades it to ~3.6.
     expect(byText['slate-500 in a faded card']).toBeLessThan(4);
     expect(byText['slate-500 on slate-900/80']).toBeLessThan(4.5);

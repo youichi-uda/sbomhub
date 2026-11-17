@@ -17,7 +17,7 @@ import { loadErrorState } from "@/lib/load-state";
 import { parseIPASyncSettings } from "@/lib/ipa-settings";
 
 const SEVERITY_OPTIONS = [
-  { value: "CRITICAL", label: "Critical", icon: AlertTriangle, color: "text-red-600" },
+  { value: "CRITICAL", label: "Critical", icon: AlertTriangle, color: "text-red-800" },
   { value: "HIGH", label: "High", icon: AlertCircle, color: "text-orange-700" },
   { value: "MEDIUM", label: "Medium", icon: AlertCircle, color: "text-yellow-700" },
   { value: "LOW", label: "Low", icon: Info, color: "text-blue-600" },
