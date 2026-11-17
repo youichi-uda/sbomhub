@@ -51,9 +51,10 @@ import (
 // newScanRunIDFn is newScanRunID (a variable for tests).
 var newScanRunIDFn = newScanRunID
 
-// newScanRunID returns a fresh scan run: 16 lowercase hex digits.
+// newScanRunID returns a fresh scan run: 32 lowercase hex digits (128
+// random bits, so a repeat between two groups is not a practical concern).
 func newScanRunID() string {
-	var b [8]byte
+	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		panic("scan tracker: crypto/rand: " + err.Error())
 	}
