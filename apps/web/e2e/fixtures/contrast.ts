@@ -15,7 +15,10 @@ import type { Page } from '@playwright/test';
 //   - text of a disabled control (`:disabled`, inside a disabled fieldset,
 //     aria-disabled="true") — "part of an inactive user interface component";
 //   - text over a background image or gradient anywhere in the walk: no single
-//     background colour to measure against.
+//     background colour to measure against;
+//   - text inside an element at opacity 0 (not visible at all).
+// Not covered: the shadow-DOM fields of an empty date / time input
+// ("mm/dd/yyyy"), which have no value or placeholder to read.
 
 export interface ContrastFailure {
   text: string;
@@ -134,8 +137,13 @@ export async function lowContrast(page: Page): Promise<ContrastFailure[]> {
       const r = el.getBoundingClientRect();
       if (!r.width || !r.height || el.closest('[hidden], .sr-only')) return false;
       if (el.closest(':disabled, [aria-disabled="true"]')) return false;
-      const cs = getComputedStyle(el);
-      return cs.visibility !== 'hidden' && Number(cs.opacity) !== 0;
+      if (getComputedStyle(el).visibility === 'hidden') return false;
+      // An ancestor at opacity 0 hides the whole subtree (a mounted, faded-out
+      // panel); its text would otherwise measure 1:1 (Codex R3).
+      for (let a: Element | null = el; a; a = a.parentElement) {
+        if (Number(getComputedStyle(a).opacity) === 0) return false;
+      }
+      return true;
     };
     const NOT_TEXT_INPUTS = new Set(['hidden', 'checkbox', 'radio', 'range', 'color', 'file', 'image']);
     // [element, text, colour of that text]

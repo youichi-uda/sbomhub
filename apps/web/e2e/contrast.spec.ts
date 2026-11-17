@@ -89,12 +89,22 @@ test.describe('text meets WCAG AA contrast', () => {
 
   test('compliance: expanded categories and the checklist', async ({ page }) => {
     await openPage(page, `/en/projects/${SEED_PROJECT}/compliance`);
+    // The seed answers every category; expand each one shown (at least one
+    // must be, or the nested text below would go unmeasured, Codex R3).
+    let expanded = 0;
     for (const name of Object.values(en.Compliance.category)) {
       const trigger = page.locator('button', { hasText: name });
-      if ((await trigger.count()) > 0) await trigger.click();
+      if ((await trigger.count()) > 0) {
+        await trigger.click();
+        expanded++;
+      }
     }
+    expect(expanded, 'compliance categories shown').toBeGreaterThan(0);
     await expectReadable(page, 'compliance overview, expanded');
     await page.getByRole('tab', { name: en.Compliance.tabChecklist }).click();
+    // A checklist phase, not the load-failure card.
+    await expect(page.getByText(/^Phase 1: /).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(en.Compliance.checklistLoadFailed)).toHaveCount(0);
     await expectReadable(page, 'compliance checklist');
   });
 
@@ -190,6 +200,7 @@ test.describe('the contrast measurement', () => {
       <input type="checkbox" checked>
       <select style="color:#d1d5db;background:#fff"><option>pale option</option></select>
       <input disabled value="disabled input" style="color:#d1d5db">
+      <div style="opacity:0"><span style="color:#000">inside an invisible panel</span></div>
       <div style="opacity:0.5;background:rgb(0 32 0 / 0.9)"><span style="color:#fff">white on a faded translucent dark box</span></div>
       <input placeholder="faded placeholder" style="background:#fff" class="faded-ph">
     </div>
