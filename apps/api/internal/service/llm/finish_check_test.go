@@ -111,6 +111,13 @@ func TestComplete_ChecksFinishReason(t *testing.T) {
 		t.Error("response must still be returned so the caller can record it")
 	}
 
+	// A refusal comes back with its text as Content, so callers that
+	// record Content keep it (Codex R4 Medium).
+	ref := &CompleteResponse{Refusal: "no", FinishReason: "stop"}
+	if resp, err := Complete(context.Background(), finishStub{resp: ref}, CompleteRequest{}); !errors.Is(err, ErrFilteredResponse) || resp == nil || resp.Content != "no" || ref.Content != "" {
+		t.Errorf("refusal: resp=%+v err=%v (provider's response must not be mutated)", resp, err)
+	}
+
 	ok := &CompleteResponse{Content: "{}", FinishReason: "end_turn"}
 	if resp, err := Complete(context.Background(), finishStub{resp: ok}, CompleteRequest{}); err != nil || resp != ok {
 		t.Errorf("normal answer: resp=%v err=%v", resp, err)

@@ -137,7 +137,8 @@ func CheckFinish(resp *CompleteResponse) error {
 // answer as a draft, suggestion or summary goes through it (M75): a
 // truncated, filtered or unfinished answer comes back as an error together
 // with the response, which the caller records in llm_calls (partial
-// content, finish reason, error message) and does not use. A provider error
+// content — for a refusal, the refusal text — finish reason, error message)
+// and does not use. A provider error
 // is returned unchanged.
 func Complete(ctx context.Context, p Provider, req CompleteRequest) (*CompleteResponse, error) {
 	resp, err := p.Complete(ctx, req)
@@ -148,6 +149,14 @@ func Complete(ctx context.Context, p Provider, req CompleteRequest) (*CompleteRe
 		return nil, fmt.Errorf("%w: provider %s returned no response and no error", ErrIncompleteResponse, p.Name())
 	}
 	if ferr := CheckFinish(resp); ferr != nil {
+		if resp.Content == "" && strings.TrimSpace(resp.Refusal) != "" {
+			// A refusal has no content; return a copy carrying the
+			// refusal text as Content so callers that record Content
+			// in llm_calls keep what the model said (Codex R4 Medium).
+			r := *resp
+			r.Content = resp.Refusal
+			return &r, ferr
+		}
 		return resp, ferr
 	}
 	return resp, nil

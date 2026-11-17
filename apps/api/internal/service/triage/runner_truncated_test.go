@@ -66,3 +66,30 @@ func TestRunner_Run_ProviderStopReasonIsNotADraft(t *testing.T) {
 		})
 	}
 }
+
+// Codex R4 Medium: an OpenAI / Azure refusal (content null, message.refusal
+// set, finish_reason "stop") is rejected, and the llm_calls row keeps the
+// refusal text as the response.
+func TestRunner_Run_RefusalRecordedNotDrafted(t *testing.T) {
+	componentID := uuid.New()
+	stub := &stubProvider{resp: &llm.CompleteResponse{Refusal: "I can't help with that.", FinishReason: "stop", OutputTokens: 7}}
+	llmCalls := &fakeLLMCallWriter{}
+	drafts := &fakeVexDraftStore{}
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: llmCalls,
+		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0076"),
+	})
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0076", ComponentID: &componentID,
+	})
+	if !errors.Is(err, llm.ErrFilteredResponse) || len(drafts.inserted) != 0 {
+		t.Fatalf("err = %v drafts = %d, want ErrFilteredResponse and none", err, len(drafts.inserted))
+	}
+	if row := llmCalls.records[0]; row.ResponseBody != "I can't help with that." || row.ErrorMessage == "" {
+		t.Errorf("row body=%q error=%q, want the refusal text recorded", row.ResponseBody, row.ErrorMessage)
+	}
+}
