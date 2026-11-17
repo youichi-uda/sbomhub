@@ -116,7 +116,12 @@ test.describe('text meets WCAG AA contrast', () => {
     await expectReadable(page, 'components tab');
     await page.getByRole('button', { name: new RegExp(`^${en.Vulnerabilities.title} \\(`) }).click();
     await expect(page.getByTestId('vuln-entry')).toHaveCount(4, { timeout: 15_000 });
-    await expectReadable(page, 'vulnerabilities tab (severity badges, remediation chips)');
+    // The hermetic stack is offline, so the settled scan reports partial
+    // coverage: measure that notice, not the transient "scan running" one.
+    await expect(page.locator('[data-testid="scan-coverage-notice"][data-coverage="partial"]').first()).toBeVisible({
+      timeout: 15_000,
+    });
+    await expectReadable(page, 'vulnerabilities tab (severity badges, remediation chips, partial-coverage notice)');
     for (const [what, name] of [
       ['VEX tab', /^VEX \(/],
       ['license tab', new RegExp(`^${en.Components.license} \\(`)],
