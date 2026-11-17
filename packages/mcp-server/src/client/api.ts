@@ -718,8 +718,10 @@ private async readScanState(
  *   - it is the same SBOM (no upload made a different snapshot the latest), and
  *   - that SBOM's vulnerability count is unchanged.
  *
- * The last one is what covers the untracked rescan. apps/api's manual rescan
- * path does not mark the shared ScanTracker at all, so a rescan of an SBOM
+ * The last one is what covers the untracked rescan on a backend that does
+ * not report `scan_run` (older apps/api, or an answer without it — UPGRADE
+ * §37; with `scan_run` on both readings a rescan is caught by comparing it).
+ * There, the manual rescan path did not mark the shared ScanTracker at all, so a rescan of an SBOM
  * whose entry still reads `completed` (entries are kept an hour) is invisible
  * in the STATE. It is visible in the SUMMARY when that summary MOVES BETWEEN
  * THE TWO READINGS — and because VulnerabilityHandler.runScan commits NVD and

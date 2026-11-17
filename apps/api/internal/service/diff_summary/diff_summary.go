@@ -259,8 +259,11 @@ type llmFields struct {
 //  6. Persist llm_calls row + audit_logs row (action=diff_summary_ai_generated)
 //     and return the response.
 //
-// The audit_logs / llm_calls writes share the request's ambient TenantTx
-// so RLS GUC is honoured.
+// Success and AI-disabled persistence (audit_logs / llm_calls) shares the
+// request's ambient TenantTx so RLS GUC is honoured. A FAILED summary's rows
+// go through Config.FailureTx instead (persistFailure): their own
+// transaction on a separate pool, detached from the request's rollback and
+// cancellation.
 func (s *Service) Generate(ctx context.Context, req Request) (*Response, error) {
 	lang := strings.ToLower(strings.TrimSpace(req.Lang))
 	if lang != "ja" {

@@ -142,9 +142,13 @@ healthy operation does not over-allocate idle connections.
 > UPGRADE §13) + 4 (AI failure records, UPGRADE §35). There is no
 > `DATABASE_MAX_OPEN_CONNS` variable yet; read the "App pool max-open"
 > column and the formulas below as a target for when one exists, and use
-> 33 per replica when checking today's deployment (for example, 3 replicas
-> = 99 of PostgreSQL's default 100, which leaves no room for migrations or
-> administration — raise `max_connections` or put pgbouncer in front).
+> 33 per replica when checking today's deployment, against
+> `max_connections - superuser_reserved_connections (default 3) - baseline`.
+> For example, 3 replicas request 99 connections, more than the 97 ordinary
+> slots of PostgreSQL's default 100 before migrations, monitoring or other
+> clients: raise `max_connections` or run fewer replicas. PgBouncer in session
+> mode (required below) holds a backend per client session, so it does not
+> lower this count.
 
 ### Standard recommendations for sbomhub self-host deployments
 

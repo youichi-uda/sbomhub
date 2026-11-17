@@ -19,8 +19,8 @@ import (
 //     activity — an intent, the rejoin or revival of a run that had lost its
 //     identity or been swept as interrupted, a coalesced merge, a late finish
 //     (the outcome of a run that was no longer active);
-//   - runs that join an active group keep it; it never repeats (random, 64
-//     bits, from the API process: no Redis clock, counter or key incarnation
+//   - runs that join an active group keep it; it does not repeat in practice (random,
+//     128 bits, from the API process: no Redis clock, counter or key incarnation
 //     is involved);
 //   - absent means unknown: a legacy MarkRunning / MarkCompleted /
 //     MarkFailed, an entry recreated after it was lost, an answer from this

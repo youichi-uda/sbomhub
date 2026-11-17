@@ -875,10 +875,10 @@ func main() {
 	// provider resolver + LLMCalls + audit repositories with VEX triage
 	// and CRA drafting so all four (M1, M2, M11) honour the same BYOK
 	// / audit-or-nothing discipline. The summary lifecycle is a single
-	// in-flight LLM call (no domain table) — every persistence event
-	// (llm_calls + audit_logs) is written inside the request's ambient
-	// TenantTx so RLS GUC is honoured and audit failure rolls the
-	// llm_calls write back. See internal/service/diff_summary/diff_summary.go
+	// in-flight LLM call (no domain table) — success / AI-disabled
+	// persistence (llm_calls + audit_logs) is written inside the request's
+	// ambient TenantTx so RLS GUC is honoured and audit failure rolls the
+	// llm_calls write back; failed-summary rows use FailureTx (below). See internal/service/diff_summary/diff_summary.go
 	// godoc for the request flow.
 	// M75 (Codex R3 High): failed-summary rows commit through their own
 	// small pool. The route holds a main-pool connection (TenantTx) while

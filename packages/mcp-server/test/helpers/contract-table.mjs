@@ -1160,8 +1160,8 @@ export const CONTRACT_CASES = [
     routes: {
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
       // Both readings say `completed`, and that is exactly the case the state
-      // alone cannot resolve: apps/api's manual rescan path never marks the
-      // ScanTracker, and entries are kept an hour, so an SBOM being rescanned
+      // alone cannot resolve on a backend without `scan_run` (UPGRADE §37):
+      // there the manual rescan path never marked the ScanTracker, and entries are kept an hour, so an SBOM being rescanned
       // still reads `completed`. The COUNT is what moves — it is a COUNT over
       // the same join the pages come from.
       ...scanProbeChanging(
