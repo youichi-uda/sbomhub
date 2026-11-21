@@ -10,6 +10,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -131,11 +132,12 @@ func TestJVNDBIntegration_ClaimIsExclusiveAcrossReplicas(t *testing.T) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	wins := 0
+	var winner *JVNDBFeedState
 	for i := 0; i < replicas; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, ok, err := repo.ClaimFeed(ctx, feed, time.Hour)
+			st, ok, err := repo.ClaimFeed(ctx, feed, time.Hour)
 			if err != nil {
 				t.Errorf("claim: %v", err)
 				return
@@ -143,6 +145,7 @@ func TestJVNDBIntegration_ClaimIsExclusiveAcrossReplicas(t *testing.T) {
 			if ok {
 				mu.Lock()
 				wins++
+				winner = st
 				mu.Unlock()
 			}
 		}()
@@ -153,7 +156,7 @@ func TestJVNDBIntegration_ClaimIsExclusiveAcrossReplicas(t *testing.T) {
 	}
 
 	// Finish with validators; a later claim (gap elapsed) returns them.
-	if err := repo.FinishFeed(ctx, feed, JVNDBFeedResult{Status: JVNDBFeedStatusSuccess, SourceURL: "https://m.example/rss/years/jvndb_x.rdf", ETag: `"e1"`, LastModified: "Sun, 15 Nov 2026 00:02:09 GMT", ItemsSeen: 3, ItemsWritten: 3, Completed: true}); err != nil {
+	if err := repo.FinishFeed(ctx, feed, winner.Attempt, JVNDBFeedResult{Status: JVNDBFeedStatusSuccess, SourceURL: "https://m.example/rss/years/jvndb_x.rdf", ETag: `"e1"`, LastModified: "Sun, 15 Nov 2026 00:02:09 GMT", ItemsSeen: 3, ItemsWritten: 3, Completed: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := migDB.Exec(`UPDATE jvndb_feed_state SET last_attempt_at = NOW() - interval '2 hours' WHERE feed = $1`, feed); err != nil {
@@ -167,7 +170,7 @@ func TestJVNDBIntegration_ClaimIsExclusiveAcrossReplicas(t *testing.T) {
 		t.Fatalf("previous state = %+v", prev)
 	}
 	// A failed attempt keeps the validators and the completion.
-	if err := repo.FinishFeed(ctx, feed, JVNDBFeedResult{Status: JVNDBFeedStatusFailed, ErrorMessage: "JVNDB RSS fetch failed", ETag: `"ignored"`}); err != nil {
+	if err := repo.FinishFeed(ctx, feed, prev.Attempt, JVNDBFeedResult{Status: JVNDBFeedStatusFailed, ErrorMessage: "JVNDB RSS fetch failed", ETag: `"ignored"`}); err != nil {
 		t.Fatal(err)
 	}
 	states, err := repo.FeedStates(ctx)
@@ -277,19 +280,20 @@ func TestJVNDBIntegration_GapUntilOnlyMovesForward(t *testing.T) {
 	t.Cleanup(func() { _, _ = migDB.Exec(`DELETE FROM jvndb_feed_state WHERE feed = $1`, feed) })
 	repo := NewJVNDBRepository(appDB)
 	ctx := context.Background()
-	if _, _, err := repo.ClaimFeed(ctx, feed, 0); err != nil {
+	claim, _, err := repo.ClaimFeed(ctx, feed, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
 	late := time.Date(2026, 11, 18, 8, 24, 0, 0, time.UTC)
 	early := late.Add(-72 * time.Hour)
 	cm := time.Date(2026, 11, 15, 0, 2, 9, 0, time.UTC)
 	for _, g := range []*time.Time{&late, &early, nil} {
-		if err := repo.FinishFeed(ctx, feed, JVNDBFeedResult{Status: JVNDBFeedStatusSuccess, GapUntil: g, ContentModifiedAt: &cm}); err != nil {
+		if err := repo.FinishFeed(ctx, feed, claim.Attempt, JVNDBFeedResult{Status: JVNDBFeedStatusSuccess, GapUntil: g, ContentModifiedAt: &cm}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// A failed attempt changes neither.
-	if err := repo.FinishFeed(ctx, feed, JVNDBFeedResult{Status: JVNDBFeedStatusFailed, GapUntil: &early}); err != nil {
+	if err := repo.FinishFeed(ctx, feed, claim.Attempt, JVNDBFeedResult{Status: JVNDBFeedStatusFailed, GapUntil: &early}); err != nil {
 		t.Fatal(err)
 	}
 	states, err := repo.FeedStates(ctx)
@@ -299,5 +303,38 @@ func TestJVNDBIntegration_GapUntilOnlyMovesForward(t *testing.T) {
 	st := states[feed]
 	if st.GapUntil == nil || !st.GapUntil.Equal(late) || st.ContentModifiedAt == nil || !st.ContentModifiedAt.Equal(cm) {
 		t.Fatalf("state = %+v", st)
+	}
+}
+
+// Codex R2 (Medium): an attempt can only finish the claim it holds; a stale
+// attempt cannot overwrite the state a newer attempt wrote.
+func TestJVNDBIntegration_FinishIsFencedToTheClaim(t *testing.T) {
+	appURL, migURL := rlsTestEnv(t)
+	migDB := openOrSkip(t, migURL)
+	appDB := openOrSkip(t, appURL)
+	feed := fmt.Sprintf("year:%04d", 1000+uuid.New().ID()%8999)
+	t.Cleanup(func() { _, _ = migDB.Exec(`DELETE FROM jvndb_feed_state WHERE feed = $1`, feed) })
+	repo := NewJVNDBRepository(appDB)
+	ctx := context.Background()
+	old, ok, err := repo.ClaimFeed(ctx, feed, time.Hour)
+	if err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	if _, err := migDB.Exec(`UPDATE jvndb_feed_state SET last_attempt_at = NOW() - interval '2 hours' WHERE feed = $1`, feed); err != nil {
+		t.Fatal(err)
+	}
+	cur, ok, err := repo.ClaimFeed(ctx, feed, time.Hour)
+	if err != nil || !ok || cur.Attempt == old.Attempt {
+		t.Fatalf("second claim: %v %v %+v", ok, err, cur)
+	}
+	if err := repo.FinishFeed(ctx, feed, cur.Attempt, JVNDBFeedResult{Status: JVNDBFeedStatusSuccess, ETag: `"new"`, Completed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.FinishFeed(ctx, feed, old.Attempt, JVNDBFeedResult{Status: JVNDBFeedStatusFailed, ETag: `"old"`}); !errors.Is(err, ErrJVNDBClaimLost) {
+		t.Fatalf("stale finish: err = %v, want ErrJVNDBClaimLost", err)
+	}
+	states, _ := repo.FeedStates(ctx)
+	if st := states[feed]; st.LastStatus != "success" || st.ETag != `"new"` {
+		t.Fatalf("state overwritten by a stale attempt: %+v", st)
 	}
 }

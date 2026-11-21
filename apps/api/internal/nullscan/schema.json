@@ -996,6 +996,10 @@
       }
     },
     "jvndb_feed_state": {
+      "attempt_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
       "completed": {
         "nullable": false,
         "type": "boolean"

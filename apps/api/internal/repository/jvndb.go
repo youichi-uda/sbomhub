@@ -31,7 +31,10 @@ type JVNDBAdvisoryRecord struct {
 // JVNDBFeedState is the stored sync state of one feed ("recent" or
 // "year:YYYY").
 type JVNDBFeedState struct {
-	Feed          string
+	Feed string
+	// Attempt is the id of the attempt ClaimFeed just started (only set on
+	// its result); FinishFeed must present it.
+	Attempt       string
 	SourceURL     string // the URL ETag / LastModified came from
 	ETag          string
 	LastModified  string
@@ -78,6 +81,11 @@ const (
 // only keeps a pathological catalogue from inflating the page.
 const maxJVNDBPerCVE = 5
 
+// ErrJVNDBClaimLost is returned by FinishFeed when the feed was claimed again
+// after this attempt started (it outlived its interval): the newer attempt's
+// state is kept.
+var ErrJVNDBClaimLost = errors.New("jvndb: feed claimed by a newer attempt")
+
 // JVNDBRepository stores the JVNDB RSS catalogue.
 type JVNDBRepository struct {
 	db *sql.DB
@@ -109,17 +117,17 @@ func (r *JVNDBRepository) ClaimFeed(ctx context.Context, feed string, minGap tim
 			FROM jvndb_feed_state WHERE feed = $1 FOR UPDATE
 		)
 		UPDATE jvndb_feed_state s
-		SET last_attempt_at = NOW(), last_status = 'running'
+		SET last_attempt_at = NOW(), last_status = 'running', attempt_id = gen_random_uuid()
 		FROM prev
 		WHERE s.feed = prev.feed
 		  AND (prev.last_attempt_at IS NULL OR prev.last_attempt_at <= NOW() - make_interval(secs => $2))
 		RETURNING COALESCE(prev.feed, ''), COALESCE(prev.source_url, ''), COALESCE(prev.etag, ''), COALESCE(prev.last_modified, ''),
 		          prev.last_attempt_at, prev.last_success_at, COALESCE(prev.last_status, ''), COALESCE(prev.completed, false),
-		          prev.content_modified_at, prev.gap_until`
+		          prev.content_modified_at, prev.gap_until, COALESCE(s.attempt_id::text, '')`
 	var st JVNDBFeedState
 	err := r.db.QueryRowContext(ctx, q, feed, minGap.Seconds()).Scan(
 		&st.Feed, &st.SourceURL, &st.ETag, &st.LastModified, &st.LastAttemptAt, &st.LastSuccessAt, &st.LastStatus, &st.Completed,
-		&st.ContentModifiedAt, &st.GapUntil)
+		&st.ContentModifiedAt, &st.GapUntil, &st.Attempt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -129,10 +137,12 @@ func (r *JVNDBRepository) ClaimFeed(ctx context.Context, feed string, minGap tim
 	return &st, true, nil
 }
 
-// FinishFeed records the outcome of the attempt ClaimFeed started. The
-// conditional-GET validators are replaced only on success / not_modified,
-// so a failed or partial run is fetched in full next time.
-func (r *JVNDBRepository) FinishFeed(ctx context.Context, feed string, res JVNDBFeedResult) error {
+// FinishFeed records the outcome of the attempt ClaimFeed started (attempt
+// is JVNDBFeedState.Attempt of that claim; a newer claim wins, see
+// ErrJVNDBClaimLost). The conditional-GET validators are replaced only on
+// success / not_modified, so a failed or partial run is fetched in full next
+// time.
+func (r *JVNDBRepository) FinishFeed(ctx context.Context, feed, attempt string, res JVNDBFeedResult) error {
 	ok := res.Status == JVNDBFeedStatusSuccess || res.Status == JVNDBFeedStatusNotModified
 	const q = `
 		UPDATE jvndb_feed_state SET
@@ -151,11 +161,19 @@ func (r *JVNDBRepository) FinishFeed(ctx context.Context, feed string, res JVNDB
 			gap_until       = CASE WHEN $4 AND $11::timestamptz IS NOT NULL
 			                       THEN GREATEST(COALESCE(gap_until, $11::timestamptz), $11::timestamptz)
 			                       ELSE gap_until END
-		WHERE feed = $1`
-	if _, err := r.db.ExecContext(ctx, q, feed, res.Status, res.ErrorMessage, ok,
+		WHERE feed = $1 AND attempt_id::text = $14`
+	tag, err := r.db.ExecContext(ctx, q, feed, res.Status, res.ErrorMessage, ok,
 		res.ETag, res.LastModified, res.ItemsSeen, res.ItemsWritten, res.ItemsRejected,
-		res.Completed, res.GapUntil, res.SourceURL, res.ContentModifiedAt); err != nil {
+		res.Completed, res.GapUntil, res.SourceURL, res.ContentModifiedAt, attempt)
+	if err != nil {
 		return fmt.Errorf("jvndb: finish feed: %w", err)
+	}
+	n, err := tag.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("jvndb: finish feed: %w", err)
+	}
+	if n == 0 {
+		return ErrJVNDBClaimLost
 	}
 	return nil
 }

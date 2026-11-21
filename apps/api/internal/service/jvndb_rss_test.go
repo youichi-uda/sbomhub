@@ -94,7 +94,7 @@ func TestParseJVNDBRSS_ItemValidation(t *testing.T) {
 		jvndbItem("JVNDB-2026-000001", "ok", `<sec:references source="CVE" id="cve-2026-1234"/><sec:references source="CVE" id="CVE-2026-1234"/><sec:references source="CVE" id="CVE-26-1"/><sec:references source="JVN" id="CVE-2026-9999"/>`, "2026-11-02T10:00+09:00") +
 		jvndbItem("JVNDB-26-1", "bad id", "", "2026-11-02T10:00+09:00") +
 		jvndbItem("JVNDB-2026-000002", "   ", "", "2026-11-02T10:00+09:00") +
-		jvndbItem("JVNDB-2026-000003", "a‮b\tc\n d", "", "not a date") +
+		jvndbItem("JVNDB-2026-000003", "a\u202eb\tc\n d", "", "not a date") +
 		`</rdf:RDF>`
 	got, st, err := parseAll(t, []byte(doc))
 	if err != nil {
@@ -235,7 +235,7 @@ func (f *fakeJVNDBStore) ClaimFeed(_ context.Context, feed string, minGap time.D
 	return &prev, true, nil
 }
 
-func (f *fakeJVNDBStore) FinishFeed(_ context.Context, feed string, res repository.JVNDBFeedResult) error {
+func (f *fakeJVNDBStore) FinishFeed(_ context.Context, feed, _ string, res repository.JVNDBFeedResult) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.finishErr != nil {
@@ -648,6 +648,137 @@ func TestJVNDBSync_RedirectAndUnsolicited304(t *testing.T) {
 	}
 	if fin := store.finished["recent"]; fin.Status != "failed" {
 		t.Fatalf("finish = %+v", fin)
+	}
+}
+
+// Codex R2 (Medium): only the replica that claimed the recent feed in this
+// interval runs the backfill, so replicas never download several year feeds
+// at once.
+func TestJVNDBSync_OneBackfillAcrossReplicas(t *testing.T) {
+	doc := readJVNDBFixture(t)
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		_, _ = w.Write(doc)
+	}))
+	defer srv.Close()
+	store := newFakeJVNDBStore() // shared by both "replicas"
+	now := func() time.Time { return time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC) }
+	a := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 2024)
+	b := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 2024)
+	a.now, b.now = now, now
+	if _, err := a.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(paths) != "[/jvndb.rdf /years/jvndb_2026.rdf]" {
+		t.Fatalf("paths = %v: the second replica must not take another year in the same interval", paths)
+	}
+}
+
+// Codex R2 (Medium / Low): without a Last-Modified the generation time is
+// bounded by the weekly regeneration, not taken as the read time; a 304's
+// Last-Modified counts as the generation time.
+func TestJVNDBSync_ContentModifiedFromHeadersOnly(t *testing.T) {
+	doc := readJVNDBFixture(t)
+	lm := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if lm != "" {
+			w.Header().Set("Last-Modified", lm)
+		}
+		if r.Header.Get("If-None-Match") == `"y"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"y"`)
+		_, _ = w.Write(doc)
+	}))
+	defer srv.Close()
+	store := newFakeJVNDBStore()
+	read := time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)
+	svc := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 2026)
+	svc.now = func() time.Time { return read }
+	if _, err := svc.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cm := store.states["year:2026"].ContentModifiedAt
+	if cm == nil || !cm.Equal(read.Add(-jvndbYearRegeneration)) {
+		t.Fatalf("content modified = %v, want read time minus %v", cm, jvndbYearRegeneration)
+	}
+	// After a gap the year is pending again; a 304 carrying a newer
+	// Last-Modified moves the generation time forward and closes it.
+	gap := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	store.states["recent"].GapUntil = &gap
+	lm = "Sun, 22 Nov 2026 00:02:09 GMT"
+	ageAllAttempts(store)
+	if _, err := svc.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 11, 22, 0, 2, 9, 0, time.UTC)
+	if fin := store.finished["year:2026"]; fin.Status != "not_modified" || store.states["year:2026"].ContentModifiedAt == nil || !store.states["year:2026"].ContentModifiedAt.Equal(want) {
+		t.Fatalf("after 304: %+v / %v", fin, store.states["year:2026"].ContentModifiedAt)
+	}
+}
+
+// Codex R2 (Low): conditional headers are not carried to a redirect target.
+func TestJVNDBSync_ValidatorsNotSentAcrossRedirect(t *testing.T) {
+	doc := readJVNDBFixture(t)
+	var seen []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/moved/jvndb.rdf", func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("If-None-Match")+"|"+r.Header.Get("If-Modified-Since"))
+		_, _ = w.Write(doc)
+	})
+	mux.HandleFunc("/jvndb.rdf", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/moved/jvndb.rdf", http.StatusFound)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	store := newFakeJVNDBStore()
+	past := time.Now().Add(-2 * time.Hour)
+	store.states["recent"] = &repository.JVNDBFeedState{Feed: "recent", LastStatus: "success", SourceURL: srv.URL + "/jvndb.rdf",
+		ETag: `"a"`, LastModified: "Sat, 21 Nov 2026 08:00:05 GMT", LastAttemptAt: &past}
+	if _, err := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 0).Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0] != "|" {
+		t.Fatalf("redirect target saw validators: %v", seen)
+	}
+}
+
+// Codex R2 (Medium): one oversized token (text or attribute) anywhere in the
+// document fails the parse while it is being read.
+func TestParseJVNDBRSS_OversizedToken(t *testing.T) {
+	big := strings.Repeat("x", jvndbMaxTokenBytes+64<<10) // beyond the decoder's 4 KiB read-ahead
+	for name, doc := range map[string]string{
+		"channel attribute": `<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"><channel rdf:about="` + big + `"><title>t</title></channel></rdf:RDF>`,
+		"channel text":      `<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"><channel><description>` + big + `</description></channel></rdf:RDF>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := parseAll(t, []byte(doc)); !errors.Is(err, ErrJVNDBFeedMalformed) {
+				t.Fatalf("err = %v, want ErrJVNDBFeedMalformed", err)
+			}
+		})
+	}
+	g := &jvndbTokenGuard{r: strings.NewReader(big), limit: 1000}
+	buf := make([]byte, 600)
+	if n, err := g.Read(buf); err != nil || n != 600 {
+		t.Fatal(n, err)
+	}
+	if n, err := g.Read(buf); err != nil || n != 400 {
+		t.Fatalf("second read = %d, %v; want the 400 bytes left before the limit", n, err)
+	}
+	if _, err := g.Read(buf); err == nil {
+		t.Fatal("the guard must refuse reading past its limit without a reset")
+	}
+	g.reset()
+	if n, err := g.Read(buf); err != nil || n != 600 {
+		t.Fatalf("after reset: %d, %v", n, err)
 	}
 }
 

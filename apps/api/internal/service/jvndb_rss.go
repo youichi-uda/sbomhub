@@ -55,12 +55,16 @@ const (
 	jvndbMaxRedirects  = 3
 	// jvndbClaimSlack lets a ticker that fires a little early still claim.
 	jvndbClaimSlack = time.Minute
+	// jvndbYearRegeneration is how often JVN iPedia regenerates the year
+	// feeds (weekly, 2026-11-21). Without a Last-Modified, content read at
+	// time T is taken to have been generated no later than T minus this.
+	jvndbYearRegeneration = 7 * 24 * time.Hour
 )
 
 // jvndbStore is the slice of JVNDBRepository the service uses.
 type jvndbStore interface {
 	ClaimFeed(ctx context.Context, feed string, minGap time.Duration) (*repository.JVNDBFeedState, bool, error)
-	FinishFeed(ctx context.Context, feed string, res repository.JVNDBFeedResult) error
+	FinishFeed(ctx context.Context, feed, attempt string, res repository.JVNDBFeedResult) error
 	FeedStates(ctx context.Context) (map[string]repository.JVNDBFeedState, error)
 	UpsertAdvisories(ctx context.Context, recs []repository.JVNDBAdvisoryRecord) (int, error)
 }
@@ -115,6 +119,10 @@ func jvndbCheckRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
 		return errors.New("jvndb rss: redirect from https to a non-https URL refused")
 	}
+	// Validators belong to the URL that issued them; Go would copy them to
+	// the redirect target (Codex R2).
+	req.Header.Del("If-None-Match")
+	req.Header.Del("If-Modified-Since")
 	return nil
 }
 
@@ -153,7 +161,10 @@ func (s *JVNDBRSSService) Sync(ctx context.Context) (*JVNDBSyncResult, error) {
 		errs = append(errs, err)
 	}
 
-	if s.backfillFrom > 0 && ctx.Err() == nil {
+	// Only the replica that claimed the recent feed in this interval runs
+	// the backfill: the recent claim is global, so at most one year feed is
+	// downloaded per interval for the whole deployment (Codex R2).
+	if s.backfillFrom > 0 && out.Status != "skipped" && ctx.Err() == nil {
 		years, err := s.backfillCandidates(ctx)
 		if err != nil {
 			errs = append(errs, err)
@@ -255,7 +266,7 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 		// Detached: record the outcome even when ctx was cancelled.
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if err := s.store.FinishFeed(fctx, feed, r); err != nil {
+		if err := s.store.FinishFeed(fctx, feed, prev.Attempt, r); err != nil {
 			slog.Error("jvndb rss: record feed state failed", "feed", feed, "error", err)
 			finishErr = fmt.Errorf("jvndb rss %s: record feed state: %w", feed, err)
 		}
@@ -297,8 +308,13 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 	direct := resp.Request != nil && resp.Request.URL.String() == req.URL.String()
 
 	if resp.StatusCode == http.StatusNotModified && conditional && direct {
+		var cm *time.Time
+		if lm, err := http.ParseTime(resp.Header.Get("Last-Modified")); err == nil {
+			lm = lm.UTC()
+			cm = &lm
+		}
 		finish(repository.JVNDBFeedResult{
-			Status: repository.JVNDBFeedStatusNotModified, SourceURL: feedURL,
+			Status: repository.JVNDBFeedStatusNotModified, SourceURL: feedURL, ContentModifiedAt: cm,
 			ETag: firstNonEmpty(resp.Header.Get("ETag"), prev.ETag), LastModified: firstNonEmpty(resp.Header.Get("Last-Modified"), prev.LastModified),
 			Completed: feed != jvndbRecentFeed,
 		})
@@ -317,7 +333,9 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 		if len(batch) == 0 {
 			return nil
 		}
-		n, err := s.store.UpsertAdvisories(ctx, batch)
+		// rctx: the attempt's whole deadline covers its writes too, so an
+		// attempt cannot outlive its claim (Codex R2).
+		n, err := s.store.UpsertAdvisories(rctx, batch)
 		out.Written += n
 		batch = batch[:0]
 		return err
@@ -365,7 +383,10 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 			"previous_success", prev.LastSuccessAt, "oldest_item_modified", stats.OldestModified, "backfill_from", s.backfillFrom)
 	}
 
-	contentModified := s.now().UTC()
+	// Without a Last-Modified the generation time is unknown; bound it by the
+	// weekly regeneration rather than taking the read time, so a stale copy
+	// cannot close a gap early (Codex R2).
+	contentModified := s.now().UTC().Add(-jvndbYearRegeneration)
 	if lm, err := http.ParseTime(resp.Header.Get("Last-Modified")); err == nil {
 		contentModified = lm.UTC()
 	}

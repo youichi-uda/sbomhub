@@ -44,6 +44,11 @@ const (
 	// 1-9 KB (the recent feed, 2026-11-21); an item beyond this fails the
 	// feed rather than being materialised.
 	jvndbMaxItemBytes = 1 << 20
+	// jvndbMaxTokenBytes bounds the input one XML token (a text node, a tag
+	// with its attributes) may span. encoding/xml materialises a whole token
+	// before returning it, so the limit is enforced in the reader underneath
+	// (jvndbTokenGuard), before the allocation.
+	jvndbMaxTokenBytes = 1 << 20
 	// jvndbMaxFieldBytes bounds the text kept from one item field (the title
 	// cap is 1000 runes, at most 4 bytes each).
 	jvndbMaxFieldBytes = 4 * jvndbMaxTitleRunes
@@ -89,7 +94,8 @@ type JVNDBParseStats struct {
 // at a time; the caller bounds the total size of r.
 func ParseJVNDBRSS(r io.Reader, fn func(repository.JVNDBAdvisoryRecord) error) (JVNDBParseStats, error) {
 	var st JVNDBParseStats
-	dec := xml.NewDecoder(r)
+	guard := &jvndbTokenGuard{r: r, limit: jvndbMaxTokenBytes}
+	dec := xml.NewDecoder(guard)
 	dec.Strict = true
 	// No CharsetReader: a document declaring anything but UTF-8 is refused
 	// by encoding/xml itself.
@@ -104,6 +110,7 @@ func ParseJVNDBRSS(r io.Reader, fn func(repository.JVNDBAdvisoryRecord) error) (
 	sawChannel := false
 	for {
 		tok, err := dec.Token()
+		guard.reset()
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -140,7 +147,7 @@ func ParseJVNDBRSS(r io.Reader, fn func(repository.JVNDBAdvisoryRecord) error) (
 				if st.Items > jvndbMaxItemsPerFeed {
 					return malformed("more than %d items", jvndbMaxItemsPerFeed)
 				}
-				it, err := decodeJVNDBItem(dec)
+				it, err := decodeJVNDBItem(dec, guard)
 				if err != nil {
 					return malformed("item %d: %v", st.Items, err)
 				}
@@ -162,7 +169,7 @@ func ParseJVNDBRSS(r io.Reader, fn func(repository.JVNDBAdvisoryRecord) error) (
 			if t.Name.Space == nsRSS10 && t.Name.Local == "channel" {
 				sawChannel = true
 			}
-			if err := dec.Skip(); err != nil {
+			if err := skipJVNDBElement(dec, guard); err != nil {
 				return malformed("xml: %v", err)
 			}
 		case xml.EndElement:
@@ -191,7 +198,7 @@ func ParseJVNDBRSS(r io.Reader, fn func(repository.JVNDBAdvisoryRecord) error) (
 // decodeJVNDBItem reads one <item> (its start element already consumed)
 // token by token, keeping only the fields used, each bounded, and failing
 // when the item exceeds jvndbMaxItemBytes of input.
-func decodeJVNDBItem(dec *xml.Decoder) (jvndbRSSItem, error) {
+func decodeJVNDBItem(dec *xml.Decoder, guard *jvndbTokenGuard) (jvndbRSSItem, error) {
 	var it jvndbRSSItem
 	start := dec.InputOffset()
 	depth := 1
@@ -202,6 +209,7 @@ func decodeJVNDBItem(dec *xml.Decoder) (jvndbRSSItem, error) {
 			return it, fmt.Errorf("item larger than %d bytes", jvndbMaxItemBytes)
 		}
 		tok, err := dec.Token()
+		guard.reset()
 		if err != nil {
 			return it, err
 		}
@@ -360,4 +368,47 @@ func parseJVNDBTime(s string) *time.Time {
 		return &t
 	}
 	return nil
+}
+
+// skipJVNDBElement consumes the element whose start was just read, like
+// xml.Decoder.Skip but resetting the token guard between tokens.
+func skipJVNDBElement(dec *xml.Decoder, guard *jvndbTokenGuard) error {
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		guard.reset()
+		if err != nil {
+			return err
+		}
+		switch tok.(type) {
+		case xml.StartElement:
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+	return nil
+}
+
+// jvndbTokenGuard fails a read once more than limit bytes were read since the
+// last reset. The parser resets it after every token, so no single token can
+// make the decoder buffer more than about limit bytes (plus its read-ahead).
+type jvndbTokenGuard struct {
+	r     io.Reader
+	limit int64
+	used  int64
+}
+
+func (g *jvndbTokenGuard) reset() { g.used = 0 }
+
+func (g *jvndbTokenGuard) Read(p []byte) (int, error) {
+	if g.used >= g.limit {
+		return 0, fmt.Errorf("an XML token larger than %d bytes", g.limit)
+	}
+	if room := g.limit - g.used; int64(len(p)) > room {
+		p = p[:room]
+	}
+	n, err := g.r.Read(p)
+	g.used += int64(n)
+	return n, err
 }

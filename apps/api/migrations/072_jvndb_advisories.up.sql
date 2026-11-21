@@ -35,7 +35,8 @@
 --                         and -- on 'recent' -- the end of the newest gap the
 --                         recent feed could not cover (gap_until): a year feed
 --                         generated before it is read again. The claim on
---                         last_attempt_at is
+--                         last_attempt_at (with a fresh attempt_id that the
+--                         attempt must present to record its outcome) is
 --                         what keeps several API replicas from fetching the
 --                         same feed in the same interval.
 --
@@ -78,6 +79,7 @@ CREATE TABLE IF NOT EXISTS jvndb_feed_state (
     etag              TEXT,
     last_modified     TEXT,
     last_attempt_at   TIMESTAMP WITH TIME ZONE,
+    attempt_id        UUID,
     last_success_at   TIMESTAMP WITH TIME ZONE,
     last_status       VARCHAR(20) NOT NULL DEFAULT 'never'
                       CHECK (last_status IN ('never', 'running', 'success', 'not_modified', 'failed', 'partial')),
