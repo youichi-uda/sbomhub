@@ -118,19 +118,25 @@ func TestParseJVNDBRSS_ItemValidation(t *testing.T) {
 
 func TestParseJVNDBRSS_StrictDocument(t *testing.T) {
 	cases := map[string]string{
-		"doctype":         `<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x "y">]><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF>`,
-		"wrong root":      `<?xml version="1.0"?><rss></rss>`,
-		"shift_jis":       `<?xml version="1.0" encoding="Shift_JIS"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF>`,
-		"not closed":      jvndbDocHead,
-		"empty":           ``,
-		"html":            `<html><body>maintenance</body></html>`,
-		"trailing root":   jvndbDocHead + `</rdf:RDF><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF>`,
-		"broken item":     jvndbDocHead + `<item><title>x</item></rdf:RDF>`,
-		"no channel":      `<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/" xmlns:sec="http://jvn.jp/rss/mod_sec/"><item><title>t</title><sec:identifier>JVNDB-2026-000001</sec:identifier></item></rdf:RDF>`,
-		"undefined ent":   jvndbDocHead + `<item><title>&foo;</title></item></rdf:RDF>`,
-		"trailing text":   jvndbDocHead + `</rdf:RDF>junk`,
-		"pi inside":       jvndbDocHead + `<?evil x?></rdf:RDF>`,
-		"non-rdf ns root": `<RDF></RDF>`,
+		"doctype":       `<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x "y">]><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF>`,
+		"wrong root":    `<?xml version="1.0"?><rss></rss>`,
+		"shift_jis":     `<?xml version="1.0" encoding="Shift_JIS"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF>`,
+		"not closed":    jvndbDocHead,
+		"empty":         ``,
+		"html":          `<html><body>maintenance</body></html>`,
+		"trailing root": jvndbDocHead + `</rdf:RDF><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF>`,
+		"broken item":   jvndbDocHead + `<item><title>x</item></rdf:RDF>`,
+		"no channel":    `<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/" xmlns:sec="http://jvn.jp/rss/mod_sec/"><item><title>t</title><sec:identifier>JVNDB-2026-000001</sec:identifier></item></rdf:RDF>`,
+		"undefined ent": jvndbDocHead + `<item><title>&foo;</title></item></rdf:RDF>`,
+		"trailing text": jvndbDocHead + `</rdf:RDF>junk`,
+		"pi inside":     jvndbDocHead + `<?evil x?></rdf:RDF>`,
+		// Codex M76 integration R2 Low: directives and processing
+		// instructions are refused in every token loop, not only the outer.
+		"directive in item":    jvndbDocHead + `<item><title>t</title><!DOCTYPE x><sec:identifier>JVNDB-2026-000001</sec:identifier><dcterms:modified>2026-11-02T10:00+09:00</dcterms:modified></item></rdf:RDF>`,
+		"pi in item":           jvndbDocHead + `<item><title>t</title><?evil x?><sec:identifier>JVNDB-2026-000001</sec:identifier><dcterms:modified>2026-11-02T10:00+09:00</dcterms:modified></item></rdf:RDF>`,
+		"directive in skipped": jvndbDocHead + `<other><!DOCTYPE x></other>` + jvndbItem("JVNDB-2026-000001", "t", "", "2026-11-02T10:00+09:00") + `</rdf:RDF>`,
+		"pi in skipped":        jvndbDocHead + `<other><?evil x?></other>` + jvndbItem("JVNDB-2026-000001", "t", "", "2026-11-02T10:00+09:00") + `</rdf:RDF>`,
+		"non-rdf ns root":      `<RDF></RDF>`,
 	}
 	for name, doc := range cases {
 		t.Run(name, func(t *testing.T) {

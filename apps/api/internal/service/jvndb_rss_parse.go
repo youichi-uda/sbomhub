@@ -218,6 +218,11 @@ func decodeJVNDBItem(dec *xml.Decoder, guard *jvndbTokenGuard) (jvndbRSSItem, er
 			return it, err
 		}
 		switch t := tok.(type) {
+		case xml.Directive, xml.ProcInst:
+			// No DOCTYPE / directive or processing instruction anywhere in
+			// the document, not only outside the items (Codex M76
+			// integration R2 Low).
+			return it, errors.New("directive or processing instruction not allowed")
 		case xml.StartElement:
 			depth++
 			field = nil
@@ -435,6 +440,8 @@ func skipJVNDBElement(dec *xml.Decoder, guard *jvndbTokenGuard) error {
 			return err
 		}
 		switch tok.(type) {
+		case xml.Directive, xml.ProcInst:
+			return errors.New("directive or processing instruction not allowed")
 		case xml.StartElement:
 			depth++
 			if depth > jvndbMaxDepth {
