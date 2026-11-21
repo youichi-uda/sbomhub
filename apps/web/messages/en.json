@@ -502,6 +502,12 @@
       "ransomware": "Ransomware"
     }
   },
+  "JVNDB": {
+    "heading": "JVN iPedia (Japanese-language advisory, for reference)",
+    "note": "Japanese advisory from JVN iPedia, matched to this CVE by ID from the JVNDB RSS feed. It is shown for reference only: it did not detect this vulnerability and does not count as a JVN check.",
+    "published": "published {date}",
+    "opensInNewTab": "(opens in a new tab)"
+  },
   "SSVC": {
     "title": "SSVC Assessment",
     "subtitle": "Stakeholder-Specific Vulnerability Categorization",

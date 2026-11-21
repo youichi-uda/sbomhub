@@ -158,6 +158,10 @@ export interface Vulnerability {
   // distro_fixed), public fields only; absent for every other method. Read
   // it through src/lib/match-method.ts, which validates its shape.
   match_evidence?: DistroEvidence;
+  // Migration 072: JVN iPedia advisories referencing this CVE (JVNDB RSS),
+  // supplementary reference only. Read it through src/lib/jvndb.ts, which
+  // validates it and rebuilds the link from the id.
+  jvndb?: unknown;
 }
 
 // KEV types

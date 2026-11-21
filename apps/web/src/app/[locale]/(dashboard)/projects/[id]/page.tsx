@@ -14,6 +14,7 @@ import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
 import { KEVBadge } from "@/components/vulnerability/kev-badge";
 import { DistroEvidencePanel, DistroMatchBadge } from "@/components/vulnerability/distro-match";
 import { FindingMatchBadge } from "@/components/vulnerability/finding-match";
+import { JvndbAdvisories } from "@/components/vulnerability/jvndb-advisories";
 import { EOLBadge } from "@/components/component/eol-badge";
 import { DependencyPathPanel } from "@/components/component/dependency-path";
 import { LoadError } from "@/components/ui/load-error";
@@ -1083,6 +1084,8 @@ export default function ProjectDetailPage() {
                     <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
                       {vuln.description}
                     </p>
+                    {/* Migration 072: JVN iPedia reference (Japanese). */}
+                    <JvndbAdvisories advisories={vuln.jvndb} />
                     <DistroEvidencePanel
                       cveId={vuln.cve_id}
                       method={vuln.match_method}

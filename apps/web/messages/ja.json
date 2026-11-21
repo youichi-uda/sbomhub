@@ -502,6 +502,12 @@
       "ransomware": "ランサムウェア"
     }
   },
+  "JVNDB": {
+    "heading": "JVN iPedia（参考情報）",
+    "note": "JVNDB RSS から CVE 番号で対応付けた JVN iPedia の脆弱性対策情報です。参考として表示しており、この情報で脆弱性を検出したものではなく、JVN の照会にも数えません。",
+    "published": "公開 {date}",
+    "opensInNewTab": "（新しいタブで開きます）"
+  },
   "SSVC": {
     "title": "SSVC 評価",
     "subtitle": "Stakeholder-Specific Vulnerability Categorization",
