@@ -581,6 +581,12 @@ test("a tool reporting scan counts reports whether the scan had finished", () =>
       /checked_sources/,
       `${tool} carries checked_sources but never names it where the model reads`
     );
+    // UPGRADE §38: a recorded (older) result says so, with its time.
+    for (const k of ["scan_source", "last_scan_at"]) {
+      assert.equal(keys.has(k), true, `${tool} reports counts_final but not ${k}, so a recorded result reads as live`);
+    }
+    assert.match(description, /scan_source/, `${tool} carries scan_source but never names it where the model reads`);
+    assert.match(description, /last_scan_at/, `${tool} carries last_scan_at but never names it where the model reads`);
     // A skip stops new lookups; it does not remove findings an earlier scan
     // of the same SBOM made with that source (Codex SBOMHUB_JVN R3, High).
     // Telling the model the counts EXCLUDE the source would make it discount

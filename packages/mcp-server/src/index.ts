@@ -106,6 +106,9 @@ function errorResult(err: unknown): CallToolResult {
 //   checked_sources     sources the scan actually checked; null when the
 //                       backend did not say (unknown, not "none"). A source
 //                       in neither list failed or is unknown.
+//   scan_source /       (UPGRADE §38) "recorded" + when: the state is the
+//   last_scan_at        SBOM's last recorded result, the live status being
+//                       gone; "live" otherwise; null when unknown.
 //
 // Stated once and shared, for the reason SCOPE_NOTE is: a per-tool rewording is
 // a per-tool opportunity to describe a payload the tool does not produce. Every
@@ -129,7 +132,10 @@ const SCAN_STATE_NOTE =
   "空でないときは、その情報源について「脆弱性なし」と断定しないこと。" +
   "checked_sources は実際に照会できた情報源 (例: [\"nvd\",\"jvn\",\"distro\"])。" +
   "null はサーバーが報告しなかった (不明) ことを表し、「照会なし」ではない。" +
-  "checked_sources に無い情報源については、counts_final=true でも網羅的な結果として扱わず、「脆弱性なし」と断定しないこと。";
+  "checked_sources に無い情報源については、counts_final=true でも網羅的な結果として扱わず、「脆弱性なし」と断定しないこと。" +
+  "scan_source=recorded はサーバーがライブのスキャン状態をもう保持しておらず、そのSBOMの最後に記録されたスキャン結果を返したことを表し、" +
+  "last_scan_at がその結果の記録日時 (failed で理由が interrupted の記録は、結果を報告しなかったスキャンの開始日時。scan_source=live のときと状態不明のときは null)。" +
+  "記録された結果はその時点のものなので、古い場合は日時を添えて報告し、現在の状態として断定しないこと。";
 
 // The per-project tools all take this. The refusal a project-scoped key gets
 // for someone ELSE's project is stated on the argument that causes it, because

@@ -174,7 +174,7 @@ const ok = (body, headers) => ({ status: 200, body, headers });
 // client compares across the walk to notice a scan that moved.
 export const scanStatusBody = (
   status,
-  { total = 0, sbomId = SBOM_NEWEST, buckets = {}, skipped = [], checked, run } = {}
+  { total = 0, sbomId = SBOM_NEWEST, buckets = {}, skipped = [], checked, run, source, lastScanAt } = {}
 ) => ({
   status,
   sbom_id: sbomId,
@@ -191,6 +191,11 @@ export const scanStatusBody = (
   // scan (group of overlapping runs); absent when unknown and from older
   // backends. `run` undefined -> absent.
   ...(run !== undefined ? { scan_run: run } : {}),
+  // apps/api scan-status `source` / `last_scan_at` (2026-11, UPGRADE §38):
+  // "recorded" + when, for the SBOM's last recorded result; absent from older
+  // backends (= live). undefined -> absent.
+  ...(source !== undefined ? { source } : {}),
+  ...(lastScanAt !== undefined ? { last_scan_at: lastScanAt } : {}),
   // The client compares this WHOLE object across the walk, not just `total`: a
   // vulnerability relabelled LOW -> CRITICAL mid-walk leaves the total untouched
   // while making by_severity and any severity filter stale (Codex R4, High).
@@ -271,6 +276,8 @@ export const scanProbeChanging = (first, second) => {
           skipped: which.skipped ?? [],
           checked: which.checked,
           run: which.run,
+          source: which.source,
+          lastScanAt: which.lastScanAt,
         })
       );
     },
@@ -610,6 +617,121 @@ export const CONTRACT_CASES = [
       // The backend did not report coverage (no checked_sources): unknown,
       // stated as null — never [] ("checked nothing") nor a guessed list.
       assert.equal(payload.checked_sources, null);
+      // No `source` (an older backend): a live answer, no recorded time.
+      assert.equal(payload.scan_source, "live");
+      assert.equal(payload.last_scan_at, null);
+    },
+  },
+
+  // UPGRADE §38: once the live status is gone, apps/api answers the SBOM's
+  // last recorded result (source "recorded", last_scan_at). It is carried as
+  // scan_source / last_scan_at; both readings must agree on it.
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "a recorded result on both probes is final, with its source and time",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("completed", {
+        total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"],
+        source: "recorded", lastScanAt: "2026-11-18T01:02:03Z",
+      }),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "completed");
+      assert.equal(payload.counts_final, true);
+      assert.equal(payload.scan_source, "recorded");
+      assert.equal(payload.last_scan_at, "2026-11-18T01:02:03Z");
+      assert.deepEqual(payload.checked_sources, ["distro", "jvn", "nvd"]);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "recorded then live between the probes is a change; no source is named",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbeChanging(
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"], source: "recorded", lastScanAt: "2026-11-18T01:02:03Z" },
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"], source: "live" }
+      ),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "changed");
+      assert.equal(payload.counts_final, false);
+      assert.equal(payload.scan_source, null);
+      assert.equal(payload.last_scan_at, null);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "two recorded times between the probes are a change",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbeChanging(
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"], source: "recorded", lastScanAt: "2026-11-18T01:02:03Z" },
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS), checked: ["nvd", "jvn", "distro"], source: "recorded", lastScanAt: "2026-11-19T01:02:03Z" }
+      ),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "changed");
+      assert.equal(payload.counts_final, false);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "a recorded failure (interrupted) is not final, and says it is recorded",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("failed", { total: VULNS.length, buckets: bucketsOf(VULNS), source: "recorded", lastScanAt: "2026-11-18T01:02:03Z" }),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }], { after: false }),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "failed");
+      assert.equal(payload.counts_final, false);
+      assert.equal(payload.scan_source, "recorded");
+      assert.equal(payload.last_scan_at, "2026-11-18T01:02:03Z");
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "an unparseable last_scan_at is null; a recorded source on unknown is ignored",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("completed", {
+        total: VULNS.length, buckets: bucketsOf(VULNS), source: "recorded", lastScanAt: "three days ago",
+      }),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_source, "recorded");
+      assert.equal(payload.last_scan_at, null);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "unknown has no source",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("unknown", { total: VULNS.length, buckets: bucketsOf(VULNS), source: "recorded", lastScanAt: "2026-11-18T01:02:03Z" }),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }], { after: false }),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "unknown");
+      assert.equal(payload.scan_source, null);
+      assert.equal(payload.last_scan_at, null);
     },
   },
 

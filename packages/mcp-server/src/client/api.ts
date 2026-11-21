@@ -81,6 +81,14 @@ const ScanStatusSchema = z.looseObject({
   // the same value are about the same scan. Absent when unknown and from
   // older backends; compared for equality only.
   scan_run: z.string().optional(),
+  // apps/api (additive, 2026-11, UPGRADE §38): "live" or "recorded". A
+  // recorded answer is the SBOM's last terminal result kept in PostgreSQL,
+  // answered once the live status is gone (about an hour after the scan);
+  // absent with older backends and for unknown (absent = live).
+  source: z.string().optional(),
+  // apps/api (additive, 2026-11): on recorded answers only, when that result
+  // was recorded (RFC 3339).
+  last_scan_at: z.string().optional(),
 });
 
 export type SbomSummary = z.infer<typeof SbomSummarySchema>;
@@ -161,6 +169,15 @@ type ScanProbe = {
    * not be read.
    */
   run: string | null;
+  /**
+   * Where the reading's state came from (apps/api `source`, UPGRADE §38):
+   * "recorded" for the SBOM's last recorded result, "live" for any other
+   * known state (also from older backends, which do not say); null when the
+   * state is unknown or could not be read.
+   */
+  source: "live" | "recorded" | null;
+  /** `last_scan_at` of a recorded reading; null otherwise. */
+  lastScanAt: string | null;
 };
 
 /**
@@ -186,13 +203,47 @@ type ScanProbe = {
  * under-state what was checked, never over-state it. A source in neither list
  * failed, or its coverage is unknown: the counts are not complete for it.
  */
+/**
+ * `scan_source` (UPGRADE §38) says where the reported state came from:
+ * "live" (the server's live scan status) or "recorded" (the SBOM's last
+ * recorded result, answered once the live status is gone — about an hour
+ * after the scan). `last_scan_at` is when a recorded result was recorded
+ * (RFC 3339) — for a recorded interrupted run (failed, reason
+ * `interrupted`: a scan that never reported an outcome), when that run
+ * started —, null for a live one. Both are null when the state is unknown,
+ * could not be read, or the two readings disagree (changed). A recorded state
+ * is as final as a live one for the scan it reports; it is just older —
+ * `last_scan_at` says how much.
+ */
 export type ScanReport = {
   scan_state: string;
   counts_final: boolean;
   scanned_sbom_id: string | null;
   skipped_sources: string[];
   checked_sources: string[] | null;
+  scan_source: "live" | "recorded" | null;
+  last_scan_at: string | null;
 };
+
+/**
+ * A reading's source (UPGRADE §38): "recorded" only for a completed / failed
+ * answer that says so, then with its last_scan_at when that parses; "live"
+ * for any other known state (older backends do not say); null for unknown
+ * and states this client does not know.
+ */
+function probeSource(
+  state: string,
+  source: string | undefined,
+  lastScanAt: string | undefined
+): { source: "live" | "recorded" | null; lastScanAt: string | null } {
+  const terminal = state === "completed" || state === "failed";
+  if (terminal && source === "recorded") {
+    const ok = lastScanAt !== undefined && Number.isFinite(Date.parse(lastScanAt));
+    return { source: "recorded", lastScanAt: ok ? lastScanAt : null };
+  }
+  if (terminal || state === "running") return { source: "live", lastScanAt: null };
+  return { source: null, lastScanAt: null };
+}
 
 /** Sorted, de-duplicated union of skipped-source lists. */
 function skippedUnion(...lists: string[][]): string[] {
@@ -651,6 +702,8 @@ private async readScanState(
     skipped: [],
     checked: null,
     run: null,
+    source: null,
+    lastScanAt: null,
   };
 
   try {
@@ -694,6 +747,7 @@ private async readScanState(
         status.scan_run === undefined || status.scan_run === ""
           ? null
           : status.scan_run,
+      ...probeSource(status.status, status.source, status.last_scan_at),
     };
   } catch {
     return unreadable;
@@ -827,6 +881,8 @@ private async probeScanState(
       scanned_sbom_id: before.sbomId,
       skipped_sources: before.skipped,
       checked_sources: before.checked,
+      scan_source: before.source,
+      last_scan_at: before.lastScanAt,
     };
   }
 
@@ -845,6 +901,8 @@ private async probeScanState(
       scanned_sbom_id: before.sbomId,
       skipped_sources,
       checked_sources,
+      scan_source: null,
+      last_scan_at: null,
     };
   }
 
@@ -862,7 +920,11 @@ private async probeScanState(
     after.counts === before.counts &&
     after.skipped.join(",") === before.skipped.join(",") &&
     JSON.stringify(after.checked) === JSON.stringify(before.checked) &&
-    sameRun;
+    sameRun &&
+    // A live and a recorded answer, or two recorded times, are different
+    // answers (UPGRADE §38).
+    after.source === before.source &&
+    after.lastScanAt === before.lastScanAt;
 
   if (!settled) {
     return {
@@ -874,6 +936,8 @@ private async probeScanState(
       scanned_sbom_id: after.sbomId === before.sbomId ? before.sbomId : null,
       skipped_sources,
       checked_sources,
+      scan_source: null,
+      last_scan_at: null,
     };
   }
 
@@ -890,6 +954,8 @@ private async probeScanState(
     scanned_sbom_id: walkCovered ? before.sbomId : null,
     skipped_sources,
     checked_sources,
+    scan_source: before.source,
+    last_scan_at: before.lastScanAt,
   };
 }
 }
