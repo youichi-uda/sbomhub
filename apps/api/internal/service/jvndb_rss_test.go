@@ -1028,9 +1028,11 @@ func TestJVNDB_FutureDateIsNotReplacedByFallback(t *testing.T) {
 		item("JVNDB-2026-000002", future, ok, ok) + // future issued
 		item("JVNDB-2026-000003", ok, ok, future) + // future dc:date
 		item("JVNDB-2026-000004", ok, "", ok) + // absent modified: dc:date fallback
+		// Codex M76 integration R3 Low: present but empty is not absent.
+		`<item rdf:about="x"><title>t</title><sec:identifier>JVNDB-2026-000005</sec:identifier><dcterms:modified/><dc:date>` + ok + `</dc:date></item>` + "\n" +
 		`</rdf:RDF>`
 	got, st, err := parseAll(t, []byte(doc))
-	if err != nil || len(got) != 1 || got[0].ID != "JVNDB-2026-000004" || st.Rejected != 3 {
+	if err != nil || len(got) != 1 || got[0].ID != "JVNDB-2026-000004" || st.Rejected != 4 {
 		t.Fatalf("got %+v stats %+v err %v; want only JVNDB-2026-000004 kept", got, st, err)
 	}
 }

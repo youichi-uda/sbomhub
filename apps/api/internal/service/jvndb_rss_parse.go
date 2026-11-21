@@ -78,6 +78,10 @@ type jvndbRSSItem struct {
 	Date         string
 	Issued       string
 	Modified     string
+	// HasIssued / HasModified: the element was present (even empty);
+	// dc:date stands in only for an absent one (Codex M76 integration R3).
+	HasIssued   bool
+	HasModified bool
 }
 
 // JVNDBParseStats summarises one parsed feed.
@@ -242,8 +246,10 @@ func decodeJVNDBItem(dec *xml.Decoder, guard *jvndbTokenGuard) (jvndbRSSItem, er
 				field = &it.Date
 			case t.Name.Space == nsDCTerm && t.Name.Local == "issued":
 				field = &it.Issued
+				it.HasIssued = true
 			case t.Name.Space == nsDCTerm && t.Name.Local == "modified":
 				field = &it.Modified
+				it.HasModified = true
 			case t.Name.Space == nsJVNSec && t.Name.Local == "references":
 				var ref jvndbRSSRef
 				for _, a := range t.Attr {
@@ -334,10 +340,10 @@ func normaliseJVNDBItem(it jvndbRSSItem) (repository.JVNDBAdvisoryRecord, bool) 
 		}
 	}
 	rec.Published = parseJVNDBTime(it.Issued)
-	if strings.TrimSpace(it.Issued) == "" {
+	if !it.HasIssued {
 		rec.Published = parseJVNDBTime(it.Date)
 	}
-	if strings.TrimSpace(it.Modified) != "" {
+	if it.HasModified {
 		rec.Modified = parseJVNDBTime(it.Modified)
 	} else {
 		rec.Modified = parseJVNDBTime(it.Date)
