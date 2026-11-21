@@ -73,6 +73,24 @@ A full re-read is ~300 NVD requests and ~2.4 GB (measured 2026-11-08), takes rou
 
 **Several replicas.** Set `off` only once every replica sharing the Redis runs a version that knows `SBOMHUB_JVN`: an older replica cannot report `skipped_sources`, so a scan polled through it reads a bare `completed` (or, if another source failed, `failed` without the field). The `sbomhub` CLI shows `skipped_sources` (a warning, and the field in `--json`) from sbomhub-cli commit `2354439` on; older CLI builds print `completed` or `failed` without the skip, so read scan-status directly with those.
 
+### JVN iPedia RSS (supplementary Japanese advisories)
+
+While MyJVN is suspended, the JVNDB RSS data feeds of JVN iPedia (https://jvndb.jvn.jp/ja/feed/) are still published. SBOMHub reads them in the background and attaches each advisory's JVNDB id, Japanese title, dates and link to the vulnerabilities NVD already supplied, matched by CVE id. The project vulnerability list (`GET /api/v1/projects/:id/vulnerabilities`) returns them in a new `jvndb` array (`id`, `title`, `url`, `published`, `modified`; absent when there is none), and the web shows them under the finding.
+
+This is **reference information only**: the RSS lists products without version ranges, so it never creates or removes a finding, and it is never reported as a JVN check — scan-status `checked_sources` / `skipped_sources` are unchanged (with `SBOMHUB_JVN=off`, `jvn` stays in `skipped_sources`). It is independent of `SBOMHUB_JVN`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SBOMHUB_JVNDB_RSS_URL` | (empty = `https://jvndb.jvn.jp/ja/rss`) | The directory holding `jvndb.rdf` and `years/jvndb_<YYYY>.rdf`, for example an internal mirror with the same layout. An absolute `http(s)` URL without query, fragment or credentials; anything else refuses startup. No request is made when `SBOMHUB_OFFLINE=true`. |
+| `SBOMHUB_JVNDB_RSS_INTERVAL` | `6h` | How often the recent feed (`jvndb.rdf`: the latest 500 new or updated advisories, about three days, ~1.2 MB) is read. A Go duration or whole days between `1h` and `48h`, or `off` to stop the ingestion (stored advisories stay shown). Other values refuse startup. |
+| `SBOMHUB_JVNDB_RSS_BACKFILL_FROM` | (empty = no backfill) | A year (`1988` to the current year). The sync then also reads the per-year feeds from the current year back to this year, **one feed per interval**, newest first, each once. They are large: 2026 alone was 99 MB and 1988–2026 about 600 MB (2026-11-21). Refused with `SBOMHUB_JVNDB_RSS_INTERVAL=off`. |
+
+**Politeness.** Each feed is fetched at most once per interval across all API replicas and restarts: the claim is a row in `jvndb_feed_state`, not process memory. Requests use `If-None-Match` / `If-Modified-Since` (sent only to the URL that issued them), a generic `User-Agent` (`SBOMHub/1.0 (JVNDB RSS sync)`), at most 3 redirects (never from `https` to `http`), a 2 min (recent) / 20 min (year) deadline and a body limit of 32 MiB / 384 MiB. The XML is parsed as a stream, UTF-8 only, with no DOCTYPE; a malformed document fails the round, a malformed item is skipped and counted. The advisory link is always built from the JVNDB id (`https://jvndb.jvn.jp/ja/contents/<year>/<id>.html`), never taken from the feed; the description is not stored.
+
+**Gaps.** The recent feed covers about three days. When its oldest item is newer than the previous successful read (the API was down longer than that), the API logs a `WARN`; with `SBOMHUB_JVNDB_RSS_BACKFILL_FROM` set it also re-reads the year feeds, one per interval. The year feeds are regenerated weekly, so an advisory changed during the gap can take up to a week to appear there.
+
+**State.** `jvndb_feed_state` holds, per feed (`recent`, `year:<YYYY>`), the last attempt and success, the status (`success`, `not_modified`, `failed`, `partial`), item counts and a generic error message. JPCERT/CC / IPA publish no feed-specific terms of use; the site's own pages (FAQ, terms) answer 404 while JVN iPedia is suspended. The data stays credited to JVN iPedia in the UI, and only the id, the title and the dates are kept.
+
 ### Scan coverage (`checked_sources` / `skipped_sources`)
 
 `completed` alone does not say which data sources a scan queried: with `SBOMHUB_OFFLINE=true` the NVD, JVN and distro steps make no request and still succeed, and `POST /api/v1/projects/:id/scan?sources=nvd` runs a subset. For a `completed` or `failed` scan, `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` therefore names each source (`nvd`, `jvn`, `distro`) as exactly one of:

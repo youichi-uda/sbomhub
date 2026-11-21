@@ -73,6 +73,24 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 
 **複数レプリカ。** `off` にするのは、同じ Redis を使う全レプリカが `SBOMHUB_JVN` を知っている版になってからにしてください。古いレプリカは `skipped_sources` を返せないため、そこを経由して状態を読むと単なる `completed` (他の情報源が失敗していれば項目なしの `failed`) に見えます。`sbomhub` CLI は sbomhub-cli のコミット `2354439` 以降で `skipped_sources` を表示します (警告と `--json` の項目)。それより古い CLI では飛ばしたことが表示されない `completed` / `failed` に見えるので、scan-status を直接読んでください。
 
+### JVN iPedia RSS (日本語の参考情報)
+
+MyJVN の停止中も、JVN iPedia の JVNDB RSS データフィード (https://jvndb.jvn.jp/ja/feed/) は公開が続いています。SBOMHub はこれをバックグラウンドで読み込み、NVD 由来で既に登録されている脆弱性に、CVE 番号で対応する JVNDB の ID・日本語タイトル・日付・リンクを添えます。プロジェクトの脆弱性一覧 (`GET /api/v1/projects/:id/vulnerabilities`) は新しい配列 `jvndb` (`id`, `title`, `url`, `published`, `modified`。該当がなければ項目なし) で返し、Web では検出結果の下に表示します。
+
+これは**参考情報**です。RSS の製品情報にはバージョン範囲がないため、検出結果を追加・削除することはなく、JVN を照会したとも扱いません。scan-status の `checked_sources` / `skipped_sources` は変わりません (`SBOMHUB_JVN=off` なら `jvn` は `skipped_sources` のままです)。`SBOMHUB_JVN` とは独立しています。
+
+| 変数 | 既定値 | 説明 |
+|------|--------|------|
+| `SBOMHUB_JVNDB_RSS_URL` | (空 = `https://jvndb.jvn.jp/ja/rss`) | `jvndb.rdf` と `years/jvndb_<YYYY>.rdf` を置くディレクトリ (同じ構成の社内ミラーなど)。クエリ・フラグメント・認証情報を含まない絶対 `http(s)` URL。それ以外は起動時に拒否します。`SBOMHUB_OFFLINE=true` のときはリクエストしません。 |
+| `SBOMHUB_JVNDB_RSS_INTERVAL` | `6h` | 新着/更新フィード (`jvndb.rdf`: 新規・更新の最新 500 件、約 3 日分、約 1.2 MB) を読む間隔。`1h` から `48h` の Go の duration または日数、取り込みを止める `off` (保存済みの情報は表示され続けます)。それ以外は起動時に拒否します。 |
+| `SBOMHUB_JVNDB_RSS_BACKFILL_FROM` | (空 = 過去分を読まない) | 年 (`1988` から今年まで)。設定すると年別フィードも、今年からこの年まで新しい順に、**1 間隔あたり 1 本**ずつ、各 1 回読みます。サイズが大きく、2026 年分だけで 99 MB、1988〜2026 年で約 600 MB です (2026-11-21 時点)。`SBOMHUB_JVNDB_RSS_INTERVAL=off` との併用は拒否します。 |
+
+**取得の節度。** 各フィードの取得は、全 API レプリカと再起動をまたいで 1 間隔に 1 回までです (取得権はプロセスのメモリでなく `jvndb_feed_state` の行で取ります)。`If-None-Match` / `If-Modified-Since` (発行元と同じ URL にだけ送る)、汎用の `User-Agent` (`SBOMHub/1.0 (JVNDB RSS sync)`)、リダイレクトは 3 回まで (`https` から `http` へは不可)、期限は 2 分 (新着) / 20 分 (年別)、本文の上限は 32 MiB / 384 MiB です。XML はストリームで読み、UTF-8 のみ・DOCTYPE 不可。文書が壊れていればその回は失敗、壊れた項目は数えたうえで飛ばします。リンクはフィードの値を使わず JVNDB の ID から組み立て (`https://jvndb.jvn.jp/ja/contents/<年>/<ID>.html`)、概要文は保存しません。
+
+**取りこぼし。** 新着/更新フィードは約 3 日分です。前回の取得成功より新しい項目しか含まれていない (API が 3 日以上止まっていた) 場合は `WARN` を出し、`SBOMHUB_JVNDB_RSS_BACKFILL_FROM` があれば年別フィードを 1 間隔に 1 本ずつ読み直します。年別フィードは週 1 回の再生成なので、その間に更新された情報が反映されるまで最大 1 週間かかります。
+
+**状態。** `jvndb_feed_state` にフィード (`recent`, `year:<YYYY>`) ごとの最終試行・最終成功、状態 (`success`, `not_modified`, `failed`, `partial`)、件数、汎用のエラーメッセージを記録します。JPCERT/CC / IPA はフィード固有の利用条件を公開しておらず、サイトの FAQ や規約のページは JVN iPedia の停止中 404 を返します。UI では JVN iPedia の情報であることを明示し、保存するのは ID・タイトル・日付のみです。
+
 ### スキャンのカバレッジ (`checked_sources` / `skipped_sources`)
 
 `completed` だけでは、スキャンがどの情報源を照会したかは分かりません。`SBOMHUB_OFFLINE=true` では NVD・JVN・distro の各ステップがリクエストせずに成功し、`POST /api/v1/projects/:id/scan?sources=nvd` は一部だけを実行します。そのため `completed` / `failed` のスキャンについて、`GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` は各情報源 (`nvd`、`jvn`、`distro`) を次のどれか 1 つとして返します。

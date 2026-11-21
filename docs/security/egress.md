@@ -26,7 +26,8 @@ The four tenant-controlled destinations:
 | `tenant_llm` | `tenant_llm_config.azure_endpoint` | `internal/service/llm/azure_openai.go` |
 
 Everything else SBOMHub connects to is chosen by the **operator** — the
-vulnerability feed mirrors (`SBOMHUB_NVD_URL` and friends), the Ollama base URL
+vulnerability feed mirrors (`SBOMHUB_NVD_URL` and friends, including
+`SBOMHUB_JVNDB_RSS_URL` for the JVN iPedia RSS feeds), the Ollama base URL
 (`SBOMHUB_LLM_OLLAMA_URL` / `OLLAMA_HOST`), the billing provider API. Those are
 deliberately **not** filtered. The operator already controls the process;
 filtering their own configuration against their own policy buys no security, and
