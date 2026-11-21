@@ -959,6 +959,96 @@
         "type": "timestamp with time zone"
       }
     },
+    "jvndb_advisories": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "jvndb_id": {
+        "nullable": false,
+        "type": "character varying(32)"
+      },
+      "modified_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "published_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "title": {
+        "nullable": false,
+        "type": "text"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "jvndb_advisory_cves": {
+      "cve_id": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "jvndb_id": {
+        "nullable": false,
+        "type": "character varying(32)"
+      }
+    },
+    "jvndb_feed_state": {
+      "completed": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "etag": {
+        "nullable": true,
+        "type": "text"
+      },
+      "feed": {
+        "nullable": false,
+        "type": "character varying(32)"
+      },
+      "gap_detected_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "items_rejected": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "items_seen": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "items_written": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "last_attempt_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "last_error": {
+        "nullable": true,
+        "type": "text"
+      },
+      "last_modified": {
+        "nullable": true,
+        "type": "text"
+      },
+      "last_status": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "last_success_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "source_url": {
+        "nullable": true,
+        "type": "text"
+      }
+    },
     "kev_catalog": {
       "created_at": {
         "nullable": false,

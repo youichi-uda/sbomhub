@@ -553,6 +553,13 @@ func main() {
 		slog.Error("Refusing to start", "error", err)
 		os.Exit(1)
 	}
+	// Migration 072: JVNDB RSS ingestion (supplementary JVN iPedia titles on
+	// CVEs NVD supplied). Refused here, before migrations, like the above.
+	jvndbRSS, err := cfg.JVNDBRSS(time.Now())
+	if err != nil {
+		slog.Error("Refusing to start", "error", err)
+		os.Exit(1)
+	}
 	if !jvnEnabled {
 		slog.Warn("JVN lookups are switched off (SBOMHUB_JVN=off): SBOM scans do not query MyJVN and "+
 			"report skipped_sources [\"jvn\"]; unset SBOMHUB_JVN or set it to \"on\" to restore them",
@@ -625,7 +632,8 @@ func main() {
 	// Repositories
 	projectRepo := repository.NewProjectRepository(db)
 	sbomRepo := repository.NewSbomRepository(db)
-	componentRepo := repository.NewComponentRepository(db)
+	// Migration 072: the project vulnerability list carries JVN iPedia advisories.
+	componentRepo := repository.NewComponentRepository(db).WithJVNDBEnrichment()
 	// M57: the scanners' catalogue Create no longer joins their tenant
 	// transaction, so it needs a connection that is not one a tenant
 	// transaction can be holding. See VulnerabilityRepository.WithCatalogueDB.
@@ -2316,6 +2324,17 @@ func main() {
 	epssSyncJob := scheduler.NewEPSSSyncJob(epssService, 24*time.Hour)
 	go epssSyncJob.Start(ctx)
 	slog.Info("EPSS sync job started", "interval", "24h")
+
+	// JVNDB RSS sync (migration 072): supplementary JVN iPedia advisories by
+	// CVE id. Not a scan source; never a finding, never checked_sources.
+	if jvndbRSS.Interval > 0 {
+		jvndbService := service.NewJVNDBRSSService(repository.NewJVNDBRepository(db),
+			jvndbRSS.BaseURL, cfg.Offline, jvndbRSS.Interval, jvndbRSS.BackfillFrom)
+		go scheduler.NewJVNDBSyncJob(jvndbService, jvndbRSS.Interval).Start(ctx)
+		slog.Info("JVNDB RSS sync job started", "interval", jvndbRSS.Interval.String(), "backfill_from", jvndbRSS.BackfillFrom)
+	} else {
+		slog.Info("JVNDB RSS sync is off (SBOMHUB_JVNDB_RSS_INTERVAL=off)")
+	}
 
 	// Vulnerability scan job - runs hourly to scan components against NVD
 	// Uses NVDService with Redis cache for efficient API usage

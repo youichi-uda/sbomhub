@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Trimmed from https://jvndb.jvn.jp/ja/rss/jvndb.rdf (JVN iPedia, IPA / JPCERT/CC), fetched 2026-11-21: 7 of 500 items, unmodified. -->
+<rdf:RDF xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:sec="http://jvn.jp/rss/mod_sec/" xmlns:sy="http://purl.org/rss/1.0/modules/syndication/" xsi:schemaLocation="http://purl.org/rss/1.0/ https://jvndb.jvn.jp/schema/jvnrss_2.0.xsd" xml:lang="ja">
+  <channel rdf:about="https://jvndb.jvn.jp/ja/rss/jvndb.rdf">
+    <title>JVNDB RSS Feed - Update Entry</title>
+    <link>https://jvndb.jvn.jp/</link>
+    <description>JVN iPedia 新着/更新情報</description>
+    <dc:creator></dc:creator>
+    <dc:date>2026-11-21T17:00:01+09:00</dc:date>
+    <dcterms:modified>2026-11-21T17:00:01+09:00</dcterms:modified>
+    <items>
+      <rdf:Seq>
+        <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000172.html"/>
+        <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-044393.html"/>
+        <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-039068.html"/>
+        <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-042402.html"/>
+        <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000175.html"/>
+        <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-044117.html"/>
+        <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2025/JVNDB-2025-009576.html"/>
+      </rdf:Seq>
+    </items>
+  </channel>
+  <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000172.html">
+    <title>SoftBank製Airターミナル6におけるOSコマンドインジェクションの脆弱性</title>
+    <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000172.html</link>
+    <description>ソフトバンク株式会社が提供するAirターミナル6には、次の脆弱性が存在します。&lt;ul&gt;&lt;li&gt;OSコマンドインジェクション（CWE-78）- CVE-2026-101107&lt;/li&gt;&lt;/ul&gt;この脆弱性情報は、情報セキュリティ早期警戒パートナーシップに基づき下記の方がIPAに報告し、JPCERT/CCが開発者との調整を行いました。&#13;
+報告者：大平 剛 氏、socho 氏、京都工芸繊維大学 栗山 樹 氏、豊中市立第十一中学校 小川 智也 氏</description>
+    <sec:identifier>JVNDB-2026-000172</sec:identifier>
+    <sec:references source="JVN" id="JVN#64740097">https://jvn.jp/jp/JVN64740097/index.html</sec:references>
+    <sec:references source="CVE" id="CVE-2026-101107">https://www.cve.org/CVERecord?id=CVE-2026-101107</sec:references>
+    <sec:references title="OSコマンドインジェクション(CWE-78)" id="CWE-78">https://jvndb.jvn.jp/ja/cwe/CWE-78.html</sec:references>
+    <sec:cpe version="2.2" vendor="ソフトバンク株式会社" product="Airターミナル6">cpe:/h:softbank:air_terminal_6</sec:cpe>
+    <sec:cvss version="3.0" score="8.8" type="Base" severity="High" vector="CVSS:3.0/AV:A/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"/>
+    <dc:date>2026-11-20T11:01+09:00</dc:date>
+    <dcterms:issued>2026-11-12T12:26+09:00</dcterms:issued>
+    <dcterms:modified>2026-11-20T11:01+09:00</dcterms:modified>
+  </item>
+  <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-044393.html">
+    <title>OpenJDKにおけるヒープベースのバッファオーバーフローの脆弱性</title>
+    <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-044393.html</link>
+    <description>OpenJDKには、次の脆弱性が存在します。&lt;a href='https://cwe.mitre.org/data/definitions/122.html' target='_blank'&gt;&lt;/a&gt;&lt;a href='https://www.cve.org/CVERecord?id=CVE-2026-114938' target='_blank'&gt;&lt;/a&gt;&lt;ul&gt;&lt;li&gt;ヒープベースのバッファオーバーフローの脆弱性（CWE-122） - CVE-2026-114938&lt;/li&gt;&lt;/ul&gt;</description>
+    <sec:identifier>JVNDB-2026-044393</sec:identifier>
+    <sec:references source="JVN" id="JVNVU#99608534">https://jvn.jp/vu/JVNVU99608534/index.html</sec:references>
+    <sec:references source="CVE" id="CVE-2026-114938">https://www.cve.org/CVERecord?id=CVE-2026-114938</sec:references>
+    <sec:references source="関連文書" id="calif.io">https://calif.io/java4shell/</sec:references>
+    <sec:references source="関連文書" id="JPCERT/CC CyberNewsFlash 2026-11-18">https://www.jpcert.or.jp/newsflash/2026111801.html</sec:references>
+    <sec:references title="ヒープベースのバッファオーバーフロー(CWE-122)" id="CWE-122">https://cwe.mitre.org/data/definitions/122.html</sec:references>
+    <sec:cpe version="2.2" vendor="オラクル" product="Oracle GraalVM">cpe:/a:oracle:graalvm</sec:cpe>
+    <sec:cpe version="2.2" vendor="オラクル" product="Oracle GraalVM for JDK">cpe:/a:oracle:graalvm_for_jdk</sec:cpe>
+    <sec:cpe version="2.2" vendor="オラクル" product="Oracle Java SE">cpe:/a:oracle:java_se</sec:cpe>
+    <sec:cpe version="2.2" vendor="オラクル" product="OpenJDK">cpe:/a:oracle:openjdk</sec:cpe>
+    <dc:date>2026-11-19T16:12+09:00</dc:date>
+    <dcterms:issued>2026-11-19T16:12+09:00</dcterms:issued>
+    <dcterms:modified>2026-11-19T16:12+09:00</dcterms:modified>
+  </item>
+  <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-039068.html">
+    <title>ISC BINDにおける複数の脆弱性（2026年10月）</title>
+    <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-039068.html</link>
+    <description>&lt;ul&gt;&lt;li&gt;&lt;a href='https://kb.isc.org/docs/cve-2026-19630' target='_blank'&gt;CVE-2026-19630: Amplified resource exhaustion in inbound message processing&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href='https://kb.isc.org/docs/cve-2026-94300' target='_blank'&gt;CVE-2026-94300: Concurrent GSS-TSIG messages corrupt memory&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href='https://kb.isc.org/docs/cve-2026-96888' target='_blank'&gt;CVE-2026-96888: named may terminate unexpectedly when a redirect zone is used with strict QNAME minimization&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href='https://kb.isc.org/docs/cve-2026-97313' target='_blank'&gt;CVE-2026-97313: Specific RPZ configurations and query patterns may result in an unexpected exit&lt;/a&gt;&lt;/li&gt;&lt;/ul&gt;</description>
+    <sec:identifier>JVNDB-2026-039068</sec:identifier>
+    <sec:references source="JVN" id="JVNVU#91196958">https://jvn.jp/vu/JVNVU91196958/index.html</sec:references>
+    <sec:references source="CVE" id="CVE-2026-19630">https://www.cve.org/CVERecord?id=CVE-2026-19630</sec:references>
+    <sec:references source="CVE" id="CVE-2026-94300">https://www.cve.org/CVERecord?id=CVE-2026-94300</sec:references>
+    <sec:references source="CVE" id="CVE-2026-96888">https://www.cve.org/CVERecord?id=CVE-2026-96888</sec:references>
+    <sec:references source="CVE" id="CVE-2026-97313">https://www.cve.org/CVERecord?id=CVE-2026-97313</sec:references>
+    <sec:references source="関連文書" id="株式会社日本レジストリサービス（JPRS）:（緊急）BIND 9.xの脆弱性（CPU・メモリの過剰な消費）について（CVE-2026-19630） - バージョンアップを強く推奨 -">https://jprs.jp/tech/security/2026-10-22-bind9-cve-2026-19630.html</sec:references>
+    <sec:references source="関連文書" id="株式会社日本レジストリサービス（JPRS）:（緊急）BIND 9.xの脆弱性（DNSサービスの停止・リモートコード実行）について（CVE-2026-94300） - バージョンアップを強く推奨 -">https://jprs.jp/tech/security/2026-10-22-bind9-cve-2026-94300.html</sec:references>
+    <sec:references source="関連文書" id="株式会社日本レジストリサービス（JPRS）:（緊急）BIND 9.xの脆弱性（DNSサービスの停止）について（CVE-2026-96888） - バージョンアップを強く推奨 -">https://jprs.jp/tech/security/2026-10-22-bind9-cve-2026-96888.html</sec:references>
+    <sec:references source="関連文書" id="株式会社日本レジストリサービス（JPRS）:（緊急）BIND 9.xの脆弱性（DNSサービスの停止）について（CVE-2026-97313） - RPZを該当する設定で利用している場合のみ対象、バージョンアップを強く推奨 -">https://jprs.jp/tech/security/2026-10-22-bind9-cve-2026-97313.html</sec:references>
+    <sec:cpe version="2.2" vendor="ISC, Inc." product="BIND">cpe:/a:isc:bind</sec:cpe>
+    <dc:date>2026-11-19T15:20+09:00</dc:date>
+    <dcterms:issued>2026-10-22T15:11+09:00</dcterms:issued>
+    <dcterms:modified>2026-11-19T15:20+09:00</dcterms:modified>
+  </item>
+  <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-042402.html">
+    <title>Siemens製品に対するアップデート（2026年11月）</title>
+    <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-042402.html</link>
+    <description>新規：10件&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-105852.html&quot;&gt;SSA-105852: Out of Bounds Read Vulnerability in Simcenter Femap&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-242944.html&quot;&gt;SSA-242944: Node2Shell Vulnerability in Siemens Industrial Products&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-435267.html&quot;&gt;SSA-435267: Code Injection Vulnerability in ROS# Before 2.3.1&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-651988.html&quot;&gt;SSA-651988: Double Free vulnerability in Fortigate NGFW before V7.6.9 on RUGGEDCOM APE1808 Devices&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-678870.html&quot;&gt;SSA-678870: Node2Shell/Broccoli2Shell Vulnerabilities in Siemens Software Products&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-710379.html&quot;&gt;SSA-710379: Multiple Vulnerabilities in Mendix Studio Pro's MCP Server&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-724261.html&quot;&gt;SSA-724261: Command Injection Vulnerability in meta-iot2050&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-970803.html&quot;&gt;SSA-970803: Insecure User Authentication in SIMATIC SCADA and PCS 7 systems&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-979641.html&quot;&gt;SSA-979641: Implicit Execution of Active Content when Opening Files Vulnerability in SIMATIC WinCC Graphics Designer&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-272816.html&quot;&gt;SSA-272816: Java4Shell Vulnerability in Industrial Edge&lt;/a&gt;&lt;/li&gt;&lt;/ul&gt;更新：17件&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-104023.html&quot;&gt;SSA-104023: Multiple Vulnerabilities in Palo Alto Networks PAN-OS on RUGGEDCOM APE1808 Devices&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-127084.html&quot;&gt;SSA-127084: Multiple Vulnerabilities in Fortigate NGFW before V7.6.7 on RUGGEDCOM APE1808 Devices&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-282044.html&quot;&gt;SSA-282044: DLL Hijacking Vulnerability in Siemens Web Installer used by the Online Software Delivery&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-390352.html&quot;&gt;SSA-390352: Multiple Vulnerabilities in .NET Client Library for SIMATIC S7 Webserver API&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-392349.html&quot;&gt;SSA-392349: Denial of Service Vulnerability in Industrial Devices&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-434797.html&quot;&gt;SSA-434797: Buffer Overflow Vulnerability in OpenSSL affecting Siemens Products&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-457936.html&quot;&gt;SSA-457936: Vulnerabilities in the additional GNU/Linux subsystem of the SIMATIC S7-1500 CPU 1518(F)-4 PN/DP MFP V3.1.7&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-493396.html&quot;&gt;SSA-493396: Deserialization Vulnerability in Siemens Engineering Platforms&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-693808.html&quot;&gt;SSA-693808: Deserialization Vulnerability in Siemens Engineering Platforms&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-800126.html&quot;&gt;SSA-800126: Deserialization Vulnerability in Siemens Engineering Platforms before V20&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-834709.html&quot;&gt;SSA-834709: Missing Authentication Vulnerability in Node-RED on SIMATIC IoT2050 with Industrial OS&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-904646.html&quot;&gt;SSA-904646: Sensitive Data Exposure Vulnerability in SIPROTEC 5 Devices&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-566435.html&quot;&gt;SSA-566435: PHP2Shell Vulnerabilities in Siemens Software Products&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-566512.html&quot;&gt;SSA-566512: PHP2Shell Vulnerabilities in Palo Alto Networks PAN-OS on RUGGEDCOM APE1808 Devices&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-166980.html&quot;&gt;SSA-166980: PHP2Shell Vulnerabilities in Siemens Products&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-045512.html&quot;&gt;SSA-045512: Node2Shell Vulnerability in Siemens Products&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://cert-portal.siemens.com/productcert/html/ssa-443410.html&quot;&gt;SSA-443410: Node2Shell Vulnerability in Industrial Edge Management Applications&lt;/a&gt;&lt;/li&gt;&lt;/ul&gt;</description>
+    <sec:identifier>JVNDB-2026-042402</sec:identifier>
+    <sec:references source="JVN" id="JVNVU#98354779">https://jvn.jp/vu/JVNVU98354779/index.html</sec:references>
+    <sec:cpe version="2.2" vendor="シーメンス" product="(複数の製品)">cpe:/o:siemens:multiple_product</sec:cpe>
+    <dc:date>2026-11-19T15:12+09:00</dc:date>
+    <dcterms:issued>2026-11-06T18:35+09:00</dcterms:issued>
+    <dcterms:modified>2026-11-19T15:12+09:00</dcterms:modified>
+  </item>
+  <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000175.html">
+    <title>ブラウザ拡張機能「Win Bird 授業支援」におけるクロスサイトスクリプティングの脆弱性</title>
+    <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-000175.html</link>
+    <description>ウィンバード株式会社が提供するブラウザ拡張機能「Win Bird 授業支援」には、次の脆弱性が存在します。&#13;
+&lt;ul&gt;&lt;li&gt;クロスサイトスクリプティング（CWE-79）- CVE-2026-129517&lt;/li&gt;&lt;/ul&gt;&#13;
+この脆弱性情報は、情報セキュリティ早期警戒パートナーシップに基づき下記の方がIPAに報告し、JPCERT/CCが開発者との調整を行いました。&#13;
+報告者：金行　颯 氏</description>
+    <sec:identifier>JVNDB-2026-000175</sec:identifier>
+    <sec:references source="JVN" id="JVN#29068051">https://jvn.jp/jp/JVN29068051/index.html</sec:references>
+    <sec:references source="CVE" id="CVE-2026-129517">https://www.cve.org/CVERecord?id=CVE-2026-129517</sec:references>
+    <sec:references title="クロスサイトスクリプティング(CWE-79)" id="CWE-79">https://jvndb.jvn.jp/ja/cwe/CWE-79.html</sec:references>
+    <sec:cpe version="2.2" vendor="ウィンバード株式会社" product="Win Bird 授業支援">cpe:/a:misc:win_bird_win_bird_jugyo_shien</sec:cpe>
+    <sec:cvss version="3.0" score="5.4" type="Base" severity="Medium" vector="CVSS:3.0/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N"/>
+    <dc:date>2026-11-19T14:09+09:00</dc:date>
+    <dcterms:issued>2026-11-19T14:09+09:00</dcterms:issued>
+    <dcterms:modified>2026-11-19T14:09+09:00</dcterms:modified>
+  </item>
+  <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-044117.html">
+    <title>富士電機製TELLUSにおける複数の脆弱性（2026年11月）</title>
+    <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-044117.html</link>
+    <description>富士電機株式会社が提供するTELLUSには、次の複数の脆弱性が存在します。&lt;a href='https://cwe.mitre.org/data/definitions/125.html' target='_blank'&gt;&lt;/a&gt;&lt;a href='https://cwe.mitre.org/data/definitions/416.html' target='_blank'&gt;&lt;/a&gt;&lt;ul&gt;&lt;li&gt;境界外読み取り（CWE-125） - CVE-2026-107901&lt;/li&gt;&lt;li&gt;解放済みメモリの使用（CWE-416） - CVE-2026-107902&lt;/li&gt;&lt;/ul&gt;この脆弱性情報は、下記の方がJPCERT/CCに報告し、JPCERT/CCが開発者との調整を行いました。&#13;
+報告者：Michael Heinzl 氏</description>
+    <sec:identifier>JVNDB-2026-044117</sec:identifier>
+    <sec:references source="JVN" id="JVNVU#97628215">https://jvn.jp/vu/JVNVU97628215/index.html</sec:references>
+    <sec:references source="CVE" id="CVE-2026-107901">https://www.cve.org/CVERecord?id=CVE-2026-107901</sec:references>
+    <sec:references source="CVE" id="CVE-2026-107902">https://www.cve.org/CVERecord?id=CVE-2026-107902</sec:references>
+    <sec:references title="境界外読み取り(CWE-125)" id="CWE-125">https://cwe.mitre.org/data/definitions/125.html</sec:references>
+    <sec:references title="解放済みメモリの使用(CWE-416)" id="CWE-416">https://cwe.mitre.org/data/definitions/416.html</sec:references>
+    <sec:cpe version="2.2" vendor="富士電機" product="TELLUS">cpe:/a:fujielectric:tellus</sec:cpe>
+    <sec:cpe version="2.2" vendor="富士電機" product="TELLUS Lite">cpe:/a:fujielectric:tellus_lite</sec:cpe>
+    <sec:cvss version="3.0" score="7.1" type="Base" severity="High" vector="CVSS:3.0/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:H"/>
+    <dc:date>2026-11-18T17:53+09:00</dc:date>
+    <dcterms:issued>2026-11-18T17:53+09:00</dcterms:issued>
+    <dcterms:modified>2026-11-18T17:53+09:00</dcterms:modified>
+  </item>
+  <item rdf:about="https://jvndb.jvn.jp/ja/contents/2025/JVNDB-2025-009576.html">
+    <title>エレコム製無線LANルータにおける複数の脆弱性</title>
+    <link>https://jvndb.jvn.jp/ja/contents/2025/JVNDB-2025-009576.html</link>
+    <description>エレコム株式会社が提供する無線LANルータには、次の複数の脆弱性が存在します。&#13;
+&#13;
+　* ドキュメント化されていないデバッグ機能を有効化される問題（CWE-912） - CVE-2025-46267&#13;
+　* Web管理画面におけるOSコマンドインジェクション（CWE-78） - CVE-2025-53472&#13;
+&#13;
+この脆弱性情報は、下記の方がJPCERT/CCに報告し、JPCERT/CCが開発者との調整を行いました。&#13;
+報告者：株式会社ゼロゼロワン 早川 宙也 氏</description>
+    <sec:identifier>JVNDB-2025-009576</sec:identifier>
+    <sec:references source="JVN" id="JVNVU#91615135">https://jvn.jp/vu/JVNVU91615135/index.html</sec:references>
+    <sec:references source="CVE" id="CVE-2025-46267">https://www.cve.org/CVERecord?id=CVE-2025-46267</sec:references>
+    <sec:references source="CVE" id="CVE-2025-53472">https://www.cve.org/CVERecord?id=CVE-2025-53472</sec:references>
+    <sec:references title="OSコマンドインジェクション(CWE-78)" id="CWE-78">https://jvndb.jvn.jp/ja/cwe/CWE-78.html</sec:references>
+    <sec:references title="非公開の機能(CWE-912)" id="CWE-912">https://cwe.mitre.org/data/definitions/912.html</sec:references>
+    <sec:cpe version="2.2" vendor="エレコム株式会社" product="WRC-BE36QS-B">cpe:/o:elecom:wrc-be36qs-b</sec:cpe>
+    <sec:cpe version="2.2" vendor="エレコム株式会社" product="WRC-BE94XS-B">cpe:/o:elecom:wrc-be94xs-b</sec:cpe>
+    <sec:cpe version="2.2" vendor="エレコム株式会社" product="WRC-W701-B">cpe:/o:elecom:wrc-w701-b</sec:cpe>
+    <sec:cvss version="3.0" score="7.2" type="Base" severity="High" vector="CVSS:3.0/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H"/>
+    <dc:date>2026-11-18T17:24+09:00</dc:date>
+    <dcterms:issued>2025-07-23T10:41+09:00</dcterms:issued>
+    <dcterms:modified>2026-11-18T17:24+09:00</dcterms:modified>
+  </item>
+</rdf:RDF>

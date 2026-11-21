@@ -13,6 +13,26 @@ import (
 
 type ComponentRepository struct {
 	db *sql.DB
+	// jvndb turns on the migration-072 enrichment of the project
+	// vulnerability list (WithJVNDBEnrichment). cmd/server enables it.
+	jvndb bool
+}
+
+// WithJVNDBEnrichment makes GetVulnerabilitiesPaginated attach the stored
+// JVN iPedia advisories (Vulnerability.JVNDB) by CVE id, with one extra
+// query per page. Off by default so readers that do not publish the list
+// pay nothing.
+func (r *ComponentRepository) WithJVNDBEnrichment() *ComponentRepository {
+	r.jvndb = true
+	return r
+}
+
+// attachJVNDB applies the enrichment when it is on.
+func (r *ComponentRepository) attachJVNDB(ctx context.Context, vulns []model.Vulnerability) error {
+	if !r.jvndb {
+		return nil
+	}
+	return AttachJVNDB(ctx, r.q(ctx), vulns)
 }
 
 func NewComponentRepository(db *sql.DB) *ComponentRepository {
@@ -354,7 +374,15 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 	// 0 fall through to the unpaginated query so internal aggregators
 	// (e.g. scan-status severity counts) can opt out explicitly.
 	if limit <= 0 {
-		return r.GetVulnerabilities(ctx, sbomID, sortBy)
+		vulns, err := r.GetVulnerabilities(ctx, sbomID, sortBy)
+		if err != nil {
+			return nil, err
+		}
+		// Migration 072: supplementary JVN iPedia advisories by CVE id.
+		if err := r.attachJVNDB(ctx, vulns); err != nil {
+			return nil, err
+		}
+		return vulns, nil
 	}
 	// #F29: EXISTS subquery dedupes by vulnerability_id — exactly one
 	// row per matched vulnerability, matching CountVulnerabilities'
@@ -416,6 +444,10 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 	// M46 B-1: same fail-closed contract as GetVulnerabilities — a short
 	// page here also skews the X-Total-Count truncation banner.
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Migration 072: supplementary JVN iPedia advisories by CVE id.
+	if err := r.attachJVNDB(ctx, vulns); err != nil {
 		return nil, err
 	}
 	return vulns, nil

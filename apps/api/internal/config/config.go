@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -67,6 +68,12 @@ type Config struct {
 	// JVNRaw is SBOMHUB_JVN as the operator spelled it (on | off). Read it
 	// through JVNEnabled (config/jvn_switch.go).
 	JVNRaw string
+
+	// JVNDB RSS ingestion (migration 072), as the operator spelled it. Read
+	// them through JVNDBRSS. Independent of SBOMHUB_JVN (MyJVN lookups).
+	JVNDBRSSURL             string // SBOMHUB_JVNDB_RSS_URL: directory holding jvndb.rdf and years/
+	JVNDBRSSIntervalRaw     string // SBOMHUB_JVNDB_RSS_INTERVAL
+	JVNDBRSSBackfillFromRaw string // SBOMHUB_JVNDB_RSS_BACKFILL_FROM
 
 	// Clerk authentication (SaaS mode)
 	ClerkSecretKey     string
@@ -265,6 +272,9 @@ func Load() *Config {
 		RedisBreakerCooldownRaw:  getEnv("SBOMHUB_REDIS_BREAKER_COOLDOWN", ""),
 		ScanTenantConcurrencyRaw: getEnv("SBOMHUB_SCAN_TENANT_CONCURRENCY", ""),
 		JVNRaw:                   getEnv("SBOMHUB_JVN", ""),
+		JVNDBRSSURL:              getEnv("SBOMHUB_JVNDB_RSS_URL", ""),
+		JVNDBRSSIntervalRaw:      getEnv("SBOMHUB_JVNDB_RSS_INTERVAL", ""),
+		JVNDBRSSBackfillFromRaw:  getEnv("SBOMHUB_JVNDB_RSS_BACKFILL_FROM", ""),
 
 		// Clerk
 		ClerkSecretKey:     getEnv("CLERK_SECRET_KEY", ""),
@@ -751,6 +761,84 @@ func (c *Config) NVDReconcileInterval() (time.Duration, error) {
 		return 0, fmt.Errorf("SBOMHUB_NVD_RECONCILE_INTERVAL=%q is shorter than 24h; use \"off\" to disable the re-read", c.NVDReconcileIntervalRaw)
 	}
 	return d, nil
+}
+
+// DefaultJVNDBRSSInterval is how often the JVNDB RSS recent feed is read
+// when SBOMHUB_JVNDB_RSS_INTERVAL is unset. The feed holds the latest 500
+// new or updated advisories, about three days (measured 2026-11-21), so 6h
+// leaves a wide margin; with conditional GET an unchanged feed costs one 304.
+const DefaultJVNDBRSSInterval = 6 * time.Hour
+
+// minJVNDBRSSInterval / maxJVNDBRSSInterval bound the interval: the feed is
+// regenerated about hourly, and beyond 48h the ~3-day window can be missed.
+const (
+	minJVNDBRSSInterval = time.Hour
+	maxJVNDBRSSInterval = 48 * time.Hour
+)
+
+// minJVNDBRSSBackfillYear is the oldest JVNDB year feed published.
+const minJVNDBRSSBackfillYear = 1988
+
+// JVNDBRSSSettings is the validated JVNDB RSS configuration.
+type JVNDBRSSSettings struct {
+	BaseURL      string        // "" = the service default
+	Interval     time.Duration // 0 = ingestion off
+	BackfillFrom int           // 0 = no year backfill
+}
+
+// JVNDBRSS validates the SBOMHUB_JVNDB_RSS_* settings. Refused at startup:
+// a URL that is not an absolute http(s) directory URL (no query, fragment or
+// credentials); an interval that is neither "off" nor a Go duration / whole
+// days between 1h and 48h; a backfill year outside 1988..the current year.
+func (c *Config) JVNDBRSS(now time.Time) (JVNDBRSSSettings, error) {
+	var s JVNDBRSSSettings
+	if raw := strings.TrimSpace(c.JVNDBRSSURL); raw != "" {
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" ||
+			u.Fragment != "" || u.RawQuery != "" || u.User != nil {
+			return s, fmt.Errorf("SBOMHUB_JVNDB_RSS_URL=%q: want an absolute http(s) URL of the directory holding jvndb.rdf, without query, fragment or credentials", c.JVNDBRSSURL)
+		}
+		s.BaseURL = raw
+	}
+
+	v := strings.ToLower(strings.TrimSpace(c.JVNDBRSSIntervalRaw))
+	switch v {
+	case "":
+		s.Interval = DefaultJVNDBRSSInterval
+	case "off":
+		s.Interval = 0
+	default:
+		var d time.Duration
+		if days, ok := strings.CutSuffix(v, "d"); ok {
+			n, err := strconv.Atoi(days)
+			if err != nil || n <= 0 || n > 2 {
+				return s, fmt.Errorf("SBOMHUB_JVNDB_RSS_INTERVAL=%q: want a duration between 1h and 48h like \"6h\", or \"off\"", c.JVNDBRSSIntervalRaw)
+			}
+			d = time.Duration(n) * 24 * time.Hour
+		} else {
+			parsed, err := time.ParseDuration(v)
+			if err != nil {
+				return s, fmt.Errorf("SBOMHUB_JVNDB_RSS_INTERVAL=%q: want a duration between 1h and 48h like \"6h\", or \"off\"", c.JVNDBRSSIntervalRaw)
+			}
+			d = parsed
+		}
+		if d < minJVNDBRSSInterval || d > maxJVNDBRSSInterval {
+			return s, fmt.Errorf("SBOMHUB_JVNDB_RSS_INTERVAL=%q: must be between 1h and 48h (or \"off\")", c.JVNDBRSSIntervalRaw)
+		}
+		s.Interval = d
+	}
+
+	if raw := strings.TrimSpace(c.JVNDBRSSBackfillFromRaw); raw != "" {
+		y, err := strconv.Atoi(raw)
+		if err != nil || y < minJVNDBRSSBackfillYear || y > now.Year() {
+			return s, fmt.Errorf("SBOMHUB_JVNDB_RSS_BACKFILL_FROM=%q: want a year between %d and %d", c.JVNDBRSSBackfillFromRaw, minJVNDBRSSBackfillYear, now.Year())
+		}
+		if s.Interval == 0 {
+			return s, fmt.Errorf("SBOMHUB_JVNDB_RSS_BACKFILL_FROM is set while SBOMHUB_JVNDB_RSS_INTERVAL=off: the backfill runs inside the sync")
+		}
+		s.BackfillFrom = y
+	}
+	return s, nil
 }
 
 // DefaultScanDeadline is the overall deadline of one SBOM vulnerability scan
