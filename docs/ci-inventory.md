@@ -169,7 +169,7 @@ GH_TOKEN="$t" gh api repos/youichi-uda/sbomhub/branches/main/protection \
   -q '.required_status_checks.contexts[]'
 ```
 
-最終取得: **2026-08-04**、 17 件。 `tools/lint-ci-inventory` は下の各行が
+最終取得: **2026-11-21**、 19 件 (2026-11-21 に `repo-hygiene.yml` の 2 job を追加)。 `tools/lint-ci-inventory` は下の各行が
 §2.4 のいずれかの job の check 名と一致することを検証する — **GitHub は
 required check を名前で照合するので、 job の `name:` を変えた瞬間に
 required check が宙に浮き、 protection rule を人手で直すまで `main` が
@@ -210,6 +210,8 @@ Playwright full suite (26 specs against seeded stack)
 build-and-push
 project-scoped API key matrix over HTTP (every apiKeyRouteScope route)
 typecheck / build
+lint-ci-inventory
+tools build leaves no untracked artifacts
 ```
 
 <!-- END SNAPSHOT: required-status-checks -->
