@@ -94,7 +94,7 @@ func TestParseJVNDBRSS_ItemValidation(t *testing.T) {
 		jvndbItem("JVNDB-2026-000001", "ok", `<sec:references source="CVE" id="cve-2026-1234"/><sec:references source="CVE" id="CVE-2026-1234"/><sec:references source="CVE" id="CVE-26-1"/><sec:references source="JVN" id="CVE-2026-9999"/>`, "2026-11-02T10:00+09:00") +
 		jvndbItem("JVNDB-26-1", "bad id", "", "2026-11-02T10:00+09:00") +
 		jvndbItem("JVNDB-2026-000002", "   ", "", "2026-11-02T10:00+09:00") +
-		jvndbItem("JVNDB-2026-000003", "a\u202eb\tc\n d", "", "not a date") +
+		jvndbItem("JVNDB-2026-000003", "a\u202eb\tc\n d", "", "2026-11-03T10:00:30+09:00") +
 		`</rdf:RDF>`
 	got, st, err := parseAll(t, []byte(doc))
 	if err != nil {
@@ -109,8 +109,8 @@ func TestParseJVNDBRSS_ItemValidation(t *testing.T) {
 	if got[1].Title != "ab c d" {
 		t.Errorf("title = %q, want bidi override removed and whitespace collapsed", got[1].Title)
 	}
-	if got[1].Modified != nil {
-		t.Errorf("unparsable modified must be nil, got %v", got[1].Modified)
+	if got[1].Modified == nil || !got[1].Modified.Equal(time.Date(2026, 11, 3, 1, 0, 30, 0, time.UTC)) {
+		t.Errorf("modified with seconds = %v", got[1].Modified)
 	}
 }
 
@@ -158,6 +158,27 @@ func TestParseJVNDBRSS_NotAFeed(t *testing.T) {
 	// A channel with no item is a valid (empty) feed: some early year feeds are.
 	if _, st, err := parseAll(t, []byte(jvndbDocHead+`</rdf:RDF>`)); err != nil || st.Items != 0 {
 		t.Fatalf("empty channel: %+v %v", st, err)
+	}
+}
+
+// Codex R3 (Medium): nesting depth is bounded; an item without a usable
+// modification time is rejected (its order against stored rows is unknown).
+func TestParseJVNDBRSS_DepthAndUndated(t *testing.T) {
+	deep := jvndbDocHead + `<channel>` + strings.Repeat("<x>", jvndbMaxDepth+5) + strings.Repeat("</x>", jvndbMaxDepth+5) + `</channel></rdf:RDF>`
+	if _, _, err := parseAll(t, []byte(deep)); !errors.Is(err, ErrJVNDBFeedMalformed) {
+		t.Fatalf("deep: err = %v", err)
+	}
+	deepItem := jvndbDocHead + `<item>` + strings.Repeat("<x>", jvndbMaxDepth+5) + strings.Repeat("</x>", jvndbMaxDepth+5) + `</item></rdf:RDF>`
+	if _, _, err := parseAll(t, []byte(deepItem)); !errors.Is(err, ErrJVNDBFeedMalformed) {
+		t.Fatalf("deep item: err = %v", err)
+	}
+	doc := jvndbDocHead +
+		jvndbItem("JVNDB-2026-000001", "dated", "", "2026-11-02T10:00+09:00") +
+		`<item><title>undated</title><sec:identifier>JVNDB-2026-000002</sec:identifier></item>` +
+		`</rdf:RDF>`
+	got, st, err := parseAll(t, []byte(doc))
+	if err != nil || len(got) != 1 || st.Rejected != 1 || got[0].ID != "JVNDB-2026-000001" {
+		t.Fatalf("got %+v stats %+v err %v: an undated item must be rejected", got, st, err)
 	}
 }
 
@@ -779,6 +800,60 @@ func TestParseJVNDBRSS_OversizedToken(t *testing.T) {
 	g.reset()
 	if n, err := g.Read(buf); err != nil || n != 600 {
 		t.Fatalf("after reset: %d, %v", n, err)
+	}
+}
+
+// Codex R3 (Medium): an empty recent feed is not a successful read (it would
+// move last_success_at and hide a later gap); an empty year feed is fine.
+func TestJVNDBSync_EmptyRecentFeedFails(t *testing.T) {
+	empty := jvndbDocHead + `</rdf:RDF>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"empty"`)
+		_, _ = w.Write([]byte(empty))
+	}))
+	defer srv.Close()
+	store := newFakeJVNDBStore()
+	svc := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 2026)
+	svc.now = func() time.Time { return time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC) }
+	_, err := svc.Sync(context.Background())
+	if err == nil {
+		t.Fatal("an empty recent feed must fail the round")
+	}
+	if fin := store.finished["recent"]; fin.Status != "failed" || fin.ETag != "" || store.states["recent"].LastSuccessAt != nil {
+		t.Fatalf("recent = %+v / %+v", fin, store.states["recent"])
+	}
+	// The backfill still ran (the recent claim was held) and an empty year is accepted.
+	if fin := store.finished["year:2026"]; fin.Status != "success" {
+		t.Fatalf("year = %+v", fin)
+	}
+}
+
+// Codex R3 (Low): a redirect chain back to the requested URL is still a
+// redirect: no validators kept, and an unsolicited 304 is refused.
+func TestJVNDBSync_RedirectBackToOrigin(t *testing.T) {
+	doc := readJVNDBFixture(t)
+	n := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hop", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/jvndb.rdf", http.StatusFound)
+	})
+	mux.HandleFunc("/jvndb.rdf", func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if n == 1 {
+			http.Redirect(w, r, "/hop", http.StatusFound)
+			return
+		}
+		w.Header().Set("ETag", `"x"`)
+		_, _ = w.Write(doc)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	store := newFakeJVNDBStore()
+	if _, err := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 0).Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fin := store.finished["recent"]; fin.ETag != "" {
+		t.Fatalf("validators kept after A->B->A: %+v", fin)
 	}
 }
 

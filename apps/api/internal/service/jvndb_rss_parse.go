@@ -49,6 +49,8 @@ const (
 	// before returning it, so the limit is enforced in the reader underneath
 	// (jvndbTokenGuard), before the allocation.
 	jvndbMaxTokenBytes = 1 << 20
+	// jvndbMaxDepth bounds element nesting below rdf:RDF (the feed uses 4).
+	jvndbMaxDepth = 32
 	// jvndbMaxFieldBytes bounds the text kept from one item field (the title
 	// cap is 1000 runes, at most 4 bytes each).
 	jvndbMaxFieldBytes = 4 * jvndbMaxTitleRunes
@@ -217,6 +219,9 @@ func decodeJVNDBItem(dec *xml.Decoder, guard *jvndbTokenGuard) (jvndbRSSItem, er
 		case xml.StartElement:
 			depth++
 			field = nil
+			if depth > jvndbMaxDepth {
+				return it, fmt.Errorf("elements nested deeper than %d", jvndbMaxDepth)
+			}
 			if depth != 2 {
 				continue
 			}
@@ -271,8 +276,8 @@ func decodeJVNDBItem(dec *xml.Decoder, guard *jvndbTokenGuard) (jvndbRSSItem, er
 }
 
 // normaliseJVNDBItem validates one item. It returns false when the item has
-// no valid JVNDB id or no usable title; bad CVE references and bad dates are
-// dropped individually without rejecting the item.
+// no valid JVNDB id, no usable title or no usable modification time; bad CVE
+// references and a bad issued date are dropped individually.
 func normaliseJVNDBItem(it jvndbRSSItem) (repository.JVNDBAdvisoryRecord, bool) {
 	id := strings.TrimSpace(it.Identifier)
 	if !model.ValidJVNDBID(id) {
@@ -305,6 +310,12 @@ func normaliseJVNDBItem(it jvndbRSSItem) (repository.JVNDBAdvisoryRecord, bool) 
 	}
 	if rec.Published == nil {
 		rec.Published = parseJVNDBTime(it.Date)
+	}
+	// Without a modification time the item cannot be ordered against the
+	// stored row (a stale year feed could overwrite it, or it a newer one):
+	// reject it (Codex R3). Every item of the real feeds carries one.
+	if rec.Modified == nil {
+		return repository.JVNDBAdvisoryRecord{}, false
 	}
 	return rec, true
 }
@@ -383,6 +394,9 @@ func skipJVNDBElement(dec *xml.Decoder, guard *jvndbTokenGuard) error {
 		switch tok.(type) {
 		case xml.StartElement:
 			depth++
+			if depth > jvndbMaxDepth {
+				return fmt.Errorf("elements nested deeper than %d", jvndbMaxDepth)
+			}
 		case xml.EndElement:
 			depth--
 		}

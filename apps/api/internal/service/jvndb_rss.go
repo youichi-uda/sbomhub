@@ -304,10 +304,16 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 	}
 	defer resp.Body.Close()
 	// Validators are kept only for an answer from the requested URL itself:
-	// after a redirect they belong to another resource (Codex R1).
-	direct := resp.Request != nil && resp.Request.URL.String() == req.URL.String()
+	// after any redirect (even one back to the same URL) they belong to
+	// another exchange (Codex R1, R3). resp.Request.Response is the redirect
+	// response that led to the final request, nil when there was none.
+	direct := resp.Request != nil && resp.Request.Response == nil
+	// A 304 is accepted only for a request that was actually conditional;
+	// CheckRedirect strips the validators, so this also implies direct.
+	finalConditional := resp.Request != nil &&
+		(resp.Request.Header.Get("If-None-Match") != "" || resp.Request.Header.Get("If-Modified-Since") != "")
 
-	if resp.StatusCode == http.StatusNotModified && conditional && direct {
+	if resp.StatusCode == http.StatusNotModified && conditional && finalConditional && direct {
 		var cm *time.Time
 		if lm, err := http.ParseTime(resp.Header.Get("Last-Modified")); err == nil {
 			lm = lm.UTC()
@@ -349,6 +355,13 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 	})
 	if perr == nil {
 		perr = flush()
+	}
+	// The recent feed always lists the latest advisories; an empty one is an
+	// upstream fault, and recording it as a success would move
+	// last_success_at and hide a later gap (Codex R3). Early year feeds can
+	// legitimately be empty.
+	if perr == nil && feed == jvndbRecentFeed && stats.Items == 0 {
+		perr = errors.New("the recent feed has no item")
 	}
 	out.Seen, out.Rejected = stats.Items, stats.Rejected
 	if body.exceeded {
