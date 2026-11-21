@@ -72,6 +72,10 @@ type sharedEvent struct {
 	// run: the scan run an applied evBegin reported (scan_run.go); set under
 	// t.qMu before done is closed.
 	run string
+	// recTenant: an evFinish of a run whose result is recorded (Attach); once
+	// applied, the run is closed in the recorded results
+	// (scan_result_store.go). uuid.Nil otherwise.
+	recTenant uuid.UUID
 }
 
 // liveRun is one of this process's active runs.
@@ -183,6 +187,13 @@ func (t *ScanTracker) coalesceLocked(sbomID uuid.UUID, q *sbomQueue, ev *sharedE
 		}
 	case evFinish:
 		m.finish(ev.gen)
+		if ev.recTenant != uuid.Nil {
+			if !m.addRecClosed(ev.gen, ev.recTenant) {
+				// Bounded (Codex R2 Medium-2): this run stays open in the
+				// recorded results and reads interrupted once stale.
+				slog.Warn("scan result: too many finishes coalesced; a run's finish is not recorded", "sbom_id", sbomID)
+			}
+		}
 		if ev.msg != "" {
 			m.addFailure(ev.msg, ev.reasons)
 		}
@@ -305,6 +316,43 @@ func (t *ScanTracker) drain(sbomID uuid.UUID) {
 		q.events = q.events[1:]
 		close(ev.done)
 		t.qMu.Unlock()
+		t.recordApplied(sbomID, ev, merged)
+	}
+}
+
+// recordApplied closes, in the recorded results, the attached runs whose
+// finish was just applied to the shared store; the last close reads the
+// shared status back and records it if terminal (scan_result_store.go).
+func (t *ScanTracker) recordApplied(sbomID uuid.UUID, ev *sharedEvent, merged *mergeSet) {
+	if t.results == nil {
+		return
+	}
+	var closed []runTenant
+	switch {
+	case merged != nil:
+		closed = merged.recClosed
+	case ev.kind == evFinish && ev.recTenant != uuid.Nil:
+		closed = []runTenant{{gen: ev.gen, tenant: ev.recTenant}}
+	}
+	if len(closed) == 0 {
+		return
+	}
+	// One write per tenant (an SBOM has one tenant; kept general), the last
+	// one reading the status back.
+	byTenant := map[uuid.UUID][]uint64{}
+	var order []uuid.UUID
+	for _, c := range closed {
+		if _, ok := byTenant[c.tenant]; !ok {
+			order = append(order, c.tenant)
+		}
+		byTenant[c.tenant] = append(byTenant[c.tenant], c.gen)
+	}
+	for i, tenant := range order {
+		kind := recDrop
+		if i == len(order)-1 {
+			kind = recClose
+		}
+		t.results.enqueue(recordOp{kind: kind, tenantID: tenant, sbomID: sbomID, gens: byTenant[tenant]})
 	}
 }
 
@@ -429,7 +477,7 @@ func (t *ScanTracker) waitBegin(w beginWaiter) string {
 	return w.run()
 }
 
-func (t *ScanTracker) queueFinishLocked(sbomID uuid.UUID, gen uint64, errMsg string, reasons []string, cov ScanCoverage) {
+func (t *ScanTracker) queueFinishLocked(sbomID uuid.UUID, gen uint64, errMsg string, reasons []string, cov ScanCoverage, recTenant uuid.UUID) {
 	if t.shared == nil {
 		return
 	}
@@ -438,7 +486,7 @@ func (t *ScanTracker) queueFinishLocked(sbomID uuid.UUID, gen uint64, errMsg str
 	cov = ScanCoverage{Skipped: append([]string(nil), cov.Skipped...),
 		Checked: append([]string{}, cov.Checked...), Reported: cov.Reported}
 	ev := &sharedEvent{kind: evFinish, gen: gen, msg: errMsg,
-		reasons: append([]string(nil), reasons...), cov: cov}
+		reasons: append([]string(nil), reasons...), cov: cov, recTenant: recTenant}
 	if lr := t.live[runKey{sbomID, gen}]; lr != nil {
 		lr.finSkipped = cov.Skipped
 	}

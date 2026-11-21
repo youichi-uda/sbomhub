@@ -255,7 +255,7 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 		if h.scanTracker != nil {
 			h.scanTracker.MarkFailed(sbom.ID, "tenant context missing")
 		}
-		return c.JSON(http.StatusCreated, sbom)
+		return c.JSON(http.StatusCreated, newUploadResponse(sbom, projectID, ""))
 	}
 
 	// Start vulnerability scan in background AFTER the request transaction
@@ -285,17 +285,46 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 	// the same SBOM (a manual one) overlaps this one, scan-status stays
 	// running until every overlapping run has finished, and then reports
 	// failed if any of them failed (Codex M62 R1/R2 High).
-	var gen uint64
-	if h.scanTracker != nil {
-		gen = h.scanTracker.Begin(sbom.ID)
-	}
+	//
+	// 2026-11: BeginRun also returns the scan run (scan-status `scan_run`) of
+	// the group this run started or joined, answered in the 201 like the scan
+	// 202's (§37). The run is attached to its tenant (its start and outcome
+	// recorded, migration 071) only once the SBOM is committed, by the scan's
+	// goroutine (startBackgroundScan).
+	gen, scanRun := beginScanRunID(h.scanTracker, sbom.ID)
 	scanSbomID := sbom.ID
 	scanProjectID := projectID
 	appmw.RegisterPostCommit(c, func() {
 		h.startBackgroundScan(scanSbomID, tenantID, scanProjectID, gen)
 	})
 
-	return c.JSON(http.StatusCreated, sbom)
+	return c.JSON(http.StatusCreated, newUploadResponse(sbom, projectID, scanRun))
+}
+
+// SbomUploadResponse is the SBOM upload's 201 body: the stored SBOM's fields, as
+// before, plus (additive, 2026-11) where its scan's outcome can be read and
+// the scan run of that scan.
+type SbomUploadResponse struct {
+	*model.Sbom
+	// StatusURL is the SBOM's scan-status path, the same shape as the scan
+	// 202's `status_url`. Always present.
+	StatusURL string `json:"status_url"`
+	// ScanRun is the scan run (scan-status `scan_run`, §37) of the scan this
+	// upload started or joined, when known at answer time (with Redis: the
+	// shared status write landed within Begin's 250ms wait; without Redis
+	// always). Absent = unknown, never "no scan". A scan-status answer with
+	// this value is about a scan that includes this upload's run.
+	ScanRun string `json:"scan_run,omitempty"`
+}
+
+func newUploadResponse(sbom *model.Sbom, projectID uuid.UUID, scanRun string) SbomUploadResponse {
+	return SbomUploadResponse{Sbom: sbom, ScanRun: scanRun,
+		StatusURL: scanStatusURL(projectID, sbom.ID)}
+}
+
+// scanStatusURL is the scan-status path of an SBOM (scan 202 and upload 201).
+func scanStatusURL(projectID, sbomID uuid.UUID) string {
+	return fmt.Sprintf("/api/v1/projects/%s/sboms/%s/scan-status", projectID, sbomID)
 }
 
 // startBackgroundScan initiates vulnerability scanning in the background
@@ -321,6 +350,11 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 func (h *SbomHandler) startBackgroundScan(sbomID, tenantID, projectID uuid.UUID, gen uint64) {
 	go func() {
 		ctx := context.Background()
+		if h.scanTracker != nil {
+			// 2026-11: record the run's start (and later its outcome,
+			// migration 071) before it scans; the SBOM is committed by now.
+			h.scanTracker.Attach(tenantID, sbomID, gen)
+		}
 		// Vuln scan first — the diff webhook auto-trigger downstream
 		// reads component_vulnerabilities so it can compute the
 		// (new critical / new high) counts that drive threshold
@@ -823,6 +857,19 @@ type ScanStatusResponse struct {
 	// unknown (status unknown, a legacy or older-replica write, an answer
 	// from one process's memory): then nothing can be concluded from it.
 	ScanRun string `json:"scan_run,omitempty"`
+	// Source (additive, 2026-11) says where a known status comes from:
+	// "live" — the shared status (Redis) or this API process's memory, as
+	// before; "recorded" — the SBOM's last terminal result recorded in
+	// PostgreSQL (migration 071), answered when the live status no longer
+	// holds an entry (about an hour after the scan's last write). A recorded
+	// answer is always completed or failed and carries last_scan_at and no
+	// scan_run. Absent when status is unknown (and from older servers:
+	// absent with a known status means live).
+	Source string `json:"source,omitempty"`
+	// LastScanAt (additive, 2026-11, RFC 3339 in UTC with milliseconds) is
+	// present on recorded answers only: when the recorded result was published; for a recorded
+	// interrupted run (failed, reason interrupted), when that run started.
+	LastScanAt string `json:"last_scan_at,omitempty"`
 }
 
 // VulnerabilitySummaryCount aggregates vulnerability counts by severity
@@ -917,11 +964,17 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	var errMsg, version, scanRun string
 	var reasons, skipped, checked []string
 	checkedKnown := false
+	tenantID := appmw.GetTenantID(c)
+	var source string
+	var lastScanAt time.Time
 	if h.scanTracker != nil {
-		d := h.scanTracker.GetStatus(sbomID)
+		// 2026-11: falls back to the recorded result when the live status
+		// holds no entry (service.ScanTracker.GetStatusRecorded).
+		d := h.scanTracker.GetStatusRecorded(c.Request().Context(), tenantID, sbomID)
 		state, errMsg, reasons, skipped, version = d.State, d.Error, d.Reasons, d.Skipped, d.Version
 		checked, checkedKnown = d.Checked, d.CheckedKnown
 		scanRun = d.Run
+		source, lastScanAt = d.Source, d.LastScanAt
 	}
 
 	vulns, err := h.sbomService.GetVulnerabilitiesBySbom(c.Request().Context(), projectID, sbomID)
@@ -945,8 +998,9 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	if h.scanTracker != nil && (state == service.ScanStateCompleted || state == service.ScanStateFailed) {
 		// The scan run too (Codex scangen R1 Low): the version is born:rev,
 		// and a recreated key could in principle repeat both.
-		if d2 := h.scanTracker.GetStatus(sbomID); d2.State != state || d2.Version != version || d2.Run != scanRun {
+		if d2 := h.scanTracker.GetStatusRecorded(c.Request().Context(), tenantID, sbomID); d2.State != state || d2.Version != version || d2.Run != scanRun || d2.Source != source {
 			state, errMsg, reasons, skipped = service.ScanStateRunning, "", nil, nil
+			source, lastScanAt = service.ScanStatusSourceLive, time.Time{}
 			checked, checkedKnown = nil, false
 			// Something happened meanwhile: the first read's scan run may
 			// no longer be the current one.
@@ -966,6 +1020,10 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	}
 	if state != service.ScanStateUnknown {
 		resp.ScanRun = scanRun
+		resp.Source = source
+	}
+	if source == service.ScanStatusSourceRecorded && !lastScanAt.IsZero() {
+		resp.LastScanAt = formatLastScanAt(lastScanAt)
 	}
 	if state == service.ScanStateCompleted || state == service.ScanStateFailed {
 		resp.SkippedSources = skipped
@@ -976,6 +1034,13 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, resp)
+}
+
+// formatLastScanAt is last_scan_at: RFC 3339 in UTC with milliseconds (the
+// recorded times' precision), so two recorded results a few milliseconds
+// apart are different answers to a client that compares them.
+func formatLastScanAt(t time.Time) string {
+	return t.UTC().Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z07:00")
 }
 
 // summariseVulnerabilities collapses a slice of Vulnerability into

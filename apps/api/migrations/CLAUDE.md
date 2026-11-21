@@ -384,15 +384,15 @@ first statement's ACCESS EXCLUSIVE held across the validation scan. See
 
 ### The legacy baseline
 
-Of the 70 existing migrations, the lint's own scan (655 statements)
+Of the 72 existing migrations, the lint's own scan (672 statements)
 classifies them as:
 
   - **5** take no contending lock and need nothing — `001_init`
     (everything targets relations it creates itself), `024`, `025`, `049`
     (data-only `UPDATE`s) and `065` (SHARE UPDATE EXCLUSIVE only).
-  - **7** take a contending lock and declare a budget — `063`, `064`,
-    `066`, `067`, `068`, `069` and `070`.
-    (Eight files contain a `SET LOCAL lock_timeout`: `065` declares one
+  - **9** take a contending lock and declare a budget — `063`, `064`,
+    `066`, `067`, `068`, `069`, `070`, `071` and `072`.
+    (Ten files contain a `SET LOCAL lock_timeout`: `065` declares one
     for a statement the lint does not require it for. These counts are
     about locks, not budget lines.)
   - **58** predate the convention and are grandfathered.

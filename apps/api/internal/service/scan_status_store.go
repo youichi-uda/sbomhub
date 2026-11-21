@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -488,6 +489,9 @@ end
 // statusScripts are the store's Lua scripts, built for its MAX_RUN_AGE.
 type statusScripts struct {
 	begin, finish, merge, heartbeat, rejoin, mark, get, intent *redis.Script
+	// record (2026-11, scan_result_store.go) is get plus the time the state
+	// was published (Redis's clock), for the recorded result.
+	record *redis.Script
 }
 
 func newStatusScripts(maxRunAge time.Duration) *statusScripts {
@@ -514,7 +518,7 @@ func newStatusScriptsSpan(maxRunAge, young, span time.Duration) *statusScripts {
 	return &statusScripts{
 		begin: mk(scanStatusBeginLua), finish: mk(scanStatusFinishLua), merge: mk(scanStatusMergeLua),
 		heartbeat: mk(scanStatusHeartbeatLua), rejoin: mk(scanStatusRejoinLua), mark: mk(scanStatusMarkLua),
-		get: mk(scanStatusGetLua), intent: mk(scanStatusIntentLua),
+		get: mk(scanStatusGetLua), intent: mk(scanStatusIntentLua), record: mk(scanStatusRecordLua),
 	}
 }
 
@@ -770,6 +774,17 @@ end)(), (function()
   if #cs == 0 then return '[]' end
   return cjson.encode(cs)
 end)(), run_id() or ''}`
+
+// scanStatusRecordLua is scanStatusGetLua returning, as an eighth value, the
+// published state's `updated` (ms, Redis time): the get script's text with
+// its reply extended, so both read the status the same way.
+var scanStatusRecordLua = func() string {
+	const tail = "run_id() or ''}"
+	if !strings.HasSuffix(scanStatusGetLua, tail) {
+		panic("scan status: the get script's reply changed; update scanStatusRecordLua")
+	}
+	return strings.TrimSuffix(scanStatusGetLua, "}") + ", redis.call('HGET', K, 'updated') or ''}"
+}()
 
 // statusView is one read of the shared status. version changes with every
 // write of it (the entry's rev counter).
@@ -1029,6 +1044,25 @@ type mergeSet struct {
 	// coverageLost: a folded rejoin or Mark* makes the group's coverage
 	// unknown ("cu").
 	coverageLost bool
+	// recClosed: the folded finishes of runs whose result is recorded
+	// (scan_result_store.go), closed there once the merge is applied.
+	recClosed []runTenant
+}
+
+// addRecClosed adds a recorded run's finish, up to maxRecClosed (Codex R2
+// Medium-2: the merge stays bounded); false when it was not added.
+func (m *mergeSet) addRecClosed(gen uint64, tenant uuid.UUID) bool {
+	if len(m.recClosed) >= maxRecClosed {
+		return false
+	}
+	m.recClosed = append(m.recClosed, runTenant{gen: gen, tenant: tenant})
+	return true
+}
+
+// runTenant is a recorded run and its tenant.
+type runTenant struct {
+	gen    uint64
+	tenant uuid.UUID
 }
 
 // addSkipped folds a finish's skipped sources.
@@ -1249,7 +1283,35 @@ func (s *redisScanStatusStore) get(ctx context.Context, sbomID uuid.UUID) (statu
 	if err != nil {
 		return statusView{}, err
 	}
-	if len(v) != 7 {
+	return parseStatusView(v, 7)
+}
+
+// getRecord is get plus when the state was published (Redis's clock; zero
+// when unknown), for the recorded result (scan_result_store.go).
+func (s *redisScanStatusStore) getRecord(ctx context.Context, sbomID uuid.UUID) (statusView, time.Time, error) {
+	ctx, cancel := s.opCtx(ctx)
+	defer cancel()
+	v, err := s.sc().record.Run(ctx, s.client, scanStatusKeys(sbomID)).StringSlice()
+	if errors.Is(err, redis.Nil) {
+		return statusView{}, time.Time{}, nil
+	}
+	if err != nil {
+		return statusView{}, time.Time{}, err
+	}
+	view, err := parseStatusView(v, 8)
+	if err != nil {
+		return view, time.Time{}, err
+	}
+	ms, err := strconv.ParseInt(v[7], 10, 64)
+	if err != nil || ms <= 0 {
+		return view, time.Time{}, fmt.Errorf("scan status: unexpected published time %q", v[7])
+	}
+	return view, time.UnixMilli(ms), nil
+}
+
+// parseStatusView decodes a get (n = 7) or record (n = 8) reply.
+func parseStatusView(v []string, n int) (statusView, error) {
+	if len(v) != n {
 		return statusView{}, fmt.Errorf("scan status: unexpected reply of %d values", len(v))
 	}
 	state := ScanState(v[0])

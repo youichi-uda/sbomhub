@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/binary"
 	"log/slog"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -79,7 +81,24 @@ type ScanTracker struct {
 	beginWait  time.Duration // beginWait; shorter in tests
 	hbActive   bool
 	hbInterval time.Duration
+
+	// results (2026-11, scan_result_store.go) records the last terminal
+	// result of each SBOM in PostgreSQL; nil records nothing.
+	results *scanRecorder
+	// attached: the tenant of each run whose result is recorded (Attach).
+	// Guarded by mu.
+	attached map[runKey]uuid.UUID
 }
+
+// Sources of a scan-status answer (ScanStatusDetail.Source).
+const (
+	// ScanStatusSourceLive: the live status (Redis, or this process's
+	// memory).
+	ScanStatusSourceLive = "live"
+	// ScanStatusSourceRecorded: the last terminal result recorded in
+	// PostgreSQL (scan_result_store.go), the live status holding no entry.
+	ScanStatusSourceRecorded = "recorded"
+)
 
 type runKey struct {
 	sbom uuid.UUID
@@ -178,7 +197,85 @@ func NewScanTracker() *ScanTracker {
 		rejoinSem:  make(chan struct{}, maxRejoins),
 		beginWait:  beginWait,
 		hbInterval: ScanStatusHeartbeat,
+		attached:   map[runKey]uuid.UUID{},
 	}
+}
+
+// WithResultStore makes the tracker record each SBOM's last terminal scan
+// result in PostgreSQL (migration 071, scan_result_store.go), and scan-status
+// answer from it (GetStatusRecorded) once the live status holds no entry.
+// Only runs attached to their tenant (Attach) are recorded. Call it after
+// WithRedis, before the tracker is used.
+func (t *ScanTracker) WithResultStore(db *sql.DB) *ScanTracker {
+	if db != nil {
+		t.withResultStore(&pgScanResultStore{db: db})
+	}
+	return t
+}
+
+func (t *ScanTracker) withResultStore(store scanResultStore) {
+	r := newScanRecorder(store, t.maxRunAge+ScanStatusLease)
+	if st, ok := t.shared.(interface {
+		getRecord(ctx context.Context, sbomID uuid.UUID) (statusView, time.Time, error)
+	}); ok {
+		r.shared = st.getRecord
+	} else if t.shared != nil {
+		// A shared store that cannot say when a state was published (test
+		// fakes): its terminal states are recorded with this process's clock.
+		r.shared = func(ctx context.Context, sbomID uuid.UUID) (statusView, time.Time, error) {
+			v, err := t.shared.get(ctx, sbomID)
+			return v, time.Now(), err
+		}
+	}
+	t.results = r
+}
+
+// Attach names the tenant of run gen of sbomID, so its start and its outcome
+// are recorded (WithResultStore). Call it once the SBOM is committed, from
+// the scan's goroutine before the run scans: it waits (at most attachWait)
+// until the run's start is recorded, so that a reader that finds no live
+// status for the SBOM (Redis lost it) sees the run instead of an older
+// recorded result. A run that already finished is ignored.
+func (t *ScanTracker) Attach(tenantID, sbomID uuid.UUID, gen uint64) {
+	if t.results == nil || tenantID == uuid.Nil || gen == 0 {
+		return
+	}
+	done := make(chan struct{})
+	t.mu.Lock()
+	if e, ok := t.entries[sbomID]; !ok || !e.active[gen] {
+		t.mu.Unlock()
+		return
+	}
+	k := runKey{sbomID, gen}
+	if _, ok := t.attached[k]; ok {
+		t.mu.Unlock()
+		return
+	}
+	t.attached[k] = tenantID
+	// Queued under t.mu: before the run's close, which is queued after its
+	// finish (finishLocal, or the shared write's drain).
+	t.results.enqueue(recordOp{kind: recOpen, tenantID: tenantID, sbomID: sbomID, gen: gen, at: time.Now(),
+		unacked: !t.beginAcked(k), done: done})
+	t.mu.Unlock()
+	timer := time.NewTimer(t.results.timing.attachWait)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		slog.Warn("scan result: the run's start is not recorded yet; scanning anyway", "sbom_id", sbomID)
+	}
+}
+
+// beginAcked reports whether run k's Begin has reached the shared status
+// (always true without one).
+func (t *ScanTracker) beginAcked(k runKey) bool {
+	if t.shared == nil {
+		return true
+	}
+	t.qMu.Lock()
+	defer t.qMu.Unlock()
+	lr := t.live[k]
+	return lr != nil && lr.acked
 }
 
 // WithRedis makes the tracker keep its state in Redis too (M72), shared by
@@ -333,7 +430,27 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 	if sharedMsg == "" && len(reasons) > 0 {
 		sharedMsg = "scan failed"
 	}
-	t.queueFinishLocked(sbomID, gen, sharedMsg, reasons, cov)
+	tenantID, attached := t.attached[runKey{sbomID, gen}]
+	delete(t.attached, runKey{sbomID, gen})
+	recTenant := uuid.Nil
+	if attached && t.shared != nil {
+		// Closed once the finish reached the shared store (drain).
+		recTenant = tenantID
+	}
+	t.queueFinishLocked(sbomID, gen, sharedMsg, reasons, cov, recTenant)
+	if attached && t.shared == nil {
+		// Without a shared store this process's group is the SBOM's: closed
+		// below, with the terminal result if the group ended.
+		defer func() {
+			op := recordOp{kind: recClose, tenantID: tenantID, sbomID: sbomID, gens: []uint64{gen}}
+			if e := t.entries[sbomID]; len(e.active) == 0 && (e.state == ScanStateCompleted || e.state == ScanStateFailed) {
+				op.rec = &scanResultRecord{state: e.state, errMsg: e.errMsg, reasons: e.reasons,
+					skipped: OrderScanSources(e.skipped), checked: e.checked, checkedKnown: e.checkedKnown,
+					run: e.run, finishedAt: e.updatedAt, ver: int64(e.rev & math.MaxInt64), coveredSeq: -1}
+			}
+			t.results.enqueue(op)
+		}()
+	}
 	g := groupCoverage{skipped: e.groupSkipped, checked: e.groupChecked, checkedKnown: e.groupCheckedKnown}
 	g.add(cov)
 	e.groupSkipped, e.groupChecked, e.groupCheckedKnown = g.skipped, g.checked, g.checkedKnown
@@ -376,8 +493,21 @@ func (t *ScanTracker) finishLocal(sbomID uuid.UUID, gen uint64, reasons []string
 func (t *ScanTracker) MarkCompleted(sbomID uuid.UUID) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.detachLocked(sbomID)
 	t.put(sbomID, scanEntry{state: ScanStateCompleted, updatedAt: time.Now()})
 	t.queueMarkLocked(sbomID, ScanStateCompleted, "", nil)
+}
+
+// detachLocked closes the recorded runs of sbomID that a legacy Mark* ends
+// (they will not finish as tracked runs), recording no result: a Mark* is
+// not a scan group's outcome. t.mu is held.
+func (t *ScanTracker) detachLocked(sbomID uuid.UUID) {
+	for k, tenantID := range t.attached {
+		if k.sbom == sbomID {
+			delete(t.attached, k)
+			t.results.enqueue(recordOp{kind: recDrop, tenantID: tenantID, sbomID: sbomID, gens: []uint64{k.gen}})
+		}
+	}
 }
 
 // MarkFailed records that at least one background scan for the sbom
@@ -393,6 +523,7 @@ func (t *ScanTracker) MarkFailed(sbomID uuid.UUID, errMsg string) {
 func (t *ScanTracker) MarkFailedWithReasons(sbomID uuid.UUID, errMsg string, reasons []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.detachLocked(sbomID)
 	t.put(sbomID, scanEntry{state: ScanStateFailed, updatedAt: time.Now(), errMsg: errMsg,
 		reasons: append([]string(nil), reasons...)})
 	t.queueMarkLocked(sbomID, ScanStateFailed, errMsg, reasons)
@@ -443,6 +574,45 @@ type ScanStatusDetail struct {
 	// Version changes with every transition of the status (see
 	// GetDetailVersion).
 	Version string
+	// Source (2026-11) is where the answer came from: ScanStatusSourceLive
+	// or ScanStatusSourceRecorded (GetStatusRecorded); "" for unknown.
+	Source string
+	// LastScanAt (2026-11) is set on recorded answers only: when the
+	// recorded result was published — for a recorded interrupted run, when
+	// it started (scan_result_store.go).
+	LastScanAt time.Time
+	// noEntry: unknown because the live status was read and holds no entry
+	// for the SBOM (and nothing of it is pending or active here) — the only
+	// unknown a recorded result may answer for.
+	noEntry bool
+}
+
+// GetStatusRecorded is GetStatus, falling back to the SBOM's recorded result
+// (WithResultStore, scan_result_store.go) when the live status holds no entry
+// for it. The live status always wins: a recorded result is consulted only
+// when Redis was read and holds no entry and this process has neither a
+// pending write nor an active run of the SBOM (without Redis: when this
+// process has no entry). tenantID must be the SBOM's tenant (the caller has
+// already found the SBOM in the caller's project).
+func (t *ScanTracker) GetStatusRecorded(ctx context.Context, tenantID, sbomID uuid.UUID) ScanStatusDetail {
+	d := t.GetStatus(sbomID)
+	if d.State != ScanStateUnknown || !d.noEntry || t.results == nil || tenantID == uuid.Nil {
+		return d
+	}
+	row, err := t.results.store.read(ctx, tenantID, sbomID)
+	if err != nil {
+		slog.Warn("scan status: recorded scan result unreadable; answering unknown", "sbom_id", sbomID, "error", err)
+		return d
+	}
+	// The live status again (Codex R4 High-1): a scan that began while the
+	// row was read — its start possibly not recorded yet — wins over it.
+	if d2 := t.GetStatus(sbomID); d2.State != ScanStateUnknown || !d2.noEntry {
+		return d2
+	}
+	if rd, ok := recordedStatus(row, t.results.staleAfter, time.Now()); ok {
+		return rd
+	}
+	return d
 }
 
 // GetDetailVersion is GetDetail plus a version that changes with every
@@ -458,8 +628,18 @@ func (t *ScanTracker) GetDetailVersion(sbomID uuid.UUID) (ScanState, string, []s
 // GetStatus is GetDetailVersion with the skipped sources, all from the same
 // read (GetDetail documents which source answers).
 func (t *ScanTracker) GetStatus(sbomID uuid.UUID) ScanStatusDetail {
+	d := t.getStatus(sbomID)
+	if d.State != ScanStateUnknown {
+		d.Source = ScanStatusSourceLive
+	}
+	return d
+}
+
+func (t *ScanTracker) getStatus(sbomID uuid.UUID) ScanStatusDetail {
 	if t.shared == nil {
-		return t.localVersioned(sbomID, false)
+		d := t.localVersioned(sbomID, false)
+		d.noEntry = d.State == ScanStateUnknown
+		return d
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		// One snapshot of "active here" and the revision (Codex M72 R5
@@ -488,7 +668,9 @@ func (t *ScanTracker) GetStatus(sbomID uuid.UUID) ScanStatusDetail {
 			// No entry (never written, expired, or evicted): a local
 			// "completed" may be stale — another replica's run would be in
 			// that entry — so it reads unknown (Codex M72 R11 High-1).
-			return t.localVersioned(sbomID, true)
+			d := t.localVersioned(sbomID, true)
+			d.noEntry = d.State == ScanStateUnknown
+			return d
 		case view.state == ScanStateRunning:
 			return ScanStatusDetail{State: view.state, Run: view.run, Version: view.version}
 		case t.pendingShared(sbomID):

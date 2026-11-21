@@ -798,7 +798,7 @@ func main() {
 	// M62: retention is sized from the scan deadline so a running scan's
 	// entry is never evicted before the scan can reach a terminal state.
 	// M72: shared through Redis, so every replica and a restart see it.
-	scanTracker := service.NewScanTrackerFor(scanDeadline).WithRedis(rdb)
+	scanTracker := service.NewScanTrackerFor(scanDeadline).WithRedis(rdb).WithResultStore(db)
 
 	// AI VEX triage runner (issue #30 / Wave M1-5). Composes the four
 	// input repositories above with the BYOK LLM provider and the
