@@ -40,6 +40,8 @@ type ScanBody = {
     skipped_sources?: string[];
     checked_sources?: string[];
     scan_run?: string;
+    source?: string;
+    last_scan_at?: string;
     vulnerabilities?: { total: number };
 };
 
@@ -286,6 +288,73 @@ test.describe('project page: scan status of the latest SBOM', () => {
         await expect(page.getByText(en.ProjectDetail.noVulnerabilities, { exact: true })).toHaveCount(0);
         await expect(notice(page)).toHaveCount(0);
         await expect(page.getByTestId('scan-coverage-notice')).toHaveCount(0);
+    });
+
+    // UPGRADE §38: once the live status is gone the API answers the SBOM's
+    // last recorded result (source "recorded", last_scan_at, no scan_run)
+    // instead of unknown. Same coverage rules (§34), shown with its time.
+    // One fixed time per answer: two reads with different last_scan_at are
+    // different answers (the page reads again, and keeps reading "running").
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
+    const recorded = (b: Partial<ScanBody>): ScanBody => ({
+        status: 'completed', source: 'recorded', last_scan_at: threeDaysAgo, scan_run: undefined, ...b,
+    });
+    const recordedNotice = (page: Page) => page.getByTestId('scan-recorded-notice');
+
+    test('recorded, full coverage: "Last scan: 3 days ago — completed, sources checked", bare count, not unknown', async ({ page }) => {
+        await mockScanStatus(page, clean!.id, () => recorded({ checked_sources: ALL_SOURCES }));
+        await page.goto(`/en/projects/${clean!.id}`);
+        await expect(recordedNotice(page)).toHaveAttribute('data-recorded-state', 'completed');
+        await expect(recordedNotice(page)).toHaveAttribute('role', 'status');
+        const summary = page.getByTestId('scan-recorded-summary');
+        await expect(summary).toContainText('Last scan: 3 days ago (');
+        await expect(summary).toContainText('— completed, NVD, JVN, Linux distro data checked.');
+        await expect(recordedNotice(page)).toContainText(en.ScanStatus.recordedNote);
+        await expect(summary.locator('time')).toHaveAttribute('datetime', /^\d{4}-\d\d-\d\dT/);
+        await expect(vulnTab(page)).toHaveText(tabText(0, null));
+        await expect(notice(page)).toHaveCount(0);
+        await expect(page.getByText(en.ScanStatus.unknownTitle)).toHaveCount(0);
+        await expect(page.getByTestId('scan-coverage-notice')).toHaveCount(0);
+        // A recorded result is not a scan that just finished.
+        await expect(page.getByTestId('scan-finished-announcer')).toHaveText('');
+        await vulnTab(page).click();
+        await expect(empty(page)).toHaveText(en.ScanStatus.emptyCompleted);
+    });
+
+    test('recorded, offline coverage: the summary does not claim the sources, the coverage notice does the rest', async ({ page }) => {
+        await mockScanStatus(page, clean!.id, () => recorded({ checked_sources: [], skipped_sources: ALL_SOURCES }));
+        await page.goto(`/en/projects/${clean!.id}`);
+        await expect(page.getByTestId('scan-recorded-summary')).toContainText('— completed.');
+        await expect(page.getByTestId('scan-recorded-summary')).not.toContainText('checked');
+        await expect(page.getByTestId('scan-coverage-notice')).toHaveAttribute('data-coverage', 'partial');
+        await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountPartial));
+    });
+
+    test('recorded, coverage not reported: coverage unknown, never a bare count', async ({ page }) => {
+        await mockScanStatus(page, clean!.id, () => recorded({ checked_sources: undefined }));
+        await page.goto(`/en/projects/${clean!.id}`);
+        await expect(page.getByTestId('scan-recorded-summary')).toContainText('— completed.');
+        await expect(page.getByTestId('scan-coverage-notice')).toHaveAttribute('data-coverage', 'unknown');
+        await expect(vulnTab(page)).toHaveText(tabText(0, en.ScanStatus.tabCountCoverageUnknown));
+    });
+
+    test('recorded failed (interrupted), in Japanese: the time, then the alert with its reason', async ({ page }) => {
+        await mockScanStatus(page, clean!.id, () =>
+            recorded({ status: 'failed', reasons: ['interrupted'], error: 'scan: scan failed (interrupted)', checked_sources: undefined }));
+        await page.goto(`/ja/projects/${clean!.id}`);
+        const summary = page.getByTestId('scan-recorded-summary');
+        await expect(summary).toContainText('前回のスキャン: 3 日前 (', { timeout: 15_000 });
+        await expect(summary).toContainText('— 失敗。');
+        await expect(recordedNotice(page)).toContainText(ja.ScanStatus.recordedNote);
+        await expect(notice(page)).toHaveAttribute('data-scan-state', 'failed');
+        await expect(notice(page).locator('[data-reason="interrupted"]')).toHaveText(ja.ScanStatus.reasonInterrupted);
+    });
+
+    test('recorded without a usable last_scan_at: says the time is not reported', async ({ page }) => {
+        await mockScanStatus(page, clean!.id, () => recorded({ checked_sources: ALL_SOURCES, last_scan_at: 'not-a-time' }));
+        await page.goto(`/en/projects/${clean!.id}`);
+        await expect(page.getByTestId('scan-recorded-summary')).toContainText(`Last scan: ${en.ScanStatus.recordedTimeUnknown} — completed`);
+        await expect(page.getByTestId('scan-recorded-summary').locator('time')).toHaveCount(0);
     });
 
     // Integration review (Medium, §31): checked_sources absent (an older

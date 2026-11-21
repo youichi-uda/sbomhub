@@ -168,6 +168,28 @@ describe("readSnapshot: races", () => {
     }
   });
 
+  // UPGRADE §38: a recorded answer and a live one (or two recorded ones of
+  // different times) are different answers: read again.
+  test("recorded then live between the two status reads reads again", async () => {
+    const rec = { source: "recorded", lastScanAt: "2026-11-18T01:02:03Z" };
+    const f = fake({
+      latest: ["A", "A", "A", "A"],
+      status: [st("completed", 4, rec), st("completed", 4, { source: "live" }), st("completed", 4, { source: "live" }), st("completed", 4, { source: "live" })],
+      list: [page(4), page(4)],
+    });
+    const s = await readSnapshot(f.deps, undefined);
+    assert.equal(s.status.source, "live");
+    assert.equal(f.log.filter((x) => x === "list").length, 2);
+  });
+
+  test("the same recorded answer on both reads: one pass", async () => {
+    const rec = { source: "recorded", lastScanAt: "2026-11-18T01:02:03Z" };
+    const f = fake({ latest: ["A", "A"], status: [st("completed", 4, rec), st("completed", 4, rec)], list: [page(4)] });
+    const s = await readSnapshot(f.deps, undefined);
+    assert.equal(s.status.source, "recorded");
+    assert.equal(f.log.filter((x) => x === "list").length, 1);
+  });
+
   test("the same scan_run on both reads: one pass", async () => {
     const f = fake({
       latest: ["A", "A"],

@@ -13,9 +13,16 @@
 //   - the scan completed without checking some source (skipped_sources:
 //     offline mode, ?sources=, the scheduled scan, SBOMHUB_JVN=off, no
 //     scanner configured — §26.2, §31);
-//   - the status is unknown — the API keeps a scan's status for about an hour
-//     (max(1h, SBOMHUB_SCAN_DEADLINE + 15m)), and reads unknown when Redis
-//     cannot be read (§25.3).
+//   - the status is unknown — the API keeps a scan's live status for about an
+//     hour (max(1h, SBOMHUB_SCAN_DEADLINE + 15m)), and reads unknown when Redis
+//     cannot be read (§25.3). Since UPGRADE.md §38 it then answers the SBOM's
+//     last recorded result instead (`source: "recorded"`, `last_scan_at`), so
+//     unknown mostly means "no result recorded" (scanned before the upgrade,
+//     by an older replica, or a scan still possibly running that the live
+//     status lost);
+//   - the answer is a recorded result (§38): the same completed / failed and
+//     coverage, from a scan that ended at `last_scan_at` — shown with its
+//     time ("Last scan: 3 days ago") and the same coverage rules.
 // `completed` alone does not prove that every source was checked: offline
 // mode, a manual `?sources=nvd` scan and the scheduled scan (no JVN) complete
 // too. Since UPGRADE.md §31 a terminal answer says which sources (nvd, jvn,
@@ -43,6 +50,8 @@
 //     checked_sources?: string[] (completed / failed only; absent = unknown),
 //     scan_run?: string (opaque scan identifier, UPGRADE.md §37; absent =
 //                unknown),
+//     source?: "live" | "recorded" (UPGRADE.md §38; absent = live),
+//     last_scan_at?: RFC 3339 (recorded answers only),
 //     vulnerabilities: { critical, high, medium, low, unknown, kev, total } }
 
 export type ScanState = "running" | "completed" | "failed" | "unknown";
@@ -74,6 +83,15 @@ export interface ScanStatus {
    * shown; only compared (sameScanRun).
    */
   run: string | null;
+  /**
+   * UPGRADE.md §38: "recorded" when the answer is the SBOM's last recorded
+   * result (the live status no longer holds it), "live" otherwise (also when
+   * the API does not say: older APIs answer live only). Recorded only for a
+   * completed / failed answer.
+   */
+  source: "live" | "recorded";
+  /** last_scan_at of a recorded answer (RFC 3339); null otherwise or unparseable. */
+  lastScanAt: string | null;
 }
 
 const STATES: readonly ScanState[] = ["running", "completed", "failed", "unknown"];
@@ -108,7 +126,17 @@ export function parseScanStatus(raw: unknown): ScanStatus {
     checkedSources: null,
     total,
     run: status !== "unknown" && typeof o.scan_run === "string" && o.scan_run !== "" ? o.scan_run : null,
+    source: "live",
+    lastScanAt: null,
   };
+  if ((status === "completed" || status === "failed") && o.source === "recorded") {
+    out.source = "recorded";
+    // A recorded answer never vouches for a scan run (§38): ignored if sent.
+    out.run = null;
+    if (typeof o.last_scan_at === "string" && Number.isFinite(Date.parse(o.last_scan_at))) {
+      out.lastScanAt = o.last_scan_at;
+    }
+  }
   if (status === "failed") {
     out.reasons = stringList(o.reasons);
     if (typeof o.error === "string" && o.error !== "") out.error = o.error;
@@ -226,8 +254,26 @@ export type ScanView =
       checkedSources: string[] | null;
       coverage: Coverage;
       error?: string;
+      /** A recorded result (§38); null = live. */
+      recorded: Recorded | null;
     }
-  | { kind: "completed"; skippedSources: string[]; checkedSources: string[] | null; coverage: Coverage };
+  | {
+      kind: "completed";
+      skippedSources: string[];
+      checkedSources: string[] | null;
+      coverage: Coverage;
+      /** A recorded result (§38); null = live. */
+      recorded: Recorded | null;
+    };
+
+/** A recorded result's time: `at` = last_scan_at (null when not sent / unparseable). */
+export interface Recorded {
+  at: string | null;
+}
+
+function recordedOf(d: ScanStatus): Recorded | null {
+  return d.source === "recorded" ? { at: d.lastScanAt } : null;
+}
 
 export interface ScanViewInput {
   /** The latest-SBOM lookup: id null = the project has no SBOM. */
@@ -257,6 +303,7 @@ export function scanView({ sbom, status }: ScanViewInput): ScanView {
         checkedSources: d.checkedSources,
         coverage: scanCoverage(d.skippedSources, d.checkedSources),
         ...(d.error ? { error: d.error } : {}),
+        recorded: recordedOf(d),
       };
     case "completed":
       return {
@@ -264,10 +311,27 @@ export function scanView({ sbom, status }: ScanViewInput): ScanView {
         skippedSources: d.skippedSources,
         checkedSources: d.checkedSources,
         coverage: scanCoverage(d.skippedSources, d.checkedSources),
+        recorded: recordedOf(d),
       };
     default:
       return { kind: "unknown" };
   }
+}
+
+/** "ScanStatus" message key summarising a recorded result (§38). */
+export type RecordedSummaryKey = "recordedCompletedFull" | "recordedCompleted" | "recordedFailed";
+
+/**
+ * The summary line of a recorded result, or null for a live answer. Full
+ * coverage (§34's rule: completed, NVD / JVN / distro checked, nothing
+ * skipped) is the only one that names the sources as checked; any other
+ * coverage is shown by the coverage notice, as for a live answer.
+ */
+export function recordedSummaryKey(view: ScanView): RecordedSummaryKey | null {
+  if (view.kind !== "completed" && view.kind !== "failed") return null;
+  if (view.recorded === null) return null;
+  if (view.kind === "failed") return "recordedFailed";
+  return view.coverage.kind === "full" ? "recordedCompletedFull" : "recordedCompleted";
 }
 
 export type EmptyStateKey =
@@ -341,7 +405,8 @@ function sameNullableList(a: readonly string[] | null, b: readonly string[] | nu
  * Whether two scan-status answers agree on everything the page shows from
  * them: state, finding total, skipped and checked sources (a reported list
  * and "not reported" differ), reasons and failure marker (Codex R4: agreeing
- * on state and total alone let a changed coverage through). A null total
+ * on state and total alone let a changed coverage through), and whether it
+ * is a live or a recorded answer, with the recorded time (§38). A null total
  * only occurs for running / unknown answers (parseScanStatus), where
  * agreement claims nothing final.
  */
@@ -352,7 +417,9 @@ export function sameScanAnswer(a: ScanStatus, b: ScanStatus): boolean {
     sameList(a.skippedSources, b.skippedSources) &&
     sameNullableList(a.checkedSources, b.checkedSources) &&
     sameList(a.reasons, b.reasons) &&
-    (a.error ?? "") === (b.error ?? "")
+    (a.error ?? "") === (b.error ?? "") &&
+    a.source === b.source &&
+    a.lastScanAt === b.lastScanAt
   );
 }
 

@@ -30,6 +30,7 @@ import {
   parseScanStatus,
   pollIntervalMs,
   reasonItems,
+  recordedSummaryKey,
   scanCoverage,
   scanView,
   SCAN_SOURCES,
@@ -401,5 +402,81 @@ describe("scan_run", () => {
     const a = parseScanStatus({ status: "completed", vulnerabilities: { total: 0 }, scan_run: "a" });
     const b = parseScanStatus({ status: "completed", vulnerabilities: { total: 0 }, scan_run: "b" });
     assert.equal(sameScanAnswer(a, b), true);
+  });
+});
+
+// UPGRADE §38: once the live status is gone the API answers the SBOM's last
+// recorded result (source "recorded", last_scan_at). Same coverage rules
+// (§34); never a scan run; shown with its time.
+describe("recorded results (source / last_scan_at)", () => {
+  const p = (extra, status = "completed") => parseScanStatus({ status, vulnerabilities: { total: 0 }, ...extra });
+  const AT = "2026-11-18T01:02:03Z";
+
+  test("parsed for completed / failed only; live otherwise", () => {
+    const r = p({ source: "recorded", last_scan_at: AT, checked_sources: ALL });
+    assert.equal(r.source, "recorded");
+    assert.equal(r.lastScanAt, AT);
+    assert.equal(p({ source: "recorded", last_scan_at: AT }, "failed").source, "recorded");
+    for (const st of ["running", "unknown"]) {
+      const x = p({ source: "recorded", last_scan_at: AT }, st);
+      assert.equal(x.source, "live");
+      assert.equal(x.lastScanAt, null);
+    }
+    assert.equal(p({}).source, "live"); // older API: absent = live
+    assert.equal(p({ source: "live", last_scan_at: AT }).lastScanAt, null);
+    assert.equal(p({ source: "weird" }).source, "live");
+  });
+
+  test("an unparseable or missing last_scan_at is null, still recorded", () => {
+    for (const v of [undefined, "", "yesterday", 7, null]) {
+      const r = p({ source: "recorded", last_scan_at: v });
+      assert.equal(r.source, "recorded");
+      assert.equal(r.lastScanAt, null);
+    }
+  });
+
+  test("a recorded answer never carries a scan run", () => {
+    assert.equal(p({ source: "recorded", last_scan_at: AT, scan_run: "00ff" }).run, null);
+  });
+
+  test("same §34 coverage rules: full only with all three checked and nothing skipped", () => {
+    const full = scanView({ sbom: { pending: false, error: false, id: "A" }, status: { pending: false, error: false, data: p({ source: "recorded", last_scan_at: AT, checked_sources: ALL }) } });
+    assert.equal(full.kind, "completed");
+    assert.deepEqual(full.recorded, { at: AT });
+    assert.equal(full.coverage.kind, "full");
+    assert.equal(recordedSummaryKey(full), "recordedCompletedFull");
+    assert.equal(countQualifierKey(full, FRESH), null);
+    assert.equal(emptyStateKey(full, true), "emptyCompleted");
+
+    const offline = scanView({ sbom: { pending: false, error: false, id: "A" }, status: { pending: false, error: false, data: p({ source: "recorded", last_scan_at: AT, checked_sources: [], skipped_sources: ALL }) } });
+    assert.equal(offline.coverage.kind, "partial");
+    assert.equal(recordedSummaryKey(offline), "recordedCompleted");
+    assert.equal(countQualifierKey(offline, FRESH), "tabCountPartial");
+
+    const unknownCov = scanView({ sbom: { pending: false, error: false, id: "A" }, status: { pending: false, error: false, data: p({ source: "recorded", last_scan_at: AT }) } });
+    assert.equal(unknownCov.coverage.kind, "unknown");
+    assert.equal(recordedSummaryKey(unknownCov), "recordedCompleted");
+    assert.equal(countQualifierKey(unknownCov, FRESH), "tabCountCoverageUnknown");
+
+    const failed = scanView({ sbom: { pending: false, error: false, id: "A" }, status: { pending: false, error: false, data: p({ source: "recorded", last_scan_at: AT, reasons: ["interrupted"] }, "failed") } });
+    assert.equal(failed.kind, "failed");
+    assert.equal(recordedSummaryKey(failed), "recordedFailed");
+    assert.equal(countQualifierKey(failed, FRESH), "tabCountIncomplete");
+  });
+
+  test("live answers have no recorded summary", () => {
+    const live = scanView({ sbom: { pending: false, error: false, id: "A" }, status: { pending: false, error: false, data: p({ checked_sources: ALL }) } });
+    assert.equal(live.recorded, null);
+    assert.equal(recordedSummaryKey(live), null);
+    assert.equal(recordedSummaryKey({ kind: "running" }), null);
+  });
+
+  test("sameScanAnswer tells a live from a recorded answer, and two recorded times apart", () => {
+    const live = p({ checked_sources: ALL });
+    const rec = p({ source: "recorded", last_scan_at: AT, checked_sources: ALL });
+    const rec2 = p({ source: "recorded", last_scan_at: "2026-11-19T00:00:00Z", checked_sources: ALL });
+    assert.equal(sameScanAnswer(live, rec), false);
+    assert.equal(sameScanAnswer(rec, rec2), false);
+    assert.equal(sameScanAnswer(rec, { ...rec }), true);
   });
 });

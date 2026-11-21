@@ -21,7 +21,10 @@
 //                                               shows while the list was read,
 //                                               and the scan_run (when both
 //                                               report one) is the same: no
-//                                               other scan of A began
+//                                               other scan of A began; a
+//                                               live and a recorded answer
+//                                               (UPGRADE.md §38), or two
+//                                               recorded times, differ
 //
 // A settled s1 (completed / failed / unknown) is published by the API only
 // after the scan's findings committed (handler/sbom.go ScanStatus), and the
