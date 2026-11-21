@@ -91,7 +91,7 @@ func jvndbItem(id, title string, refs string, modified string) string {
 
 func TestParseJVNDBRSS_ItemValidation(t *testing.T) {
 	doc := jvndbDocHead +
-		jvndbItem("JVNDB-2026-000001", "ok", `<sec:references source="CVE" id="cve-2026-1234"/><sec:references source="CVE" id="CVE-2026-1234"/><sec:references source="CVE" id="CVE-26-1"/><sec:references source="JVN" id="CVE-2026-9999"/>`, "2026-11-02T10:00+09:00") +
+		jvndbItem("JVNDB-2026-000001", "ok", `<sec:references source="CVE" id="cve-2026-1234"/><sec:references source="CVE" id="CVE-2026-1234"/><sec:references source="JVN" id="CVE-2026-9999"/>`, "2026-11-02T10:00+09:00") +
 		jvndbItem("JVNDB-26-1", "bad id", "", "2026-11-02T10:00+09:00") +
 		jvndbItem("JVNDB-2026-000002", "   ", "", "2026-11-02T10:00+09:00") +
 		jvndbItem("JVNDB-2026-000003", "a\u202eb\tc\n d", "", "2026-11-03T10:00:30+09:00") +
@@ -104,7 +104,7 @@ func TestParseJVNDBRSS_ItemValidation(t *testing.T) {
 		t.Fatalf("stats = %+v, want 4 items, 2 accepted, 2 rejected", st)
 	}
 	if got[0].ID != "JVNDB-2026-000001" || len(got[0].CVEs) != 1 || got[0].CVEs[0] != "CVE-2026-1234" {
-		t.Errorf("first = %+v: CVE ids are upper-cased, de-duplicated, malformed and non-CVE sources dropped", got[0])
+		t.Errorf("first = %+v: CVE ids are upper-cased, de-duplicated, non-CVE sources ignored", got[0])
 	}
 	if got[1].Title != "ab c d" {
 		t.Errorf("title = %q, want bidi override removed and whitespace collapsed", got[1].Title)
@@ -186,7 +186,7 @@ func TestParseJVNDBRSS_DepthAndUndated(t *testing.T) {
 // are read, not after.
 func TestParseJVNDBRSS_ItemBounds(t *testing.T) {
 	var refs strings.Builder
-	for i := 0; i < jvndbMaxCVEsPerItem+50; i++ {
+	for i := 0; i < jvndbMaxCVEsPerItem; i++ {
 		fmt.Fprintf(&refs, `<sec:references source="CVE" id="CVE-2026-%06d"/>`, i)
 	}
 	doc := jvndbDocHead + jvndbItem("JVNDB-2026-000001", strings.Repeat("あ", 5000), refs.String(), "2026-11-02T10:00+09:00") + `</rdf:RDF>`
@@ -554,7 +554,7 @@ func TestJVNDBSync_GapKeepsYearPendingUntilRegenerated(t *testing.T) {
 	}
 	// After the weekly regeneration it is read in full and the gap is closed.
 	mu.Lock()
-	yearLM = "Sun, 22 Nov 2026 00:02:09 GMT"
+	yearLM = "Fri, 20 Nov 2026 00:02:09 GMT" // after the gap, before the test's "now"
 	mu.Unlock()
 	ageAllAttempts(store)
 	if _, err := svc.Sync(context.Background()); err != nil {
@@ -735,12 +735,12 @@ func TestJVNDBSync_ContentModifiedFromHeadersOnly(t *testing.T) {
 	// Last-Modified moves the generation time forward and closes it.
 	gap := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
 	store.states["recent"].GapUntil = &gap
-	lm = "Sun, 22 Nov 2026 00:02:09 GMT"
+	lm = "Sat, 21 Nov 2026 00:02:09 GMT"
 	ageAllAttempts(store)
 	if _, err := svc.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := time.Date(2026, 11, 22, 0, 2, 9, 0, time.UTC)
+	want := time.Date(2026, 11, 21, 0, 2, 9, 0, time.UTC)
 	if fin := store.finished["year:2026"]; fin.Status != "not_modified" || store.states["year:2026"].ContentModifiedAt == nil || !store.states["year:2026"].ContentModifiedAt.Equal(want) {
 		t.Fatalf("after 304: %+v / %v", fin, store.states["year:2026"].ContentModifiedAt)
 	}
@@ -857,6 +857,87 @@ func TestJVNDBSync_RedirectBackToOrigin(t *testing.T) {
 	}
 }
 
+// Codex R4 (Medium): a future modification time (beyond 24h of clock skew)
+// is not a usable date, and a future Last-Modified does not close a gap.
+func TestJVNDB_FutureDatesRejected(t *testing.T) {
+	future := time.Now().Add(72 * time.Hour).Format("2006-01-02T15:04Z07:00")
+	soon := time.Now().Add(2 * time.Hour).Format("2006-01-02T15:04Z07:00")
+	doc := jvndbDocHead + jvndbItem("JVNDB-2026-000001", "future", "", future) + jvndbItem("JVNDB-2026-000002", "skewed", "", soon) + `</rdf:RDF>`
+	got, st, err := parseAll(t, []byte(doc))
+	if err != nil || st.Rejected != 1 || len(got) != 1 || got[0].ID != "JVNDB-2026-000002" {
+		t.Fatalf("got %+v stats %+v err %v", got, st, err)
+	}
+
+	fixture := readJVNDBFixture(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Last-Modified", time.Now().Add(365*24*time.Hour).UTC().Format(http.TimeFormat))
+		_, _ = w.Write(fixture)
+	}))
+	defer srv.Close()
+	store := newFakeJVNDBStore()
+	read := time.Now().UTC()
+	svc := NewJVNDBRSSService(store, srv.URL, false, time.Hour, read.Year())
+	svc.now = func() time.Time { return read }
+	if _, err := svc.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cm := store.states["year:"+fmt.Sprint(read.Year())].ContentModifiedAt
+	if cm == nil || !cm.Equal(read.Add(-jvndbYearRegeneration)) {
+		t.Fatalf("a future Last-Modified must fall back to the conservative bound, got %v", cm)
+	}
+}
+
+// Codex R4 (Medium): an item whose CVE references cannot all be read is
+// rejected, so it never replaces a stored mapping with a partial one.
+func TestParseJVNDBRSS_IncompleteCVEReferencesRejected(t *testing.T) {
+	var refs strings.Builder
+	for i := 0; i < jvndbMaxCVEsPerItem+1; i++ {
+		fmt.Fprintf(&refs, `<sec:references source="CVE" id="CVE-2026-%06d"/>`, i)
+	}
+	doc := jvndbDocHead +
+		jvndbItem("JVNDB-2026-000001", "ok", `<sec:references source="CVE" id="CVE-2026-1234"/>`, "2026-11-02T10:00+09:00") +
+		jvndbItem("JVNDB-2026-000002", "bad cve", `<sec:references source="CVE" id="CVE-2026-1234"/><sec:references source="CVE" id="CVE-2026-12"/>`, "2026-11-02T10:00+09:00") +
+		jvndbItem("JVNDB-2026-000003", "too many", refs.String(), "2026-11-02T10:00+09:00") +
+		`</rdf:RDF>`
+	got, st, err := parseAll(t, []byte(doc))
+	if err != nil || len(got) != 1 || st.Rejected != 2 {
+		t.Fatalf("got %+v stats %+v err %v", got, st, err)
+	}
+}
+
+// Codex R4 (Low): three redirects are allowed, a fourth is not, and every
+// hop is checked for an https -> http downgrade; oversized validators are
+// not stored.
+func TestJVNDBCheckRedirectHops(t *testing.T) {
+	mk := func(u string) *http.Request { r, _ := http.NewRequest("GET", u, nil); return r }
+	if err := jvndbCheckRedirect(mk("https://a/4"), []*http.Request{mk("https://a/0"), mk("https://a/1"), mk("https://a/2")}); err != nil {
+		t.Errorf("the third redirect must be followed: %v", err)
+	}
+	if err := jvndbCheckRedirect(mk("https://a/5"), []*http.Request{mk("https://a/0"), mk("https://a/1"), mk("https://a/2"), mk("https://a/3")}); err == nil {
+		t.Error("a fourth redirect must be refused")
+	}
+	if err := jvndbCheckRedirect(mk("http://a/x"), []*http.Request{mk("http://a/0"), mk("https://a/1")}); err == nil {
+		t.Error("http -> https -> http must be refused at the downgrading hop")
+	}
+}
+
+func TestJVNDBSync_OversizedValidatorsNotStored(t *testing.T) {
+	doc := readJVNDBFixture(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"`+strings.Repeat("e", 4096)+`"`)
+		w.Header().Set("Last-Modified", "not a date")
+		_, _ = w.Write(doc)
+	}))
+	defer srv.Close()
+	store := newFakeJVNDBStore()
+	if _, err := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 0).Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fin := store.finished["recent"]; fin.ETag != "" || fin.LastModified != "" {
+		t.Fatalf("validators stored: etag %d bytes, last-modified %q", len(fin.ETag), fin.LastModified)
+	}
+}
+
 // Codex R1 (Low): a failed state write is reported, not swallowed.
 func TestJVNDBSync_FinishFailureIsReported(t *testing.T) {
 	doc := readJVNDBFixture(t)
@@ -892,7 +973,7 @@ func TestJVNDBCheckRedirect(t *testing.T) {
 	if err := jvndbCheckRedirect(mk("http://a/x"), []*http.Request{mk("https://a/y")}); err == nil {
 		t.Error("https -> http redirect must be refused")
 	}
-	if err := jvndbCheckRedirect(mk("https://a/x"), []*http.Request{mk("https://a/1"), mk("https://a/2"), mk("https://a/3")}); err == nil {
+	if err := jvndbCheckRedirect(mk("https://a/x"), []*http.Request{mk("https://a/0"), mk("https://a/1"), mk("https://a/2"), mk("https://a/3")}); err == nil {
 		t.Error("a 4th redirect must be refused")
 	}
 	if err := jvndbCheckRedirect(mk("https://b/x"), []*http.Request{mk("https://a/1")}); err != nil {

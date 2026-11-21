@@ -113,10 +113,12 @@ func (s *JVNDBRSSService) WithHTTPClient(c *http.Client) *JVNDBRSSService {
 }
 
 func jvndbCheckRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= jvndbMaxRedirects {
+	// via holds every request made so far: len(via) redirects have been
+	// followed once this one is made.
+	if len(via) > jvndbMaxRedirects {
 		return fmt.Errorf("jvndb rss: more than %d redirects", jvndbMaxRedirects)
 	}
-	if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
+	if len(via) > 0 && via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme != "https" {
 		return errors.New("jvndb rss: redirect from https to a non-https URL refused")
 	}
 	// Validators belong to the URL that issued them; Go would copy them to
@@ -314,14 +316,11 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 		(resp.Request.Header.Get("If-None-Match") != "" || resp.Request.Header.Get("If-Modified-Since") != "")
 
 	if resp.StatusCode == http.StatusNotModified && conditional && finalConditional && direct {
-		var cm *time.Time
-		if lm, err := http.ParseTime(resp.Header.Get("Last-Modified")); err == nil {
-			lm = lm.UTC()
-			cm = &lm
-		}
+		cm := s.lastModified(resp)
+		etag, lastMod := s.validators(resp)
 		finish(repository.JVNDBFeedResult{
 			Status: repository.JVNDBFeedStatusNotModified, SourceURL: feedURL, ContentModifiedAt: cm,
-			ETag: firstNonEmpty(resp.Header.Get("ETag"), prev.ETag), LastModified: firstNonEmpty(resp.Header.Get("Last-Modified"), prev.LastModified),
+			ETag: firstNonEmpty(etag, prev.ETag), LastModified: firstNonEmpty(lastMod, prev.LastModified),
 			Completed: feed != jvndbRecentFeed,
 		})
 		slog.Info("jvndb rss: feed not modified", "feed", feed)
@@ -400,10 +399,10 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 	// weekly regeneration rather than taking the read time, so a stale copy
 	// cannot close a gap early (Codex R2).
 	contentModified := s.now().UTC().Add(-jvndbYearRegeneration)
-	if lm, err := http.ParseTime(resp.Header.Get("Last-Modified")); err == nil {
-		contentModified = lm.UTC()
+	if lm := s.lastModified(resp); lm != nil {
+		contentModified = *lm
 	}
-	etag, lastMod := resp.Header.Get("ETag"), resp.Header.Get("Last-Modified")
+	etag, lastMod := s.validators(resp)
 	if !direct {
 		etag, lastMod = "", ""
 	}
@@ -419,6 +418,34 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 	slog.Info("jvndb rss: feed stored", "feed", feed, "items", out.Seen,
 		"written", out.Written, "rejected", out.Rejected, "gap", out.Gap)
 	return out, nil
+}
+
+// jvndbMaxValidatorBytes bounds a stored ETag / Last-Modified: they are
+// persisted and sent back on every later request.
+const jvndbMaxValidatorBytes = 256
+
+// lastModified is the answer's Last-Modified when it is present, parseable
+// and not in the future beyond the clock-skew allowance (Codex R4); nil
+// otherwise.
+func (s *JVNDBRSSService) lastModified(resp *http.Response) *time.Time {
+	lm, err := http.ParseTime(resp.Header.Get("Last-Modified"))
+	if err != nil || lm.After(s.now().Add(jvndbClockSkew)) {
+		return nil
+	}
+	lm = lm.UTC()
+	return &lm
+}
+
+// validators returns the ETag and Last-Modified worth storing: each only
+// when short, and Last-Modified only when it is a usable date.
+func (s *JVNDBRSSService) validators(resp *http.Response) (etag, lastMod string) {
+	if e := resp.Header.Get("ETag"); len(e) <= jvndbMaxValidatorBytes {
+		etag = e
+	}
+	if l := resp.Header.Get("Last-Modified"); len(l) <= jvndbMaxValidatorBytes && s.lastModified(resp) != nil {
+		lastMod = l
+	}
+	return etag, lastMod
 }
 
 func firstNonEmpty(a, b string) string {

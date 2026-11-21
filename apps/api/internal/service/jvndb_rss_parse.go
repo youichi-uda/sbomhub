@@ -73,9 +73,11 @@ type jvndbRSSItem struct {
 	Title      string
 	Identifier string
 	References []jvndbRSSRef // CVE references only, bounded
-	Date       string
-	Issued     string
-	Modified   string
+	// RefsOverflow: more CVE references than were kept.
+	RefsOverflow bool
+	Date         string
+	Issued       string
+	Modified     string
 }
 
 // JVNDBParseStats summarises one parsed feed.
@@ -248,8 +250,12 @@ func decodeJVNDBItem(dec *xml.Decoder, guard *jvndbTokenGuard) (jvndbRSSItem, er
 					}
 				}
 				// Twice the kept cap leaves room for duplicates and bad ids.
-				if strings.TrimSpace(ref.Source) == "CVE" && len(it.References) < 2*jvndbMaxCVEsPerItem {
-					it.References = append(it.References, ref)
+				if strings.TrimSpace(ref.Source) == "CVE" {
+					if len(it.References) < 2*jvndbMaxCVEsPerItem {
+						it.References = append(it.References, ref)
+					} else {
+						it.RefsOverflow = true
+					}
 				}
 			}
 		case xml.CharData:
@@ -288,17 +294,26 @@ func normaliseJVNDBItem(it jvndbRSSItem) (repository.JVNDBAdvisoryRecord, bool) 
 		return repository.JVNDBAdvisoryRecord{}, false
 	}
 	rec := repository.JVNDBAdvisoryRecord{ID: id, Title: title}
+	// The CVE set replaces the stored one, so it must be complete: an item
+	// with a CVE reference that cannot be read, or more than the cap, is
+	// rejected rather than stored with a partial set (Codex R4).
+	if it.RefsOverflow {
+		return repository.JVNDBAdvisoryRecord{}, false
+	}
 	seen := map[string]bool{}
 	for _, ref := range it.References {
 		if strings.TrimSpace(ref.Source) != "CVE" {
 			continue
 		}
 		cve := strings.ToUpper(strings.TrimSpace(ref.ID))
-		if !jvndbCVEPattern.MatchString(cve) || seen[cve] {
+		if !jvndbCVEPattern.MatchString(cve) {
+			return repository.JVNDBAdvisoryRecord{}, false
+		}
+		if seen[cve] {
 			continue
 		}
 		if len(rec.CVEs) >= jvndbMaxCVEsPerItem {
-			break
+			return repository.JVNDBAdvisoryRecord{}, false
 		}
 		seen[cve] = true
 		rec.CVEs = append(rec.CVEs, cve)
@@ -360,8 +375,13 @@ var jvndbTimeLayouts = []string{
 	"2006-01-02",
 }
 
+// jvndbClockSkew is how far in the future a feed date may lie and still be
+// believed (the CVE sync's allowance). A later one would block genuine
+// updates, or close a gap, until the clock catches up (Codex R4).
+const jvndbClockSkew = 24 * time.Hour
+
 // parseJVNDBTime parses a W3CDTF timestamp of the feed; nil when absent or
-// unparsable, or outside 1980..(now+2y) (a typo, not a date).
+// unparsable, before 1980, or more than jvndbClockSkew in the future.
 func parseJVNDBTime(s string) *time.Time {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -372,7 +392,7 @@ func parseJVNDBTime(s string) *time.Time {
 		if err != nil {
 			continue
 		}
-		if t.Year() < 1980 || t.After(time.Now().AddDate(2, 0, 0)) {
+		if t.Year() < 1980 || t.After(time.Now().Add(jvndbClockSkew)) {
 			return nil
 		}
 		t = t.UTC()
