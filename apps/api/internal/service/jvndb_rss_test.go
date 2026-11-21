@@ -124,6 +124,7 @@ func TestParseJVNDBRSS_StrictDocument(t *testing.T) {
 		"html":            `<html><body>maintenance</body></html>`,
 		"trailing root":   jvndbDocHead + `</rdf:RDF><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF>`,
 		"broken item":     jvndbDocHead + `<item><title>x</item></rdf:RDF>`,
+		"no channel":      `<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/" xmlns:sec="http://jvn.jp/rss/mod_sec/"><item><title>t</title><sec:identifier>JVNDB-2026-000001</sec:identifier></item></rdf:RDF>`,
 		"undefined ent":   jvndbDocHead + `<item><title>&foo;</title></item></rdf:RDF>`,
 		"trailing text":   jvndbDocHead + `</rdf:RDF>junk`,
 		"pi inside":       jvndbDocHead + `<?evil x?></rdf:RDF>`,
@@ -136,6 +137,49 @@ func TestParseJVNDBRSS_StrictDocument(t *testing.T) {
 				t.Fatalf("err = %v, want ErrJVNDBFeedMalformed", err)
 			}
 		})
+	}
+}
+
+// Codex R1 (Medium): a document without the RSS channel, or one whose every
+// item is rejected, is not a feed.
+func TestParseJVNDBRSS_NotAFeed(t *testing.T) {
+	cases := map[string]string{
+		"empty root":   `<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/>`,
+		"all rejected": jvndbDocHead + jvndbItem("bad", "t", "", "2026-11-02T10:00+09:00") + jvndbItem("JVNDB-1", "t", "", "") + `</rdf:RDF>`,
+	}
+	for name, doc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := parseAll(t, []byte(doc))
+			if !errors.Is(err, ErrJVNDBFeedMalformed) {
+				t.Fatalf("err = %v, want ErrJVNDBFeedMalformed", err)
+			}
+		})
+	}
+	// A channel with no item is a valid (empty) feed: some early year feeds are.
+	if _, st, err := parseAll(t, []byte(jvndbDocHead+`</rdf:RDF>`)); err != nil || st.Items != 0 {
+		t.Fatalf("empty channel: %+v %v", st, err)
+	}
+}
+
+// Codex R1 (Medium): an item's title and references are bounded while they
+// are read, not after.
+func TestParseJVNDBRSS_ItemBounds(t *testing.T) {
+	var refs strings.Builder
+	for i := 0; i < jvndbMaxCVEsPerItem+50; i++ {
+		fmt.Fprintf(&refs, `<sec:references source="CVE" id="CVE-2026-%06d"/>`, i)
+	}
+	doc := jvndbDocHead + jvndbItem("JVNDB-2026-000001", strings.Repeat("あ", 5000), refs.String(), "2026-11-02T10:00+09:00") + `</rdf:RDF>`
+	got, _, err := parseAll(t, []byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got[0].CVEs) != jvndbMaxCVEsPerItem || len([]rune(got[0].Title)) != jvndbMaxTitleRunes {
+		t.Fatalf("cves=%d title=%d", len(got[0].CVEs), len([]rune(got[0].Title)))
+	}
+	// An item over the per-item byte budget fails the feed.
+	huge := jvndbDocHead + jvndbItem("JVNDB-2026-000002", strings.Repeat("x", jvndbMaxItemBytes+10), "", "2026-11-02T10:00+09:00") + `</rdf:RDF>`
+	if _, _, err := parseAll(t, []byte(huge)); !errors.Is(err, ErrJVNDBFeedMalformed) {
+		t.Fatalf("err = %v, want ErrJVNDBFeedMalformed for an oversized item", err)
 	}
 }
 
@@ -163,15 +207,14 @@ func TestCleanJVNDBTitle_Cap(t *testing.T) {
 type fakeJVNDBStore struct {
 	mu        sync.Mutex
 	states    map[string]*repository.JVNDBFeedState
-	attempted map[string]time.Time
 	finished  map[string]repository.JVNDBFeedResult
 	upserted  []repository.JVNDBAdvisoryRecord
-	resets    int
 	upsertErr error
+	finishErr error
 }
 
 func newFakeJVNDBStore() *fakeJVNDBStore {
-	return &fakeJVNDBStore{states: map[string]*repository.JVNDBFeedState{}, attempted: map[string]time.Time{}, finished: map[string]repository.JVNDBFeedResult{}}
+	return &fakeJVNDBStore{states: map[string]*repository.JVNDBFeedState{}, finished: map[string]repository.JVNDBFeedResult{}}
 }
 
 func (f *fakeJVNDBStore) ClaimFeed(_ context.Context, feed string, minGap time.Duration) (*repository.JVNDBFeedState, bool, error) {
@@ -195,6 +238,9 @@ func (f *fakeJVNDBStore) ClaimFeed(_ context.Context, feed string, minGap time.D
 func (f *fakeJVNDBStore) FinishFeed(_ context.Context, feed string, res repository.JVNDBFeedResult) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.finishErr != nil {
+		return f.finishErr
+	}
 	st := f.states[feed]
 	st.LastStatus = res.Status
 	f.finished[feed] = res
@@ -203,6 +249,12 @@ func (f *fakeJVNDBStore) FinishFeed(_ context.Context, feed string, res reposito
 		now := time.Now()
 		st.LastSuccessAt = &now
 		st.Completed = st.Completed || res.Completed
+		if res.ContentModifiedAt != nil {
+			st.ContentModifiedAt = res.ContentModifiedAt
+		}
+		if res.GapUntil != nil && (st.GapUntil == nil || res.GapUntil.After(*st.GapUntil)) {
+			st.GapUntil = res.GapUntil
+		}
 	}
 	return nil
 }
@@ -217,19 +269,6 @@ func (f *fakeJVNDBStore) FeedStates(context.Context) (map[string]repository.JVND
 	return out, nil
 }
 
-func (f *fakeJVNDBStore) ResetBackfill(context.Context) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.resets++
-	for k, v := range f.states {
-		if strings.HasPrefix(k, "year:") {
-			v.Completed = false
-			v.ETag, v.LastModified = "", ""
-		}
-	}
-	return nil
-}
-
 func (f *fakeJVNDBStore) UpsertAdvisories(_ context.Context, recs []repository.JVNDBAdvisoryRecord) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -238,6 +277,13 @@ func (f *fakeJVNDBStore) UpsertAdvisories(_ context.Context, recs []repository.J
 	}
 	f.upserted = append(f.upserted, recs...)
 	return len(recs), nil
+}
+
+func ageAllAttempts(store *fakeJVNDBStore) {
+	past := time.Now().Add(-2 * time.Hour)
+	for _, st := range store.states {
+		st.LastAttemptAt = &past
+	}
 }
 
 func TestJVNDBSync_OfflineMakesNoRequest(t *testing.T) {
@@ -422,21 +468,84 @@ func TestJVNDBSync_BackfillOneYearPerRunNewestFirst(t *testing.T) {
 	}
 }
 
-func TestJVNDBSync_GapResetsBackfill(t *testing.T) {
-	doc := readJVNDBFixture(t) // oldest modified 2026-11-18T08:24Z
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(doc) }))
+// Codex R1 (Medium): a gap keeps a year feed pending until a version of it
+// generated after the gap has been read -- the weekly regeneration -- and
+// the pending state is durable (it does not depend on the backfill setting at
+// the time the gap was seen).
+func TestJVNDBSync_GapKeepsYearPendingUntilRegenerated(t *testing.T) {
+	doc := readJVNDBFixture(t)                // oldest modified 2026-11-18T08:24Z
+	yearLM := "Sun, 15 Nov 2026 00:02:09 GMT" // generated before the gap
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path+"|"+r.Header.Get("If-None-Match"))
+		lm := yearLM
+		mu.Unlock()
+		if strings.HasPrefix(r.URL.Path, "/years/") {
+			etag := `"` + lm + `"`
+			if r.Header.Get("If-None-Match") == etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", etag)
+			w.Header().Set("Last-Modified", lm)
+		}
+		_, _ = w.Write(doc)
+	}))
 	defer srv.Close()
+
 	store := newFakeJVNDBStore()
 	lastOK := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC) // long before the feed's window
+	cm := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
 	store.states["recent"] = &repository.JVNDBFeedState{Feed: "recent", LastStatus: "success", LastSuccessAt: &lastOK}
-	store.states["year:2026"] = &repository.JVNDBFeedState{Feed: "year:2026", LastStatus: "success", Completed: true, LastSuccessAt: &lastOK}
-	svc := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 2026)
-	res, err := svc.Sync(context.Background())
+	store.states["year:2026"] = &repository.JVNDBFeedState{Feed: "year:2026", LastStatus: "success", Completed: true,
+		SourceURL: srv.URL + "/years/jvndb_2026.rdf", LastSuccessAt: &lastOK, ContentModifiedAt: &cm}
+
+	// The gap is seen while the backfill is OFF: it is still recorded.
+	res, err := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 0).Sync(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Feeds[0].Gap || store.resets != 1 || !store.finished["recent"].GapDetected {
-		t.Fatalf("gap not detected/handled: feeds=%+v resets=%d", res.Feeds, store.resets)
+	if !res.Feeds[0].Gap || store.states["recent"].GapUntil == nil {
+		t.Fatalf("gap not recorded: feeds=%+v state=%+v", res.Feeds, store.states["recent"])
+	}
+
+	// Backfill switched on later: the completed 2026 feed is read again.
+	svc := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 2026)
+	svc.now = func() time.Time { return time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC) }
+	ageAllAttempts(store)
+	if _, err := svc.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(paths, "/years/jvndb_2026.rdf") {
+		t.Fatalf("year feed not re-read after the gap: %v", paths)
+	}
+	// It was generated before the gap ended, so it stays pending: the next
+	// interval asks again (conditional, answered 304).
+	ageAllAttempts(store)
+	n := len(paths)
+	if _, err := svc.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(paths[n:], "/years/jvndb_2026.rdf") {
+		t.Fatalf("stale year feed no longer pending: %v", paths[n:])
+	}
+	// After the weekly regeneration it is read in full and the gap is closed.
+	mu.Lock()
+	yearLM = "Sun, 22 Nov 2026 00:02:09 GMT"
+	mu.Unlock()
+	ageAllAttempts(store)
+	if _, err := svc.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ageAllAttempts(store)
+	n = len(paths)
+	if _, err := svc.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if containsPath(paths[n:], "/years/jvndb_2026.rdf") {
+		t.Fatalf("year feed still pending after a post-gap version was read: %v", paths[n:])
 	}
 
 	// No gap when the previous success is inside the window.
@@ -446,6 +555,111 @@ func TestJVNDBSync_GapResetsBackfill(t *testing.T) {
 	res, err = NewJVNDBRSSService(store2, srv.URL, false, time.Hour, 0).Sync(context.Background())
 	if err != nil || res.Feeds[0].Gap {
 		t.Fatalf("unexpected gap: %+v %v", res.Feeds, err)
+	}
+}
+
+func containsPath(paths []string, p string) bool {
+	for _, x := range paths {
+		if strings.HasPrefix(x, p+"|") {
+			return true
+		}
+	}
+	return false
+}
+
+// Codex R1 (Medium): a year read from another source is not complete for
+// the configured one.
+func TestJVNDBSync_YearFromAnotherSourceIsReRead(t *testing.T) {
+	doc := readJVNDBFixture(t)
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		_, _ = w.Write(doc)
+	}))
+	defer srv.Close()
+	store := newFakeJVNDBStore()
+	ok := time.Now().Add(-48 * time.Hour)
+	store.states["year:2026"] = &repository.JVNDBFeedState{Feed: "year:2026", LastStatus: "success", Completed: true,
+		SourceURL: "https://old-mirror.example/rss/years/jvndb_2026.rdf", LastSuccessAt: &ok, LastAttemptAt: &ok, ContentModifiedAt: &ok}
+	svc := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 2026)
+	svc.now = func() time.Time { return time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC) }
+	if _, err := svc.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(paths) != "[/jvndb.rdf /years/jvndb_2026.rdf]" {
+		t.Fatalf("paths = %v", paths)
+	}
+}
+
+// Codex R1 (Medium): pending years are taken least recently attempted first,
+// so a year waiting for its weekly regeneration does not starve the others.
+func TestJVNDBSync_PendingYearsRoundRobin(t *testing.T) {
+	doc := readJVNDBFixture(t)
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/years/jvndb_2026.rdf" {
+			w.WriteHeader(http.StatusServiceUnavailable) // keeps failing
+			return
+		}
+		_, _ = w.Write(doc)
+	}))
+	defer srv.Close()
+	store := newFakeJVNDBStore()
+	svc := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 2025)
+	svc.now = func() time.Time { return time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC) }
+	_, _ = svc.Sync(context.Background())
+	ageAllAttempts(store)
+	_, _ = svc.Sync(context.Background())
+	if fmt.Sprint(paths) != "[/jvndb.rdf /years/jvndb_2026.rdf /jvndb.rdf /years/jvndb_2025.rdf]" {
+		t.Fatalf("paths = %v (a failing year must not starve the next one)", paths)
+	}
+}
+
+// Codex R1 (Medium): validators are kept only for an answer that came from
+// the requested URL, and a 304 is accepted only for a conditional request.
+func TestJVNDBSync_RedirectAndUnsolicited304(t *testing.T) {
+	doc := readJVNDBFixture(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/moved/jvndb.rdf", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"moved"`)
+		_, _ = w.Write(doc)
+	})
+	mux.HandleFunc("/jvndb.rdf", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/moved/jvndb.rdf", http.StatusFound)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	store := newFakeJVNDBStore()
+	if _, err := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 0).Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fin := store.finished["recent"]; fin.Status != "success" || fin.ETag != "" || fin.LastModified != "" {
+		t.Fatalf("validators of a redirected answer were kept: %+v", fin)
+	}
+
+	srv304 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv304.Close()
+	store = newFakeJVNDBStore()
+	if _, err := NewJVNDBRSSService(store, srv304.URL, false, time.Hour, 0).Sync(context.Background()); err == nil {
+		t.Fatal("a 304 to an unconditional request must fail")
+	}
+	if fin := store.finished["recent"]; fin.Status != "failed" {
+		t.Fatalf("finish = %+v", fin)
+	}
+}
+
+// Codex R1 (Low): a failed state write is reported, not swallowed.
+func TestJVNDBSync_FinishFailureIsReported(t *testing.T) {
+	doc := readJVNDBFixture(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(doc) }))
+	defer srv.Close()
+	store := newFakeJVNDBStore()
+	store.finishErr = errors.New("db down")
+	if _, err := NewJVNDBRSSService(store, srv.URL, false, time.Hour, 0).Sync(context.Background()); err == nil {
+		t.Fatal("a failed feed-state write must make the sync fail")
 	}
 }
 

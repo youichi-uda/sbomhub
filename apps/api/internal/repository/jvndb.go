@@ -39,6 +39,12 @@ type JVNDBFeedState struct {
 	LastSuccessAt *time.Time
 	LastStatus    string
 	Completed     bool
+	// ContentModifiedAt is when the content last read was generated (the
+	// Last-Modified of the answer, else the time it was read).
+	ContentModifiedAt *time.Time
+	// GapUntil (recent feed only) is the end of the newest window the recent
+	// feed could not cover; year feeds generated before it are re-read.
+	GapUntil *time.Time
 }
 
 // JVNDBFeedResult is what one sync attempt of a feed records.
@@ -52,7 +58,11 @@ type JVNDBFeedResult struct {
 	ItemsWritten  int
 	ItemsRejected int
 	Completed     bool
-	GapDetected   bool
+	// ContentModifiedAt / GapUntil: see JVNDBFeedState. Stored only on
+	// success / not_modified; nil keeps the stored value. GapUntil only ever
+	// moves forward.
+	ContentModifiedAt *time.Time
+	GapUntil          *time.Time
 }
 
 // Feed status values (jvndb_feed_state.last_status CHECK).
@@ -94,7 +104,8 @@ func (r *JVNDBRepository) ClaimFeed(ctx context.Context, feed string, minGap tim
 	// the previous attempt's facts.
 	const q = `
 		WITH prev AS (
-			SELECT feed, source_url, etag, last_modified, last_attempt_at, last_success_at, last_status, completed
+			SELECT feed, source_url, etag, last_modified, last_attempt_at, last_success_at, last_status, completed,
+			       content_modified_at, gap_until
 			FROM jvndb_feed_state WHERE feed = $1 FOR UPDATE
 		)
 		UPDATE jvndb_feed_state s
@@ -103,10 +114,12 @@ func (r *JVNDBRepository) ClaimFeed(ctx context.Context, feed string, minGap tim
 		WHERE s.feed = prev.feed
 		  AND (prev.last_attempt_at IS NULL OR prev.last_attempt_at <= NOW() - make_interval(secs => $2))
 		RETURNING COALESCE(prev.feed, ''), COALESCE(prev.source_url, ''), COALESCE(prev.etag, ''), COALESCE(prev.last_modified, ''),
-		          prev.last_attempt_at, prev.last_success_at, COALESCE(prev.last_status, ''), COALESCE(prev.completed, false)`
+		          prev.last_attempt_at, prev.last_success_at, COALESCE(prev.last_status, ''), COALESCE(prev.completed, false),
+		          prev.content_modified_at, prev.gap_until`
 	var st JVNDBFeedState
 	err := r.db.QueryRowContext(ctx, q, feed, minGap.Seconds()).Scan(
-		&st.Feed, &st.SourceURL, &st.ETag, &st.LastModified, &st.LastAttemptAt, &st.LastSuccessAt, &st.LastStatus, &st.Completed)
+		&st.Feed, &st.SourceURL, &st.ETag, &st.LastModified, &st.LastAttemptAt, &st.LastSuccessAt, &st.LastStatus, &st.Completed,
+		&st.ContentModifiedAt, &st.GapUntil)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -133,11 +146,15 @@ func (r *JVNDBRepository) FinishFeed(ctx context.Context, feed string, res JVNDB
 			items_written   = $8,
 			items_rejected  = $9,
 			completed       = CASE WHEN $4 THEN (completed OR $10) ELSE completed END,
-			gap_detected_at = CASE WHEN $11 THEN NOW() ELSE gap_detected_at END
+			content_modified_at = CASE WHEN $4 AND $13::timestamptz IS NOT NULL THEN $13::timestamptz ELSE content_modified_at END,
+			gap_detected_at = CASE WHEN $4 AND $11::timestamptz IS NOT NULL THEN NOW() ELSE gap_detected_at END,
+			gap_until       = CASE WHEN $4 AND $11::timestamptz IS NOT NULL
+			                       THEN GREATEST(COALESCE(gap_until, $11::timestamptz), $11::timestamptz)
+			                       ELSE gap_until END
 		WHERE feed = $1`
 	if _, err := r.db.ExecContext(ctx, q, feed, res.Status, res.ErrorMessage, ok,
 		res.ETag, res.LastModified, res.ItemsSeen, res.ItemsWritten, res.ItemsRejected,
-		res.Completed, res.GapDetected, res.SourceURL); err != nil {
+		res.Completed, res.GapUntil, res.SourceURL, res.ContentModifiedAt); err != nil {
 		return fmt.Errorf("jvndb: finish feed: %w", err)
 	}
 	return nil
@@ -147,7 +164,8 @@ func (r *JVNDBRepository) FinishFeed(ctx context.Context, feed string, res JVNDB
 func (r *JVNDBRepository) FeedStates(ctx context.Context) (map[string]JVNDBFeedState, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT COALESCE(feed, ''), COALESCE(source_url, ''), COALESCE(etag, ''), COALESCE(last_modified, ''),
-		       last_attempt_at, last_success_at, COALESCE(last_status, ''), COALESCE(completed, false)
+		       last_attempt_at, last_success_at, COALESCE(last_status, ''), COALESCE(completed, false),
+		       content_modified_at, gap_until
 		FROM jvndb_feed_state`)
 	if err != nil {
 		return nil, fmt.Errorf("jvndb: read feed states: %w", err)
@@ -156,7 +174,8 @@ func (r *JVNDBRepository) FeedStates(ctx context.Context) (map[string]JVNDBFeedS
 	out := map[string]JVNDBFeedState{}
 	for rows.Next() {
 		var st JVNDBFeedState
-		if err := rows.Scan(&st.Feed, &st.SourceURL, &st.ETag, &st.LastModified, &st.LastAttemptAt, &st.LastSuccessAt, &st.LastStatus, &st.Completed); err != nil {
+		if err := rows.Scan(&st.Feed, &st.SourceURL, &st.ETag, &st.LastModified, &st.LastAttemptAt, &st.LastSuccessAt, &st.LastStatus, &st.Completed,
+			&st.ContentModifiedAt, &st.GapUntil); err != nil {
 			return nil, fmt.Errorf("jvndb: read feed states: %w", err)
 		}
 		out[st.Feed] = st
@@ -165,18 +184,6 @@ func (r *JVNDBRepository) FeedStates(ctx context.Context) (map[string]JVNDBFeedS
 		return nil, fmt.Errorf("jvndb: read feed states: %w", err)
 	}
 	return out, nil
-}
-
-// ResetBackfill marks every year feed as not completed and drops its
-// validators, so the backfill re-reads them (one per sync run). Used when the
-// recent feed shows a gap the sync could not have seen.
-func (r *JVNDBRepository) ResetBackfill(ctx context.Context) error {
-	if _, err := r.db.ExecContext(ctx, `
-		UPDATE jvndb_feed_state SET completed = false, etag = NULL, last_modified = NULL, source_url = NULL
-		WHERE feed LIKE 'year:%'`); err != nil {
-		return fmt.Errorf("jvndb: reset backfill: %w", err)
-	}
-	return nil
 }
 
 // UpsertAdvisories writes one batch in a single transaction and returns how
@@ -270,13 +277,21 @@ func AttachJVNDB(ctx context.Context, q database.Queryable, vulns []model.Vulner
 	if len(keys) == 0 {
 		return nil
 	}
+	// The per-CVE cap is applied in SQL so a CVE referenced by many
+	// advisories costs at most maxJVNDBPerCVE rows (Codex R1, Low).
 	rows, err := q.QueryContext(ctx, `
-		SELECT COALESCE(m.cve_id, ''), COALESCE(a.jvndb_id, ''), COALESCE(a.title, ''), a.published_at, a.modified_at
-		FROM jvndb_advisory_cves m
-		JOIN jvndb_advisories a ON a.jvndb_id = m.jvndb_id
-		WHERE m.cve_id = ANY($1::text[])
-		ORDER BY m.cve_id, a.published_at DESC NULLS LAST, a.jvndb_id DESC`,
-		pq.Array(keys))
+		SELECT COALESCE(cve_id, ''), COALESCE(jvndb_id, ''), COALESCE(title, ''), published_at, modified_at
+		FROM (
+			SELECT m.cve_id, a.jvndb_id, a.title, a.published_at, a.modified_at,
+			       ROW_NUMBER() OVER (PARTITION BY m.cve_id
+			                          ORDER BY a.published_at DESC NULLS LAST, a.jvndb_id DESC) AS rn
+			FROM jvndb_advisory_cves m
+			JOIN jvndb_advisories a ON a.jvndb_id = m.jvndb_id
+			WHERE m.cve_id = ANY($1::text[])
+		) ranked
+		WHERE rn <= $2
+		ORDER BY cve_id, rn`,
+		pq.Array(keys), maxJVNDBPerCVE)
 	if err != nil {
 		return fmt.Errorf("jvndb: read advisories: %w", err)
 	}

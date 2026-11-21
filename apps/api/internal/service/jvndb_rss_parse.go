@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -41,6 +40,13 @@ const (
 	jvndbMaxTitleRunes = 1000
 	// jvndbMaxCVEsPerItem bounds the CVE references kept for one advisory.
 	jvndbMaxCVEsPerItem = 500
+	// jvndbMaxItemBytes bounds one <item> in the document. Real items are
+	// 1-9 KB (the recent feed, 2026-11-21); an item beyond this fails the
+	// feed rather than being materialised.
+	jvndbMaxItemBytes = 1 << 20
+	// jvndbMaxFieldBytes bounds the text kept from one item field (the title
+	// cap is 1000 runes, at most 4 bytes each).
+	jvndbMaxFieldBytes = 4 * jvndbMaxTitleRunes
 )
 
 var jvndbCVEPattern = regexp.MustCompile(`^CVE-[0-9]{4}-[0-9]{4,19}$`)
@@ -52,17 +58,17 @@ var jvndbCVEPattern = regexp.MustCompile(`^CVE-[0-9]{4}-[0-9]{4,19}$`)
 var ErrJVNDBFeedMalformed = errors.New("jvndb rss: malformed feed")
 
 type jvndbRSSRef struct {
-	Source string `xml:"source,attr"`
-	ID     string `xml:"id,attr"`
+	Source string
+	ID     string
 }
 
 type jvndbRSSItem struct {
-	Title      string        `xml:"http://purl.org/rss/1.0/ title"`
-	Identifier string        `xml:"http://jvn.jp/rss/mod_sec/ identifier"`
-	References []jvndbRSSRef `xml:"http://jvn.jp/rss/mod_sec/ references"`
-	Date       string        `xml:"http://purl.org/dc/elements/1.1/ date"`
-	Issued     string        `xml:"http://purl.org/dc/terms/ issued"`
-	Modified   string        `xml:"http://purl.org/dc/terms/ modified"`
+	Title      string
+	Identifier string
+	References []jvndbRSSRef // CVE references only, bounded
+	Date       string
+	Issued     string
+	Modified   string
 }
 
 // JVNDBParseStats summarises one parsed feed.
@@ -95,6 +101,7 @@ func ParseJVNDBRSS(r io.Reader, fn func(repository.JVNDBAdvisoryRecord) error) (
 
 	sawRoot := false
 	rootClosed := false
+	sawChannel := false
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
@@ -133,8 +140,8 @@ func ParseJVNDBRSS(r io.Reader, fn func(repository.JVNDBAdvisoryRecord) error) (
 				if st.Items > jvndbMaxItemsPerFeed {
 					return malformed("more than %d items", jvndbMaxItemsPerFeed)
 				}
-				var it jvndbRSSItem
-				if err := dec.DecodeElement(&it, &t); err != nil {
+				it, err := decodeJVNDBItem(dec)
+				if err != nil {
 					return malformed("item %d: %v", st.Items, err)
 				}
 				rec, ok := normaliseJVNDBItem(it)
@@ -152,6 +159,9 @@ func ParseJVNDBRSS(r io.Reader, fn func(repository.JVNDBAdvisoryRecord) error) (
 				}
 				continue
 			}
+			if t.Name.Space == nsRSS10 && t.Name.Local == "channel" {
+				sawChannel = true
+			}
 			if err := dec.Skip(); err != nil {
 				return malformed("xml: %v", err)
 			}
@@ -166,7 +176,90 @@ func ParseJVNDBRSS(r io.Reader, fn func(repository.JVNDBAdvisoryRecord) error) (
 	if !rootClosed {
 		return malformed("root element not closed")
 	}
+	// Codex R1: an RDF document without the RSS channel, or one whose every
+	// item was rejected, is not a JVNDB feed (an error page, a schema change)
+	// and must not be recorded as a complete read.
+	if !sawChannel {
+		return malformed("no rss channel")
+	}
+	if st.Items > 0 && st.Accepted == 0 {
+		return malformed("all %d items rejected", st.Items)
+	}
 	return st, nil
+}
+
+// decodeJVNDBItem reads one <item> (its start element already consumed)
+// token by token, keeping only the fields used, each bounded, and failing
+// when the item exceeds jvndbMaxItemBytes of input.
+func decodeJVNDBItem(dec *xml.Decoder) (jvndbRSSItem, error) {
+	var it jvndbRSSItem
+	start := dec.InputOffset()
+	depth := 1
+	var field *string
+	var buf strings.Builder
+	for {
+		if dec.InputOffset()-start > jvndbMaxItemBytes {
+			return it, fmt.Errorf("item larger than %d bytes", jvndbMaxItemBytes)
+		}
+		tok, err := dec.Token()
+		if err != nil {
+			return it, err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			depth++
+			field = nil
+			if depth != 2 {
+				continue
+			}
+			buf.Reset()
+			switch {
+			case t.Name.Space == nsRSS10 && t.Name.Local == "title":
+				field = &it.Title
+			case t.Name.Space == nsJVNSec && t.Name.Local == "identifier":
+				field = &it.Identifier
+			case t.Name.Space == nsDC && t.Name.Local == "date":
+				field = &it.Date
+			case t.Name.Space == nsDCTerm && t.Name.Local == "issued":
+				field = &it.Issued
+			case t.Name.Space == nsDCTerm && t.Name.Local == "modified":
+				field = &it.Modified
+			case t.Name.Space == nsJVNSec && t.Name.Local == "references":
+				var ref jvndbRSSRef
+				for _, a := range t.Attr {
+					switch a.Name.Local {
+					case "source":
+						ref.Source = a.Value
+					case "id":
+						ref.ID = a.Value
+					}
+				}
+				// Twice the kept cap leaves room for duplicates and bad ids.
+				if strings.TrimSpace(ref.Source) == "CVE" && len(it.References) < 2*jvndbMaxCVEsPerItem {
+					it.References = append(it.References, ref)
+				}
+			}
+		case xml.CharData:
+			if field != nil && depth == 2 {
+				room := jvndbMaxFieldBytes - buf.Len()
+				if room > 0 {
+					if len(t) > room {
+						t = t[:room]
+					}
+					buf.Write(t)
+				}
+			}
+		case xml.EndElement:
+			if depth == 2 && field != nil {
+				*field = buf.String()
+				field = nil
+			}
+			depth--
+			if depth == 0 {
+				return it, nil
+			}
+		}
+	}
 }
 
 // normaliseJVNDBItem validates one item. It returns false when the item has
@@ -211,9 +304,8 @@ func normaliseJVNDBItem(it jvndbRSSItem) (repository.JVNDBAdvisoryRecord, bool) 
 // cleanJVNDBTitle collapses whitespace, drops control and format characters
 // (bidi overrides among them) and caps the length.
 func cleanJVNDBTitle(s string) string {
-	if !utf8.ValidString(s) {
-		return ""
-	}
+	// A field cut at jvndbMaxFieldBytes may end inside a character.
+	s = strings.ToValidUTF8(s, "")
 	var b strings.Builder
 	space := false
 	n := 0

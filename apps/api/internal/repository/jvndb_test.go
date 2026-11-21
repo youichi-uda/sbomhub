@@ -30,7 +30,7 @@ func TestJVNDBEnrichment_AttachesByCVE(t *testing.T) {
 			AddRow(uuid.New(), "CVE-2020-0001", "d", "LOW", 2.0, "3.1", nil, nil, "NVD", false, nil, nil, nil, now, now, "nvd_cpe", nil))
 	pub := time.Date(2026, 11, 19, 7, 12, 0, 0, time.UTC)
 	mock.ExpectQuery(`FROM jvndb_advisory_cves m`).
-		WithArgs(sqlmock.AnyArg()).
+		WithArgs(sqlmock.AnyArg(), maxJVNDBPerCVE).
 		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "jvndb_id", "title", "published_at", "modified_at"}).
 			AddRow("CVE-2025-46267", "JVNDB-2025-009576", "複数の脆弱性", pub, pub).
 			AddRow("CVE-2026-114938", "JVNDB-2026-044393", "OpenJDKにおけるヒープベースのバッファオーバーフローの脆弱性", pub, nil))

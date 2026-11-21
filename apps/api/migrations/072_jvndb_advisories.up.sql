@@ -30,7 +30,12 @@
 --                         conditional-GET validators and the URL they belong
 --                         to (sent only to that URL), when it was last tried
 --                         and last succeeded, and whether a year feed's
---                         backfill finished. The claim on last_attempt_at is
+--                         backfill finished, when the content read was
+--                         generated (content_modified_at, from Last-Modified),
+--                         and -- on 'recent' -- the end of the newest gap the
+--                         recent feed could not cover (gap_until): a year feed
+--                         generated before it is read again. The claim on
+--                         last_attempt_at is
 --                         what keeps several API replicas from fetching the
 --                         same feed in the same interval.
 --
@@ -81,7 +86,9 @@ CREATE TABLE IF NOT EXISTS jvndb_feed_state (
     items_written     INTEGER NOT NULL DEFAULT 0,
     items_rejected    INTEGER NOT NULL DEFAULT 0,
     completed         BOOLEAN NOT NULL DEFAULT false,
-    gap_detected_at   TIMESTAMP WITH TIME ZONE
+    content_modified_at TIMESTAMP WITH TIME ZONE,
+    gap_detected_at   TIMESTAMP WITH TIME ZONE,
+    gap_until         TIMESTAMP WITH TIME ZONE
 );
 
 COMMENT ON TABLE jvndb_feed_state IS

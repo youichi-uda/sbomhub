@@ -1000,6 +1000,10 @@
         "nullable": false,
         "type": "boolean"
       },
+      "content_modified_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
       "etag": {
         "nullable": true,
         "type": "text"
@@ -1009,6 +1013,10 @@
         "type": "character varying(32)"
       },
       "gap_detected_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "gap_until": {
         "nullable": true,
         "type": "timestamp with time zone"
       },

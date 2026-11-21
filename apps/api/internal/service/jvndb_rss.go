@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -46,8 +47,8 @@ const (
 
 	jvndbRecentFeed    = "recent"
 	jvndbUserAgent     = "SBOMHub/1.0 (JVNDB RSS sync)"
-	jvndbRecentMaxBody = 32 << 20  // 32 MiB; the feed is ~1.2 MB
-	jvndbYearMaxBody   = 384 << 20 // 384 MiB; the largest year feed is ~99 MB
+	jvndbRecentMaxBody = 8 << 20   // 8 MiB; the feed is ~1.2 MB
+	jvndbYearMaxBody   = 192 << 20 // 192 MiB; the largest year feed is ~99 MB (2026-11-21)
 	jvndbRecentTimeout = 2 * time.Minute
 	jvndbYearTimeout   = 20 * time.Minute
 	jvndbBatchSize     = 500
@@ -61,7 +62,6 @@ type jvndbStore interface {
 	ClaimFeed(ctx context.Context, feed string, minGap time.Duration) (*repository.JVNDBFeedState, bool, error)
 	FinishFeed(ctx context.Context, feed string, res repository.JVNDBFeedResult) error
 	FeedStates(ctx context.Context) (map[string]repository.JVNDBFeedState, error)
-	ResetBackfill(ctx context.Context) error
 	UpsertAdvisories(ctx context.Context, recs []repository.JVNDBAdvisoryRecord) (int, error)
 }
 
@@ -154,36 +154,79 @@ func (s *JVNDBRSSService) Sync(ctx context.Context) (*JVNDBSyncResult, error) {
 	}
 
 	if s.backfillFrom > 0 && ctx.Err() == nil {
-		year, ok, err := s.nextBackfillYear(ctx)
+		years, err := s.backfillCandidates(ctx)
 		if err != nil {
 			errs = append(errs, err)
-		} else if ok {
-			feed := "year:" + strconv.Itoa(year)
-			u := fmt.Sprintf("%s/years/jvndb_%d.rdf", s.baseURL, year)
-			out, err := s.syncFeed(ctx, feed, u, s.yearMaxBody, jvndbYearTimeout)
+		}
+		// At most one year feed per round: the first pending year this
+		// replica can claim (another replica may hold a claim on one).
+		for _, year := range years {
+			out, err := s.syncFeed(ctx, "year:"+strconv.Itoa(year), s.yearURL(year), s.yearMaxBody, jvndbYearTimeout)
+			if out.Status == "skipped" && err == nil {
+				continue
+			}
 			res.Feeds = append(res.Feeds, out)
 			if err != nil {
 				errs = append(errs, err)
 			}
+			break
 		}
 	}
 	return res, errors.Join(errs...)
 }
 
-// nextBackfillYear picks the newest configured year whose feed has not been
-// read completely.
-func (s *JVNDBRSSService) nextBackfillYear(ctx context.Context) (int, bool, error) {
+func (s *JVNDBRSSService) yearURL(year int) string {
+	return fmt.Sprintf("%s/years/jvndb_%d.rdf", s.baseURL, year)
+}
+
+// yearPending reports whether a year feed must be (re)read: never read
+// completely, read from another source URL, or generated before the end of a
+// gap the recent feed could not cover (it is then asked again, conditionally,
+// until the weekly regeneration has been read).
+func yearPending(st repository.JVNDBFeedState, ok bool, wantURL string, gapUntil *time.Time) bool {
+	if !ok || !st.Completed || st.SourceURL != wantURL {
+		return true
+	}
+	return gapUntil != nil && (st.ContentModifiedAt == nil || st.ContentModifiedAt.Before(*gapUntil))
+}
+
+// backfillCandidates lists the pending years, least recently attempted first
+// (never attempted first, then newest year first), so a year that keeps
+// failing or waits for its regeneration does not starve the others.
+func (s *JVNDBRSSService) backfillCandidates(ctx context.Context) ([]int, error) {
 	states, err := s.store.FeedStates(ctx)
 	if err != nil {
-		return 0, false, err
+		return nil, err
 	}
+	gapUntil := states[jvndbRecentFeed].GapUntil
+	type cand struct {
+		year int
+		last *time.Time
+	}
+	var cands []cand
 	for y := s.now().Year(); y >= s.backfillFrom; y-- {
 		st, ok := states["year:"+strconv.Itoa(y)]
-		if !ok || !st.Completed {
-			return y, true, nil
+		if yearPending(st, ok, s.yearURL(y), gapUntil) {
+			cands = append(cands, cand{y, st.LastAttemptAt})
 		}
 	}
-	return 0, false, nil
+	sort.SliceStable(cands, func(i, j int) bool {
+		a, b := cands[i].last, cands[j].last
+		switch {
+		case a == nil && b != nil:
+			return true
+		case a != nil && b == nil:
+			return false
+		case a == nil && b == nil:
+			return false // keep newest-first
+		}
+		return a.Before(*b)
+	})
+	years := make([]int, len(cands))
+	for i, c := range cands {
+		years[i] = c.year
+	}
+	return years, nil
 }
 
 func (s *JVNDBRSSService) minGap() time.Duration {
@@ -206,6 +249,7 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 		return out, nil
 	}
 
+	var finishErr error
 	finish := func(r repository.JVNDBFeedResult) {
 		out.Status = r.Status
 		// Detached: record the outcome even when ctx was cancelled.
@@ -213,6 +257,7 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 		defer cancel()
 		if err := s.store.FinishFeed(fctx, feed, r); err != nil {
 			slog.Error("jvndb rss: record feed state failed", "feed", feed, "error", err)
+			finishErr = fmt.Errorf("jvndb rss %s: record feed state: %w", feed, err)
 		}
 	}
 
@@ -221,19 +266,22 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, feedURL, nil)
 	if err != nil {
 		finish(repository.JVNDBFeedResult{Status: repository.JVNDBFeedStatusFailed, ErrorMessage: "JVNDB RSS request could not be built"})
-		return out, fmt.Errorf("jvndb rss %s: %w", feed, err)
+		return out, errors.Join(fmt.Errorf("jvndb rss %s: %w", feed, err), finishErr)
 	}
 	req.Header.Set("User-Agent", jvndbUserAgent)
 	req.Header.Set("Accept", "application/rdf+xml, application/xml;q=0.9, text/xml;q=0.8")
 	// Validators are stored only after a fully read feed (FinishFeed), and
 	// sent only to the URL they came from: after SBOMHUB_JVNDB_RSS_URL
 	// changes, another server's Last-Modified could earn a false 304.
+	conditional := false
 	if prev.SourceURL == feedURL {
 		if prev.ETag != "" {
 			req.Header.Set("If-None-Match", prev.ETag)
+			conditional = true
 		}
 		if prev.LastModified != "" {
 			req.Header.Set("If-Modified-Since", prev.LastModified)
+			conditional = true
 		}
 	}
 
@@ -241,23 +289,26 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 	if err != nil {
 		slog.Warn("jvndb rss: fetch failed", "feed", feed, "error", err)
 		finish(repository.JVNDBFeedResult{Status: repository.JVNDBFeedStatusFailed, ErrorMessage: "JVNDB RSS fetch failed"})
-		return out, fmt.Errorf("jvndb rss %s: fetch: %w", feed, err)
+		return out, errors.Join(fmt.Errorf("jvndb rss %s: fetch: %w", feed, err), finishErr)
 	}
 	defer resp.Body.Close()
+	// Validators are kept only for an answer from the requested URL itself:
+	// after a redirect they belong to another resource (Codex R1).
+	direct := resp.Request != nil && resp.Request.URL.String() == req.URL.String()
 
-	if resp.StatusCode == http.StatusNotModified {
+	if resp.StatusCode == http.StatusNotModified && conditional && direct {
 		finish(repository.JVNDBFeedResult{
 			Status: repository.JVNDBFeedStatusNotModified, SourceURL: feedURL,
 			ETag: firstNonEmpty(resp.Header.Get("ETag"), prev.ETag), LastModified: firstNonEmpty(resp.Header.Get("Last-Modified"), prev.LastModified),
 			Completed: feed != jvndbRecentFeed,
 		})
 		slog.Info("jvndb rss: feed not modified", "feed", feed)
-		return out, nil
+		return out, finishErr
 	}
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		finish(repository.JVNDBFeedResult{Status: repository.JVNDBFeedStatusFailed, ErrorMessage: fmt.Sprintf("JVNDB RSS answered HTTP %d", resp.StatusCode)})
-		return out, fmt.Errorf("jvndb rss %s: HTTP %d", feed, resp.StatusCode)
+		return out, errors.Join(fmt.Errorf("jvndb rss %s: HTTP %d", feed, resp.StatusCode), finishErr)
 	}
 
 	body := &jvndbLimitedReader{r: resp.Body, remaining: maxBody}
@@ -296,33 +347,41 @@ func (s *JVNDBRSSService) syncFeed(ctx context.Context, feed, feedURL string, ma
 			Status: status, ErrorMessage: "JVNDB RSS feed could not be read completely",
 			ItemsSeen: out.Seen, ItemsWritten: out.Written, ItemsRejected: out.Rejected,
 		})
-		return out, fmt.Errorf("jvndb rss %s: %w", feed, perr)
+		return out, errors.Join(fmt.Errorf("jvndb rss %s: %w", feed, perr), finishErr)
 	}
 
 	// Gap: the recent feed holds only the latest 500 items. When even its
 	// oldest item was modified after our previous success, advisories
-	// modified in between may have scrolled out unseen.
-	if feed == jvndbRecentFeed && prev != nil && prev.LastSuccessAt != nil &&
+	// modified in between may have scrolled out unseen. The end of that
+	// window is stored (gap_until) whatever the backfill setting is, and every
+	// configured year feed generated before it is read again -- now if the
+	// backfill is on, or once it is switched on.
+	var gapUntil *time.Time
+	if feed == jvndbRecentFeed && prev.LastSuccessAt != nil &&
 		stats.OldestModified != nil && stats.OldestModified.After(*prev.LastSuccessAt) {
 		out.Gap = true
-		if s.backfillFrom > 0 {
-			if err := s.store.ResetBackfill(ctx); err != nil {
-				slog.Error("jvndb rss: reset backfill failed", "error", err)
-			}
-			slog.Warn("jvndb rss: the recent feed no longer reaches back to the previous sync; re-reading the backfill years one per interval",
-				"previous_success", prev.LastSuccessAt, "oldest_item_modified", stats.OldestModified)
-		} else {
-			slog.Warn("jvndb rss: the recent feed no longer reaches back to the previous sync; advisories modified in between may be missing (set SBOMHUB_JVNDB_RSS_BACKFILL_FROM to re-read the year feeds)",
-				"previous_success", prev.LastSuccessAt, "oldest_item_modified", stats.OldestModified)
-		}
+		gapUntil = stats.OldestModified
+		slog.Warn("jvndb rss: the recent feed no longer reaches back to the previous sync; advisories modified in between may be missing until the year feeds generated after the gap are read (SBOMHUB_JVNDB_RSS_BACKFILL_FROM)",
+			"previous_success", prev.LastSuccessAt, "oldest_item_modified", stats.OldestModified, "backfill_from", s.backfillFrom)
 	}
 
+	contentModified := s.now().UTC()
+	if lm, err := http.ParseTime(resp.Header.Get("Last-Modified")); err == nil {
+		contentModified = lm.UTC()
+	}
+	etag, lastMod := resp.Header.Get("ETag"), resp.Header.Get("Last-Modified")
+	if !direct {
+		etag, lastMod = "", ""
+	}
 	finish(repository.JVNDBFeedResult{
 		Status: repository.JVNDBFeedStatusSuccess, SourceURL: feedURL,
-		ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified"),
+		ETag: etag, LastModified: lastMod,
 		ItemsSeen: out.Seen, ItemsWritten: out.Written, ItemsRejected: out.Rejected,
-		Completed: feed != jvndbRecentFeed, GapDetected: out.Gap,
+		Completed: feed != jvndbRecentFeed, ContentModifiedAt: &contentModified, GapUntil: gapUntil,
 	})
+	if finishErr != nil {
+		return out, finishErr
+	}
 	slog.Info("jvndb rss: feed stored", "feed", feed, "items", out.Seen,
 		"written", out.Written, "rejected", out.Rejected, "gap", out.Gap)
 	return out, nil

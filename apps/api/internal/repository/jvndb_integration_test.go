@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/sbomhub/sbomhub/internal/database"
+	"github.com/sbomhub/sbomhub/internal/model"
 )
 
 // jvndbTestIDs returns unique JVNDB / CVE ids for this run (the tables are a
@@ -176,13 +177,6 @@ func TestJVNDBIntegration_ClaimIsExclusiveAcrossReplicas(t *testing.T) {
 	if st := states[feed]; st.ETag != `"e1"` || !st.Completed || st.LastStatus != "failed" {
 		t.Fatalf("after failure = %+v", st)
 	}
-	if err := repo.ResetBackfill(ctx); err != nil {
-		t.Fatal(err)
-	}
-	states, _ = repo.FeedStates(ctx)
-	if st := states[feed]; st.Completed || st.ETag != "" || st.SourceURL != "" {
-		t.Fatalf("after reset = %+v", st)
-	}
 }
 
 // End-to-end through the list read, as the app role inside a tenant
@@ -249,5 +243,61 @@ func TestJVNDBIntegration_ProjectListCarriesAdvisory(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Codex R1 (Low): the per-CVE cap is applied in SQL; newest first.
+func TestJVNDBIntegration_PerCVECap(t *testing.T) {
+	appURL, migURL := rlsTestEnv(t)
+	migDB := openOrSkip(t, migURL)
+	appDB := openOrSkip(t, appURL)
+	ids, cves := jvndbTestIDs(t, migDB, 8)
+	var recs []JVNDBAdvisoryRecord
+	for i, id := range ids {
+		p := time.Date(2026, 1, 1+i, 0, 0, 0, 0, time.UTC)
+		recs = append(recs, JVNDBAdvisoryRecord{ID: id, Title: "t", CVEs: []string{cves[0]}, Published: &p, Modified: &p})
+	}
+	if _, err := NewJVNDBRepository(appDB).UpsertAdvisories(context.Background(), recs); err != nil {
+		t.Fatal(err)
+	}
+	vulns := []model.Vulnerability{{CVEID: cves[0]}}
+	if err := AttachJVNDB(context.Background(), appDB, vulns); err != nil {
+		t.Fatal(err)
+	}
+	if len(vulns[0].JVNDB) != maxJVNDBPerCVE || vulns[0].JVNDB[0].ID != ids[7] {
+		t.Fatalf("got %d advisories, first %s; want %d, newest (%s) first", len(vulns[0].JVNDB), vulns[0].JVNDB[0].ID, maxJVNDBPerCVE, ids[7])
+	}
+}
+
+func TestJVNDBIntegration_GapUntilOnlyMovesForward(t *testing.T) {
+	appURL, migURL := rlsTestEnv(t)
+	migDB := openOrSkip(t, migURL)
+	appDB := openOrSkip(t, appURL)
+	feed := fmt.Sprintf("year:%04d", 1000+uuid.New().ID()%8999)
+	t.Cleanup(func() { _, _ = migDB.Exec(`DELETE FROM jvndb_feed_state WHERE feed = $1`, feed) })
+	repo := NewJVNDBRepository(appDB)
+	ctx := context.Background()
+	if _, _, err := repo.ClaimFeed(ctx, feed, 0); err != nil {
+		t.Fatal(err)
+	}
+	late := time.Date(2026, 11, 18, 8, 24, 0, 0, time.UTC)
+	early := late.Add(-72 * time.Hour)
+	cm := time.Date(2026, 11, 15, 0, 2, 9, 0, time.UTC)
+	for _, g := range []*time.Time{&late, &early, nil} {
+		if err := repo.FinishFeed(ctx, feed, JVNDBFeedResult{Status: JVNDBFeedStatusSuccess, GapUntil: g, ContentModifiedAt: &cm}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A failed attempt changes neither.
+	if err := repo.FinishFeed(ctx, feed, JVNDBFeedResult{Status: JVNDBFeedStatusFailed, GapUntil: &early}); err != nil {
+		t.Fatal(err)
+	}
+	states, err := repo.FeedStates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := states[feed]
+	if st.GapUntil == nil || !st.GapUntil.Equal(late) || st.ContentModifiedAt == nil || !st.ContentModifiedAt.Equal(cm) {
+		t.Fatalf("state = %+v", st)
 	}
 }
