@@ -41,7 +41,9 @@ export function parseJvndbAdvisories(raw: unknown): JvndbAdvisory[] {
     if (!url || seen.has(id as string)) continue;
     if (typeof title !== "string" || title.trim() === "") continue;
     seen.add(id as string);
-    const advisory: JvndbAdvisory = { id: id as string, title: title.trim().slice(0, MAX_TITLE), url };
+    // By code point, like the API's limit, never inside a surrogate pair.
+    const capped = Array.from(title.trim()).slice(0, MAX_TITLE).join("");
+    const advisory: JvndbAdvisory = { id: id as string, title: capped, url };
     if (typeof published === "string" && !Number.isNaN(new Date(published).getTime())) {
       advisory.published = published;
     }

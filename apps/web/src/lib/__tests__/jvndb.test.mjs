@@ -55,6 +55,13 @@ describe("parseJvndbAdvisories", () => {
       { id: "JVNDB-2025-009576", title: "a", url: "https://jvndb.jvn.jp/ja/contents/2025/JVNDB-2025-009576.html" },
     ]);
   });
+  test("caps the title by code point, never inside a surrogate pair", () => {
+    const title = "𠀋".repeat(1200); // supplementary-plane kanji, 2 UTF-16 units each
+    const [a] = parseJvndbAdvisories([{ id: "JVNDB-2026-000001", title }]);
+    assert.equal(Array.from(a.title).length, 1000);
+    assert.ok(!a.title.includes("\uFFFD"));
+    assert.equal(a.title.length, 2000);
+  });
   test("caps the list at five", () => {
     const many = Array.from({ length: 8 }, (_, i) => ({ id: `JVNDB-2026-00000${i}`, title: `t${i}` }));
     assert.equal(parseJvndbAdvisories(many).length, 5);

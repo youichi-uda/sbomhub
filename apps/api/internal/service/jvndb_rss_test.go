@@ -5,12 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -935,6 +937,20 @@ func TestJVNDBSync_OversizedValidatorsNotStored(t *testing.T) {
 	}
 	if fin := store.finished["recent"]; fin.ETag != "" || fin.LastModified != "" {
 		t.Fatalf("validators stored: etag %d bytes, last-modified %q", len(fin.ETag), fin.LastModified)
+	}
+}
+
+// Codex R5 (Low): at the exact size limit a truncated transfer is still an
+// error, not a clean end of body.
+func TestJVNDBLimitedReader_BoundaryErrors(t *testing.T) {
+	r := &jvndbLimitedReader{r: io.MultiReader(strings.NewReader("abc"), iotest.ErrReader(io.ErrUnexpectedEOF)), remaining: 3}
+	b, err := io.ReadAll(r)
+	if string(b) != "abc" || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("got %q, %v; want the transport error", b, err)
+	}
+	r = &jvndbLimitedReader{r: strings.NewReader("abc"), remaining: 3}
+	if b, err := io.ReadAll(r); string(b) != "abc" || err != nil || r.exceeded {
+		t.Fatalf("exact size: %q %v %v", b, err, r.exceeded)
 	}
 }
 

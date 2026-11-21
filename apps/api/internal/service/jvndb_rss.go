@@ -466,13 +466,15 @@ type jvndbLimitedReader struct {
 
 func (l *jvndbLimitedReader) Read(p []byte) (int, error) {
 	if l.remaining <= 0 {
+		// Probe for one more byte. Only a clean EOF ends the body; a
+		// transport error at the boundary is passed on (Codex R5).
 		var one [1]byte
-		n, _ := l.r.Read(one[:])
+		n, err := l.r.Read(one[:])
 		if n > 0 {
 			l.exceeded = true
 			return 0, errors.New("jvndb rss: body size limit exceeded")
 		}
-		return 0, io.EOF
+		return 0, err
 	}
 	if int64(len(p)) > l.remaining {
 		p = p[:l.remaining]
