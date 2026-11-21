@@ -318,13 +318,24 @@ func normaliseJVNDBItem(it jvndbRSSItem) (repository.JVNDBAdvisoryRecord, bool) 
 		seen[cve] = true
 		rec.CVEs = append(rec.CVEs, cve)
 	}
-	rec.Published = parseJVNDBTime(it.Issued)
-	rec.Modified = parseJVNDBTime(it.Modified)
-	if rec.Modified == nil {
-		rec.Modified = parseJVNDBTime(it.Date)
+	// A date more than the clock skew in the future rejects the item, in
+	// whichever field it appears (§39.2), and dc:date stands in for
+	// dcterms:modified / dcterms:issued only when that field is ABSENT: a
+	// supplied modification time that cannot be used must not be replaced
+	// by the fallback (Codex M76 integration R1 Low).
+	for _, d := range []string{it.Issued, it.Modified, it.Date} {
+		if jvndbTimeIsFuture(d) {
+			return repository.JVNDBAdvisoryRecord{}, false
+		}
 	}
-	if rec.Published == nil {
+	rec.Published = parseJVNDBTime(it.Issued)
+	if strings.TrimSpace(it.Issued) == "" {
 		rec.Published = parseJVNDBTime(it.Date)
+	}
+	if strings.TrimSpace(it.Modified) != "" {
+		rec.Modified = parseJVNDBTime(it.Modified)
+	} else {
+		rec.Modified = parseJVNDBTime(it.Date)
 	}
 	// Without a modification time the item cannot be ordered against the
 	// stored row (a stale year feed could overwrite it, or it a newer one):
@@ -382,6 +393,18 @@ const jvndbClockSkew = 24 * time.Hour
 
 // parseJVNDBTime parses a W3CDTF timestamp of the feed; nil when absent or
 // unparsable, before 1980, or more than jvndbClockSkew in the future.
+// jvndbTimeIsFuture reports whether s parses as a JVNDB date lying more
+// than jvndbClockSkew in the future.
+func jvndbTimeIsFuture(s string) bool {
+	s = strings.TrimSpace(s)
+	for _, layout := range jvndbTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.After(time.Now().Add(jvndbClockSkew))
+		}
+	}
+	return false
+}
+
 func parseJVNDBTime(s string) *time.Time {
 	s = strings.TrimSpace(s)
 	if s == "" {

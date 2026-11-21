@@ -996,3 +996,35 @@ func TestJVNDBCheckRedirect(t *testing.T) {
 		t.Errorf("one https redirect must be followed: %v", err)
 	}
 }
+
+// Codex M76 integration R1 Low: a supplied dcterms:modified that is not
+// usable (here: more than 24h in the future) must reject the item, not fall
+// back to dc:date — the fallback is only for an ABSENT modification time.
+// A future dc:date or dcterms:issued rejects the item as well (§39.2).
+func TestJVNDB_FutureDateIsNotReplacedByFallback(t *testing.T) {
+	future := time.Now().Add(72 * time.Hour).Format("2006-01-02T15:04Z07:00")
+	item := func(id, issued, modified, date string) string {
+		s := `<item rdf:about="x"><title>t</title><sec:identifier>` + id + `</sec:identifier>`
+		if issued != "" {
+			s += `<dcterms:issued>` + issued + `</dcterms:issued>`
+		}
+		if modified != "" {
+			s += `<dcterms:modified>` + modified + `</dcterms:modified>`
+		}
+		if date != "" {
+			s += `<dc:date>` + date + `</dc:date>`
+		}
+		return s + "</item>\n"
+	}
+	ok := "2026-11-02T10:00+09:00"
+	doc := jvndbDocHead +
+		item("JVNDB-2026-000001", ok, future, ok) + // future modified, valid dc:date
+		item("JVNDB-2026-000002", future, ok, ok) + // future issued
+		item("JVNDB-2026-000003", ok, ok, future) + // future dc:date
+		item("JVNDB-2026-000004", ok, "", ok) + // absent modified: dc:date fallback
+		`</rdf:RDF>`
+	got, st, err := parseAll(t, []byte(doc))
+	if err != nil || len(got) != 1 || got[0].ID != "JVNDB-2026-000004" || st.Rejected != 3 {
+		t.Fatalf("got %+v stats %+v err %v; want only JVNDB-2026-000004 kept", got, st, err)
+	}
+}
